@@ -133,3 +133,54 @@ class PaginatedResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+# --- Join / Leave / Resolve ---
+
+class JoinChatRequest(BaseModel):
+    target: str = Field(description="@username, https://t.me/channel, or https://t.me/+inviteHash")
+
+class LeaveChatRequest(BaseModel):
+    chat_id: int
+
+class ResolveRequest(BaseModel):
+    target: str = Field(description="@username, https://t.me/channel, or invite link")
+
+class ResolveResponse(BaseModel):
+    id: int | None = None
+    type: str  # user, channel, supergroup, group, chat_invite
+    title: str | None = None
+    username: str | None = None
+    members_count: int | None = None
+    description: str | None = None
+    is_joined: bool | None = None
+
+
+# --- Edit / Pin / React ---
+
+class EditMessageRequest(BaseModel):
+    chat_id: int
+    message_id: int
+    text: str
+
+class ReactRequest(BaseModel):
+    emoticon: str | None = Field(None, description="Emoji to react with, or null to remove")
+
+class ArchiveRequest(BaseModel):
+    archived: bool
+
+
+# --- Members ---
+
+class MemberResponse(BaseModel):
+    user_id: int
+    username: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    role: str  # creator, admin, member
+
+
+# --- Resolve user ---
+
+class ResolveUserRequest(BaseModel):
+    username: str

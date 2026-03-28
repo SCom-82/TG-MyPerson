@@ -1,8 +1,11 @@
 import logging
+import re
 
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from telethon.tl.types import Chat, Channel, User
+from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
+from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest, DeleteChatUserRequest
 
 from app.models import TgChat
 
@@ -119,6 +122,127 @@ async def sync_chat_list(session: AsyncSession, client) -> int:
     await session.commit()
     log.info("Synced %d chats from Telegram", count)
     return count
+
+
+def _parse_target(target: str) -> tuple[str, str]:
+    """Parse target string into (type, value).
+    Returns ('invite', hash) or ('username', username).
+    """
+    # Invite links: https://t.me/+HASH, https://t.me/joinchat/HASH, t.me/+HASH
+    invite_match = re.search(r'(?:t\.me/\+|t\.me/joinchat/)([a-zA-Z0-9_-]+)', target)
+    if invite_match:
+        return 'invite', invite_match.group(1)
+
+    # Username: @username or https://t.me/username
+    username_match = re.search(r't\.me/([a-zA-Z0-9_]+)', target)
+    if username_match:
+        return 'username', username_match.group(1)
+
+    # Plain @username or username
+    clean = target.lstrip('@').strip()
+    return 'username', clean
+
+
+async def join_chat(session: AsyncSession, client, target: str) -> TgChat:
+    """Join a channel/group by username or invite link. Returns upserted TgChat."""
+    target_type, value = _parse_target(target)
+
+    if target_type == 'invite':
+        updates = await client(ImportChatInviteRequest(value))
+        # ImportChatInviteRequest returns Updates with chats
+        entity = None
+        if hasattr(updates, 'chats') and updates.chats:
+            chat_obj = updates.chats[0]
+            entity = await client.get_entity(chat_obj.id)
+        if entity is None:
+            raise ValueError("Failed to get entity after joining via invite link")
+    else:
+        entity = await client.get_entity(value)
+        if isinstance(entity, (Channel, Chat)):
+            await client(JoinChannelRequest(entity))
+        # If it's a User (private chat), no join needed
+
+    return await upsert_chat(session, entity)
+
+
+async def leave_chat(client, chat_id: int) -> None:
+    """Leave a channel or group."""
+    entity = await client.get_entity(chat_id)
+    if isinstance(entity, Channel):
+        await client(LeaveChannelRequest(entity))
+    elif isinstance(entity, Chat):
+        me = await client.get_me()
+        await client(DeleteChatUserRequest(entity.id, me.id))
+    else:
+        raise ValueError(f"Cannot leave entity of type {type(entity).__name__}")
+
+
+async def resolve_target(client, target: str) -> dict:
+    """Resolve a target (username or invite link) without joining. Returns info dict."""
+    target_type, value = _parse_target(target)
+
+    if target_type == 'invite':
+        result = await client(CheckChatInviteRequest(value))
+        # ChatInvite or ChatInviteAlready
+        type_name = type(result).__name__
+        if type_name == 'ChatInviteAlready':
+            chat = result.chat
+            return {
+                'id': _get_chat_id(chat),
+                'type': _get_chat_type(chat),
+                'title': _get_title(chat),
+                'username': getattr(chat, 'username', None),
+                'members_count': getattr(chat, 'participants_count', None),
+                'description': getattr(chat, 'about', None),
+                'is_joined': True,
+            }
+        else:
+            # ChatInvite — not yet joined
+            return {
+                'id': None,
+                'type': 'chat_invite',
+                'title': getattr(result, 'title', None),
+                'username': None,
+                'members_count': getattr(result, 'participants_count', None),
+                'description': getattr(result, 'about', None),
+                'is_joined': False,
+            }
+    else:
+        entity = await client.get_entity(value)
+        return {
+            'id': _get_chat_id(entity) if not isinstance(entity, User) else entity.id,
+            'type': _get_chat_type(entity) if not isinstance(entity, User) else 'user',
+            'title': _get_title(entity),
+            'username': getattr(entity, 'username', None),
+            'members_count': getattr(entity, 'participants_count', None),
+            'description': getattr(entity, 'about', None),
+            'is_joined': None,
+        }
+
+
+async def get_members(client, chat_id: int, search: str | None = None, limit: int = 200) -> list[dict]:
+    """Get participants of a chat/channel."""
+    entity = await client.get_entity(chat_id)
+    participants = await client.get_participants(entity, search=search or '', limit=limit)
+
+    members = []
+    for p in participants:
+        role = 'member'
+        if hasattr(p, 'participant'):
+            part = p.participant
+            part_type = type(part).__name__
+            if 'Creator' in part_type:
+                role = 'creator'
+            elif 'Admin' in part_type:
+                role = 'admin'
+        members.append({
+            'user_id': p.id,
+            'username': p.username,
+            'first_name': p.first_name,
+            'last_name': p.last_name,
+            'role': role,
+        })
+    return members
 
 
 def _get_chat_id(entity) -> int:

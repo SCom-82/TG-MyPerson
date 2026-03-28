@@ -1,6 +1,6 @@
-# Skill: Telegram — Чтение и отправка сообщений через личный аккаунт
+# Skill: Telegram — Полное управление личным аккаунтом
 
-Ты умеешь читать и отправлять сообщения в Telegram через сервис TG-MyPerson, который подключён к личному аккаунту пользователя через MTProto.
+Ты умеешь читать, отправлять сообщения, вступать в каналы, управлять чатами и контактами в Telegram через сервис TG-MyPerson, который подключён к личному аккаунту пользователя через MTProto.
 
 ## Подключение
 
@@ -112,6 +112,114 @@ curl -s -X PATCH -H "X-API-Key: $TG_MYPERSON_API_KEY" -H "Content-Type: applicat
   -d '{"is_monitored": true}'
 ```
 
+---
+
+### Посмотреть инфу о канале/пользователе (без вступления)
+```bash
+curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" -H "Content-Type: application/json" \
+  "$TG_MYPERSON_URL/api/v1/chats/resolve" \
+  -d '{"target": "@channel_username"}'
+```
+`target` принимает: `@username`, `https://t.me/channel`, `https://t.me/+inviteHash`
+
+### Вступить в канал/группу
+```bash
+curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" -H "Content-Type: application/json" \
+  "$TG_MYPERSON_URL/api/v1/chats/join" \
+  -d '{"target": "@channel_username"}'
+```
+`target` принимает: `@username`, `https://t.me/channel`, `https://t.me/+inviteHash`
+
+### Выйти из канала/группы
+```bash
+curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" -H "Content-Type: application/json" \
+  "$TG_MYPERSON_URL/api/v1/chats/leave" \
+  -d '{"chat_id": CHAT_ID}'
+```
+
+### Участники чата
+```bash
+curl -s -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/chats/CHAT_ID/members?limit=200"
+```
+Фильтры: `search` — поиск по имени, `limit` — до 1000
+
+### Пометить чат прочитанным
+```bash
+curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/chats/CHAT_ID/read"
+```
+
+### Архивировать/разархивировать чат
+```bash
+curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" -H "Content-Type: application/json" \
+  "$TG_MYPERSON_URL/api/v1/chats/CHAT_ID/archive" \
+  -d '{"archived": true}'
+```
+
+### Редактировать сообщение
+```bash
+curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" -H "Content-Type: application/json" \
+  "$TG_MYPERSON_URL/api/v1/messages/edit" \
+  -d '{"chat_id": CHAT_ID, "message_id": MSG_ID, "text": "Новый текст"}'
+```
+
+### Отправить файл
+```bash
+curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" \
+  -F "chat_id=CHAT_ID" -F "file=@/path/to/file.pdf" -F "caption=Описание" \
+  "$TG_MYPERSON_URL/api/v1/messages/send-file"
+```
+
+### Скачать медиафайл из сообщения
+```bash
+curl -s -H "X-API-Key: $TG_MYPERSON_API_KEY" \
+  "$TG_MYPERSON_URL/api/v1/messages/CHAT_ID/MESSAGE_ID/media" -o file.bin
+```
+
+### Закрепить сообщение
+```bash
+curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/messages/CHAT_ID/MESSAGE_ID/pin"
+```
+
+### Открепить сообщение
+```bash
+curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/messages/CHAT_ID/MESSAGE_ID/unpin"
+```
+
+### Поставить реакцию
+```bash
+curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" -H "Content-Type: application/json" \
+  "$TG_MYPERSON_URL/api/v1/messages/CHAT_ID/MESSAGE_ID/react" \
+  -d '{"emoticon": "👍"}'
+```
+Для удаления реакции: `{"emoticon": null}`
+
+### Найти пользователя по username
+```bash
+curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" -H "Content-Type: application/json" \
+  "$TG_MYPERSON_URL/api/v1/users/resolve" \
+  -d '{"username": "durov"}'
+```
+
+### Заблокировать пользователя
+```bash
+curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/users/USER_ID/block"
+```
+
+### Разблокировать пользователя
+```bash
+curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/users/USER_ID/unblock"
+```
+
+### Список контактов
+```bash
+curl -s -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/contacts?limit=200"
+```
+
+### Глобальный поиск по Telegram
+```bash
+curl -s -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/search/global?q=ТЕКСТ&limit=20"
+```
+
 ## Правила поведения
 
 1. **Перед отправкой** — всегда сначала найди нужный чат через GET /chats?search=. Если чат не найден в БД, запусти POST /sync/chats и повтори поиск.
@@ -122,3 +230,8 @@ curl -s -X PATCH -H "X-API-Key: $TG_MYPERSON_API_KEY" -H "Content-Type: applicat
 6. **Rate limiting** — не делай более 3 запросов подряд. Если нужно много данных, используй пагинацию (limit/offset).
 7. **Ответы на русском** — всегда отвечай на русском языке.
 8. **Приватность** — не показывай номера телефонов пользователей, только имена и username.
+9. **Вступление в каналы** — перед join всегда делай resolve, чтобы показать пользователю инфу о канале (название, кол-во участников). Спрашивай подтверждение: "Вступить в [название] ([участников] участников)?".
+10. **Выход из чатов** — всегда спрашивай подтверждение перед leave. Показывай название чата.
+11. **Блокировка** — спрашивай подтверждение перед block/unblock.
+12. **Редактирование** — спрашивай подтверждение: "Изменить сообщение на: [новый текст]?".
+13. **Новые источники** — если нужно мониторить новый канал: resolve → подтверждение → join → sync/chats → включить мониторинг (PATCH is_monitored=true) → backfill если нужна история.
