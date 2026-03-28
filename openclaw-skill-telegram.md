@@ -7,217 +7,249 @@
 - **URL**: `${TG_MYPERSON_URL}/api/v1` (env var `TG_MYPERSON_URL`)
 - **Авторизация**: заголовок `X-API-Key: ${TG_MYPERSON_API_KEY}` (env var `TG_MYPERSON_API_KEY`)
 
-Все запросы делай через `curl` с этими параметрами:
-```bash
-curl -s -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/..."
+Все запросы делай через Python `urllib.request` (надёжнее curl для JSON):
+```python
+import json, os, urllib.request
+
+BASE = os.environ["TG_MYPERSON_URL"] + "/api/v1"
+KEY = os.environ["TG_MYPERSON_API_KEY"]
+
+def tg_api(path, method="GET", data=None):
+    """Универсальный вызов TG-MyPerson API."""
+    url = f"{BASE}{path}"
+    body = json.dumps(data).encode() if data else None
+    headers = {"X-API-Key": KEY}
+    if body:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read())
 ```
+
+Для GET-запросов с query-параметрами:
+```python
+tg_api("/chats?search=ТЕКСТ&limit=50")
+```
+
+Для POST-запросов с JSON-телом:
+```python
+tg_api("/chats/join", method="POST", data={"target": "@channel_username"})
+```
+
+> **Примечание**: curl тоже работает, но при сложных JSON (вложенные кавычки, Unicode) shell может ломать тело запроса. Python `urllib.request` работает надёжнее.
 
 ## Доступные команды
 
-### Статус подключения к Telegram
-```bash
-curl -s -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/auth/status"
+### Статус подключения
+```python
+tg_api("/auth/status")
 ```
 
 ### Список чатов
-```bash
-curl -s -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/chats?limit=50"
+```python
+tg_api("/chats?limit=50")
+tg_api("/chats?chat_type=channel&is_monitored=true")
+tg_api("/chats?search=ТЕКСТ")
 ```
-Фильтры:
-- `chat_type` — `private`, `group`, `supergroup`, `channel`
-- `search` — поиск по названию/username
-- `is_monitored` — `true`/`false`
+Фильтры: `chat_type` (private/group/supergroup/channel), `search`, `is_monitored` (true/false), `limit`, `offset`
 
-### Поиск чата по имени
-```bash
-curl -s -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/chats?search=ТЕКСТ"
-```
+### Сообщения
+```python
+# Последние сообщения из чата
+tg_api("/messages?chat_id=CHAT_ID&limit=20")
 
-### Последние сообщения из чата
-```bash
-curl -s -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/messages?chat_id=CHAT_ID&limit=20"
-```
+# Поиск по тексту
+tg_api("/messages?search=ТЕКСТ&limit=20")
 
-### Поиск сообщений по тексту
-```bash
-curl -s -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/messages?search=ТЕКСТ&limit=20"
-```
+# За период
+tg_api("/messages?chat_id=CHAT_ID&date_from=2026-03-01T00:00:00Z&date_to=2026-03-28T23:59:59Z")
 
-### Сообщения за период
-```bash
-curl -s -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/messages?chat_id=CHAT_ID&date_from=2026-03-01T00:00:00Z&date_to=2026-03-18T23:59:59Z"
-```
+# По типу: text, photo, video, document, voice, audio, sticker, animation, video_note, location, contact, poll
+tg_api("/messages?chat_id=CHAT_ID&message_type=photo")
 
-### Фильтр по типу сообщений
-```bash
-curl -s -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/messages?chat_id=CHAT_ID&message_type=photo"
-```
-Типы: `text`, `photo`, `video`, `document`, `voice`, `audio`, `sticker`, `animation`, `video_note`, `location`, `contact`, `poll`
+# Только исходящие/входящие
+tg_api("/messages?chat_id=CHAT_ID&is_outgoing=true")
 
-### Только исходящие/входящие сообщения
-```bash
-curl -s -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/messages?chat_id=CHAT_ID&is_outgoing=true"
-```
-
-### Конкретное сообщение
-```bash
-curl -s -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/messages/CHAT_ID/MESSAGE_ID"
+# Конкретное сообщение
+tg_api("/messages/CHAT_ID/MESSAGE_ID")
 ```
 
 ### Отправить сообщение
-```bash
-curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" -H "Content-Type: application/json" \
-  "$TG_MYPERSON_URL/api/v1/messages" \
-  -d '{"chat_id": CHAT_ID, "text": "Текст сообщения", "reply_to_message_id": null}'
+```python
+tg_api("/messages", "POST", {"chat_id": CHAT_ID, "text": "Текст сообщения", "reply_to_message_id": None})
 ```
 
 ### Переслать сообщение
-```bash
-curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" -H "Content-Type: application/json" \
-  "$TG_MYPERSON_URL/api/v1/messages/forward" \
-  -d '{"from_chat_id": CHAT_ID, "message_id": MSG_ID, "to_chat_id": TARGET_CHAT_ID}'
+```python
+tg_api("/messages/forward", "POST", {"from_chat_id": CHAT_ID, "message_id": MSG_ID, "to_chat_id": TARGET_CHAT_ID})
 ```
 
 ### Удалить сообщение
-```bash
-curl -s -X DELETE -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/messages/CHAT_ID/MESSAGE_ID"
+```python
+tg_api("/messages/CHAT_ID/MESSAGE_ID", method="DELETE")
+```
+
+### Редактировать сообщение
+```python
+tg_api("/messages/edit", "POST", {"chat_id": CHAT_ID, "message_id": MSG_ID, "text": "Новый текст"})
 ```
 
 ### Список пользователей
-```bash
-curl -s -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/users?search=ТЕКСТ"
-```
-
-### Обновить список чатов из Telegram
-```bash
-curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/sync/chats"
-```
-
-### Запустить загрузку истории чата (backfill)
-```bash
-curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" -H "Content-Type: application/json" \
-  "$TG_MYPERSON_URL/api/v1/sync/backfill" \
-  -d '{"chat_id": CHAT_ID, "limit": 1000}'
-```
-
-### Статус загрузки истории
-```bash
-curl -s -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/sync/status"
-```
-
-### Включить/выключить мониторинг чата
-```bash
-curl -s -X PATCH -H "X-API-Key: $TG_MYPERSON_API_KEY" -H "Content-Type: application/json" \
-  "$TG_MYPERSON_URL/api/v1/chats/CHAT_ID" \
-  -d '{"is_monitored": true}'
+```python
+tg_api("/users?search=ТЕКСТ")
 ```
 
 ---
 
 ### Посмотреть инфу о канале/пользователе (без вступления)
-```bash
-curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" -H "Content-Type: application/json" \
-  "$TG_MYPERSON_URL/api/v1/chats/resolve" \
-  -d '{"target": "@channel_username"}'
+```python
+tg_api("/chats/resolve", "POST", {"target": "@channel_username"})
 ```
 `target` принимает: `@username`, `https://t.me/channel`, `https://t.me/+inviteHash`
 
 ### Вступить в канал/группу
-```bash
-curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" -H "Content-Type: application/json" \
-  "$TG_MYPERSON_URL/api/v1/chats/join" \
-  -d '{"target": "@channel_username"}'
+```python
+tg_api("/chats/join", "POST", {"target": "@channel_username"})
 ```
-`target` принимает: `@username`, `https://t.me/channel`, `https://t.me/+inviteHash`
 
 ### Выйти из канала/группы
-```bash
-curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" -H "Content-Type: application/json" \
-  "$TG_MYPERSON_URL/api/v1/chats/leave" \
-  -d '{"chat_id": CHAT_ID}'
+```python
+tg_api("/chats/leave", "POST", {"chat_id": CHAT_ID})
+```
+
+### Включить/выключить мониторинг чата
+```python
+tg_api(f"/chats/{CHAT_ID}", method="PATCH", data={"is_monitored": True})
 ```
 
 ### Участники чата
-```bash
-curl -s -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/chats/CHAT_ID/members?limit=200"
+```python
+tg_api(f"/chats/{CHAT_ID}/members?limit=200")
 ```
 Фильтры: `search` — поиск по имени, `limit` — до 1000
 
 ### Пометить чат прочитанным
-```bash
-curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/chats/CHAT_ID/read"
+```python
+tg_api(f"/chats/{CHAT_ID}/read", "POST")
 ```
 
 ### Архивировать/разархивировать чат
-```bash
-curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" -H "Content-Type: application/json" \
-  "$TG_MYPERSON_URL/api/v1/chats/CHAT_ID/archive" \
-  -d '{"archived": true}'
-```
-
-### Редактировать сообщение
-```bash
-curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" -H "Content-Type: application/json" \
-  "$TG_MYPERSON_URL/api/v1/messages/edit" \
-  -d '{"chat_id": CHAT_ID, "message_id": MSG_ID, "text": "Новый текст"}'
+```python
+tg_api(f"/chats/{CHAT_ID}/archive", "POST", {"archived": True})
 ```
 
 ### Отправить файл
-```bash
-curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" \
-  -F "chat_id=CHAT_ID" -F "file=@/path/to/file.pdf" -F "caption=Описание" \
-  "$TG_MYPERSON_URL/api/v1/messages/send-file"
+```python
+# Для файлов используй multipart/form-data через curl:
+# curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" \
+#   -F "chat_id=CHAT_ID" -F "file=@/path/to/file.pdf" -F "caption=Описание" \
+#   "$TG_MYPERSON_URL/api/v1/messages/send-file"
 ```
 
 ### Скачать медиафайл из сообщения
-```bash
-curl -s -H "X-API-Key: $TG_MYPERSON_API_KEY" \
-  "$TG_MYPERSON_URL/api/v1/messages/CHAT_ID/MESSAGE_ID/media" -o file.bin
+```python
+# Возвращает бинарные данные файла
+# tg_api("/messages/CHAT_ID/MESSAGE_ID/media")  # → bytes
 ```
 
-### Закрепить сообщение
-```bash
-curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/messages/CHAT_ID/MESSAGE_ID/pin"
-```
-
-### Открепить сообщение
-```bash
-curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/messages/CHAT_ID/MESSAGE_ID/unpin"
+### Закрепить / открепить сообщение
+```python
+tg_api(f"/messages/{CHAT_ID}/{MESSAGE_ID}/pin", "POST")
+tg_api(f"/messages/{CHAT_ID}/{MESSAGE_ID}/unpin", "POST")
 ```
 
 ### Поставить реакцию
-```bash
-curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" -H "Content-Type: application/json" \
-  "$TG_MYPERSON_URL/api/v1/messages/CHAT_ID/MESSAGE_ID/react" \
-  -d '{"emoticon": "👍"}'
+```python
+tg_api(f"/messages/{CHAT_ID}/{MESSAGE_ID}/react", "POST", {"emoticon": "👍"})
+# Удалить реакцию:
+tg_api(f"/messages/{CHAT_ID}/{MESSAGE_ID}/react", "POST", {"emoticon": None})
 ```
-Для удаления реакции: `{"emoticon": null}`
 
 ### Найти пользователя по username
-```bash
-curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" -H "Content-Type: application/json" \
-  "$TG_MYPERSON_URL/api/v1/users/resolve" \
-  -d '{"username": "durov"}'
+```python
+tg_api("/users/resolve", "POST", {"username": "durov"})
 ```
 
-### Заблокировать пользователя
-```bash
-curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/users/USER_ID/block"
-```
-
-### Разблокировать пользователя
-```bash
-curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/users/USER_ID/unblock"
+### Заблокировать / разблокировать пользователя
+```python
+tg_api(f"/users/{USER_ID}/block", "POST")
+tg_api(f"/users/{USER_ID}/unblock", "POST")
 ```
 
 ### Список контактов
-```bash
-curl -s -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/contacts?limit=200"
+```python
+tg_api("/contacts?limit=200")
 ```
 
 ### Глобальный поиск по Telegram
-```bash
-curl -s -H "X-API-Key: $TG_MYPERSON_API_KEY" "$TG_MYPERSON_URL/api/v1/search/global?q=ТЕКСТ&limit=20"
+```python
+tg_api("/search/global?q=ТЕКСТ&limit=20")
+```
+
+### Синхронизация
+```python
+# Обновить список чатов из Telegram
+tg_api("/sync/chats", "POST")
+
+# Загрузить историю чата
+tg_api("/sync/backfill", "POST", {"chat_id": CHAT_ID, "limit": 1000})
+
+# Статус загрузки
+tg_api("/sync/status")
+```
+
+## Типичные флоу
+
+### Подключение нового источника для мониторинга
+
+Пошаговый процесс — **всегда следуй этому порядку**:
+
+```
+1. resolve  → Посмотреть инфу (без вступления)
+2. confirm  → Спросить у пользователя подтверждение
+3. join     → Вступить
+4. sync     → POST /sync/chats (чтобы чат появился в БД)
+5. monitor  → PATCH /chats/{id} {"is_monitored": true}
+6. backfill → POST /sync/backfill {"chat_id": id} (если нужна история)
+```
+
+Пример на Python:
+```python
+# 1. Resolve
+info = tg_api("/chats/resolve", "POST", {"target": "@montazhnikiokon"})
+print(f"{info['title']} — {info['members_count']} участников")
+
+# 2. Confirm → спросить пользователя
+
+# 3. Join
+chat = tg_api("/chats/join", "POST", {"target": "@montazhnikiokon"})
+
+# 4. Sync
+tg_api("/sync/chats", "POST")
+
+# 5. Monitor
+tg_api(f"/chats/{chat['id']}", method="PATCH", data={"is_monitored": True})
+# Примечание: для PATCH передавай method="PATCH" в tg_api
+
+# 6. Backfill (опционально)
+tg_api("/sync/backfill", "POST", {"chat_id": chat["id"], "limit": 1000})
+```
+
+### Отправка сообщения
+
+```
+1. Найти чат → GET /chats?search=...
+2. Если не найден → POST /sync/chats → повторить поиск
+3. Показать пользователю: "Отправить в [название]: [текст]?"
+4. POST /messages {"chat_id": id, "text": "..."}
+```
+
+### Поиск информации
+
+```
+1. GET /messages?search=ТЕКСТ  → поиск в уже загруженных
+2. Если мало результатов → GET /search/global?q=ТЕКСТ → поиск по всему Telegram
+3. Если нужна история конкретного чата → POST /sync/backfill
 ```
 
 ## Правила поведения

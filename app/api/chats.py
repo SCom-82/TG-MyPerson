@@ -35,21 +35,7 @@ async def list_chats(
     )
 
 
-@router.get("/{chat_id}", response_model=ChatResponse)
-async def get_chat_detail(chat_id: int, db: AsyncSession = Depends(get_db)):
-    chat = await get_chat(db, chat_id)
-    if chat is None:
-        raise HTTPException(status_code=404, detail="Chat not found")
-    return ChatResponse.model_validate(chat)
-
-
-@router.patch("/{chat_id}", response_model=ChatResponse)
-async def update_chat_settings(chat_id: int, req: ChatUpdateRequest, db: AsyncSession = Depends(get_db)):
-    chat = await update_chat(db, chat_id, req.is_monitored)
-    if chat is None:
-        raise HTTPException(status_code=404, detail="Chat not found")
-    return ChatResponse.model_validate(chat)
-
+# --- Конкретные пути ПЕРЕД /{chat_id} чтобы FastAPI не матчил "join" как int ---
 
 @router.post("/join", response_model=ChatResponse)
 async def join_chat_endpoint(req: JoinChatRequest, db: AsyncSession = Depends(get_db)):
@@ -88,6 +74,24 @@ async def resolve_chat_endpoint(req: ResolveRequest):
     except Exception as e:
         log.exception("Failed to resolve: %s", req.target)
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# --- Параметризованные пути ---
+
+@router.get("/{chat_id}", response_model=ChatResponse)
+async def get_chat_detail(chat_id: int, db: AsyncSession = Depends(get_db)):
+    chat = await get_chat(db, chat_id)
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return ChatResponse.model_validate(chat)
+
+
+@router.patch("/{chat_id}", response_model=ChatResponse)
+async def update_chat_settings(chat_id: int, req: ChatUpdateRequest, db: AsyncSession = Depends(get_db)):
+    chat = await update_chat(db, chat_id, req.is_monitored)
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return ChatResponse.model_validate(chat)
 
 
 @router.get("/{chat_id}/members")
