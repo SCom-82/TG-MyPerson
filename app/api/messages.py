@@ -235,20 +235,25 @@ async def send_file(
     parse_mode: Literal["markdown", "html"] | None = Form(None),
     schedule_date: datetime | None = Form(None),
     voice_note: bool = Form(False),
+    force_document: bool = Form(False),
 ):
+    """Send any file. By default auto-detects images and sends them as photos.
+    Set force_document=true to always send as a document attachment."""
     client = await _check_client()
     try:
         file_bytes = await file.read()
+        bio = io.BytesIO(file_bytes)
+        bio.name = file.filename or "file.bin"
         schedule = _to_utc(schedule_date)
         result = await client.send_file(
             entity=chat_id,
-            file=file_bytes,
+            file=bio,
             caption=caption,
             reply_to=reply_to_message_id,
-            file_name=file.filename,
             parse_mode=parse_mode,
             schedule=schedule,
             voice_note=voice_note,
+            force_document=force_document,
         )
         return {
             "status": "scheduled" if schedule else "sent",
@@ -274,13 +279,14 @@ async def send_voice(
     client = await _check_client()
     try:
         file_bytes = await file.read()
+        bio = io.BytesIO(file_bytes)
+        bio.name = file.filename or "voice.ogg"
         schedule = _to_utc(schedule_date)
         result = await client.send_file(
             entity=chat_id,
-            file=file_bytes,
+            file=bio,
             caption=caption,
             reply_to=reply_to_message_id,
-            file_name=file.filename,
             parse_mode=parse_mode,
             schedule=schedule,
             voice_note=True,
