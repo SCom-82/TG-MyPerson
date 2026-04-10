@@ -7,7 +7,7 @@ from app.database import get_db
 from app.schemas import (
     ChatResponse, ChatUpdateRequest, PaginatedResponse,
     JoinChatRequest, LeaveChatRequest, ResolveRequest, ResolveResponse,
-    MemberResponse, ArchiveRequest,
+    MemberResponse, ArchiveRequest, MyRightsResponse,
 )
 from app.services.chat_service import get_chats, get_chat, update_chat, join_chat, leave_chat, resolve_target, get_members
 from app.telegram.client import tg_bridge
@@ -134,4 +134,40 @@ async def archive_chat(chat_id: int, req: ArchiveRequest):
         return {"status": "archived" if req.archived else "unarchived", "chat_id": chat_id}
     except Exception as e:
         log.exception("Failed to archive/unarchive chat %d", chat_id)
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/{chat_id}/my_rights", response_model=MyRightsResponse)
+async def get_my_rights(chat_id: int):
+    """Return current user's permissions in the given chat/channel.
+
+    Needed before scheduled posting: only admins with post_messages right can
+    schedule posts in broadcast channels.
+    """
+    client = tg_bridge.client
+    if not client or not await client.is_user_authorized():
+        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+    try:
+        perms = await client.get_permissions(chat_id, "me")
+        raw = {}
+        try:
+            raw = perms.to_dict() if hasattr(perms, "to_dict") else {}
+        except Exception:
+            raw = {}
+        return MyRightsResponse(
+            chat_id=chat_id,
+            is_member=not bool(getattr(perms, "is_banned", False)),
+            is_admin=bool(getattr(perms, "is_admin", False)),
+            is_creator=bool(getattr(perms, "is_creator", False)),
+            can_post_messages=bool(getattr(perms, "post_messages", False)),
+            can_edit_messages=bool(getattr(perms, "edit_messages", False)),
+            can_delete_messages=bool(getattr(perms, "delete_messages", False)),
+            can_pin_messages=bool(getattr(perms, "pin_messages", False)),
+            can_add_admins=bool(getattr(perms, "add_admins", False)),
+            can_invite_users=bool(getattr(perms, "invite_users", False)),
+            can_change_info=bool(getattr(perms, "change_info", False)),
+            raw=raw,
+        )
+    except Exception as e:
+        log.exception("Failed to get permissions for chat %d", chat_id)
         raise HTTPException(status_code=400, detail=str(e))

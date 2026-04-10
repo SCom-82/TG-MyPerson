@@ -1,9 +1,15 @@
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from app.config import settings
-from app.schemas import AuthStatusResponse, LoginRequest, LoginCodeRequest, SessionImportRequest
+from app.schemas import (
+    AuthStatusResponse,
+    AuthMeResponse,
+    LoginRequest,
+    LoginCodeRequest,
+    SessionImportRequest,
+)
 from app.telegram.client import tg_bridge
 
 log = logging.getLogger(__name__)
@@ -13,6 +19,27 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 @router.get("/status", response_model=AuthStatusResponse)
 async def auth_status():
     return await tg_bridge.get_auth_status()
+
+
+@router.get("/me", response_model=AuthMeResponse)
+async def auth_me():
+    """Detailed info about the authorized user."""
+    client = tg_bridge.client
+    if not client or not await client.is_user_authorized():
+        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+    me = await client.get_me()
+    return AuthMeResponse(
+        user_id=me.id,
+        username=getattr(me, "username", None),
+        first_name=getattr(me, "first_name", None),
+        last_name=getattr(me, "last_name", None),
+        phone=getattr(me, "phone", None),
+        is_premium=bool(getattr(me, "premium", False)),
+        is_verified=bool(getattr(me, "verified", False)),
+        is_bot=bool(getattr(me, "bot", False)),
+        dc_id=getattr(me, "dc_id", None),
+        lang_code=getattr(me, "lang_code", None),
+    )
 
 
 @router.post("/login")

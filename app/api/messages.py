@@ -1,18 +1,50 @@
 import io
 import logging
-from datetime import datetime
+import os
+from datetime import datetime, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
+from telethon.tl import functions, types as tl_types
 
 from app.database import get_db
-from app.schemas import MessageResponse, SendMessageRequest, ForwardMessageRequest, PaginatedResponse, EditMessageRequest, ReactRequest
+from app.schemas import (
+    MessageResponse,
+    SendMessageRequest,
+    ForwardMessageRequest,
+    PaginatedResponse,
+    EditMessageRequest,
+    ReactRequest,
+    SendPollRequest,
+    ScheduledMessageItem,
+)
 from app.services.message_service import get_messages, get_message
 from app.telegram.client import tg_bridge
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/messages", tags=["messages"])
+
+
+def _to_utc(dt: datetime | None) -> datetime | None:
+    """Normalize datetime to UTC (Telethon expects UTC-aware datetime)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+async def _check_client():
+    client = tg_bridge.client
+    if not client or not await client.is_user_authorized():
+        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+    return client
+
+
+def _random_id() -> int:
+    return int.from_bytes(os.urandom(8), "big", signed=True)
 
 
 @router.get("", response_model=PaginatedResponse)
@@ -48,6 +80,69 @@ async def list_messages(
     )
 
 
+# --- Scheduled queue (должно быть ПЕРЕД /{chat_id}/{message_id} чтобы не поймать "scheduled" как int) ---
+
+@router.get("/scheduled")
+async def list_scheduled(chat_id: int = Query(...)):
+    """List messages scheduled for future delivery in a chat."""
+    client = await _check_client()
+    try:
+        peer = await client.get_input_entity(chat_id)
+        result = await client(functions.messages.GetScheduledHistoryRequest(peer=peer, hash=0))
+
+        items: list[ScheduledMessageItem] = []
+        for msg in getattr(result, "messages", []):
+            media_type = None
+            has_media = False
+            if getattr(msg, "media", None):
+                has_media = True
+                media_type = type(msg.media).__name__
+            items.append(
+                ScheduledMessageItem(
+                    message_id=msg.id,
+                    chat_id=chat_id,
+                    text=getattr(msg, "message", None),
+                    date=msg.date,
+                    has_media=has_media,
+                    media_type=media_type,
+                )
+            )
+        return {"items": items, "total": len(items), "chat_id": chat_id}
+    except Exception as e:
+        log.exception("Failed to list scheduled messages for chat %d", chat_id)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/scheduled/{chat_id}/{message_id}")
+async def cancel_scheduled(chat_id: int, message_id: int):
+    """Cancel a scheduled message before it is sent."""
+    client = await _check_client()
+    try:
+        peer = await client.get_input_entity(chat_id)
+        await client(
+            functions.messages.DeleteScheduledMessagesRequest(peer=peer, id=[message_id])
+        )
+        return {"status": "cancelled", "chat_id": chat_id, "message_id": message_id}
+    except Exception as e:
+        log.exception("Failed to cancel scheduled message %d in chat %d", message_id, chat_id)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/scheduled/{chat_id}/{message_id}/send-now")
+async def send_scheduled_now(chat_id: int, message_id: int):
+    """Send a scheduled message immediately (before its scheduled time)."""
+    client = await _check_client()
+    try:
+        peer = await client.get_input_entity(chat_id)
+        await client(
+            functions.messages.SendScheduledMessagesRequest(peer=peer, id=[message_id])
+        )
+        return {"status": "sent", "chat_id": chat_id, "message_id": message_id}
+    except Exception as e:
+        log.exception("Failed to send scheduled message %d in chat %d", message_id, chat_id)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/{chat_id}/{message_id}", response_model=MessageResponse)
 async def get_single_message(chat_id: int, message_id: int, db: AsyncSession = Depends(get_db)):
     msg = await get_message(db, chat_id, message_id)
@@ -56,22 +151,26 @@ async def get_single_message(chat_id: int, message_id: int, db: AsyncSession = D
     return MessageResponse.model_validate(msg)
 
 
+# --- Sending ---
+
 @router.post("")
 async def send_message(req: SendMessageRequest):
-    client = tg_bridge.client
-    if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+    client = await _check_client()
 
     try:
+        schedule = _to_utc(req.schedule_date)
         result = await client.send_message(
             entity=req.chat_id,
             message=req.text,
             reply_to=req.reply_to_message_id,
+            parse_mode=req.parse_mode,
+            schedule=schedule,
         )
         return {
-            "status": "sent",
+            "status": "scheduled" if schedule else "sent",
             "message_id": result.id,
             "chat_id": req.chat_id,
+            "schedule_date": schedule.isoformat() if schedule else None,
         }
     except Exception as e:
         log.exception("Failed to send message to chat %d", req.chat_id)
@@ -80,20 +179,25 @@ async def send_message(req: SendMessageRequest):
 
 @router.post("/forward")
 async def forward_message(req: ForwardMessageRequest):
-    client = tg_bridge.client
-    if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+    client = await _check_client()
+
+    ids = req.message_ids if req.message_ids else ([req.message_id] if req.message_id else [])
+    if not ids:
+        raise HTTPException(status_code=400, detail="Provide message_id or message_ids")
 
     try:
         result = await client.forward_messages(
             entity=req.to_chat_id,
-            messages=req.message_id,
+            messages=ids if len(ids) > 1 else ids[0],
             from_peer=req.from_chat_id,
         )
-        fwd = result[0] if isinstance(result, list) else result
+        if isinstance(result, list):
+            forwarded_ids = [m.id for m in result]
+        else:
+            forwarded_ids = [result.id]
         return {
             "status": "forwarded",
-            "message_id": fwd.id,
+            "message_ids": forwarded_ids,
             "to_chat_id": req.to_chat_id,
         }
     except Exception as e:
@@ -103,11 +207,19 @@ async def forward_message(req: ForwardMessageRequest):
 
 @router.post("/edit")
 async def edit_message(req: EditMessageRequest):
-    client = tg_bridge.client
-    if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+    client = await _check_client()
     try:
-        await client.edit_message(entity=req.chat_id, message=req.message_id, text=req.text)
+        kwargs: dict = {
+            "entity": req.chat_id,
+            "message": req.message_id,
+            "text": req.text,
+        }
+        if req.parse_mode:
+            kwargs["parse_mode"] = req.parse_mode
+        if req.scheduled:
+            # For scheduled messages Telethon needs the schedule=True hint to look in scheduled queue
+            kwargs["schedule"] = True
+        await client.edit_message(**kwargs)
         return {"status": "edited", "chat_id": req.chat_id, "message_id": req.message_id}
     except Exception as e:
         log.exception("Failed to edit message %d in chat %d", req.message_id, req.chat_id)
@@ -120,30 +232,183 @@ async def send_file(
     file: UploadFile = File(...),
     caption: str | None = Form(None),
     reply_to_message_id: int | None = Form(None),
+    parse_mode: Literal["markdown", "html"] | None = Form(None),
+    schedule_date: datetime | None = Form(None),
+    voice_note: bool = Form(False),
 ):
-    client = tg_bridge.client
-    if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+    client = await _check_client()
     try:
         file_bytes = await file.read()
+        schedule = _to_utc(schedule_date)
         result = await client.send_file(
             entity=chat_id,
             file=file_bytes,
             caption=caption,
             reply_to=reply_to_message_id,
             file_name=file.filename,
+            parse_mode=parse_mode,
+            schedule=schedule,
+            voice_note=voice_note,
         )
-        return {"status": "sent", "message_id": result.id, "chat_id": chat_id}
+        return {
+            "status": "scheduled" if schedule else "sent",
+            "message_id": result.id,
+            "chat_id": chat_id,
+            "schedule_date": schedule.isoformat() if schedule else None,
+        }
     except Exception as e:
         log.exception("Failed to send file to chat %d", chat_id)
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/send-voice")
+async def send_voice(
+    chat_id: int = Form(...),
+    file: UploadFile = File(...),
+    caption: str | None = Form(None),
+    reply_to_message_id: int | None = Form(None),
+    parse_mode: Literal["markdown", "html"] | None = Form(None),
+    schedule_date: datetime | None = Form(None),
+):
+    """Convenience wrapper: forces voice_note=True for sending as voice message."""
+    client = await _check_client()
+    try:
+        file_bytes = await file.read()
+        schedule = _to_utc(schedule_date)
+        result = await client.send_file(
+            entity=chat_id,
+            file=file_bytes,
+            caption=caption,
+            reply_to=reply_to_message_id,
+            file_name=file.filename,
+            parse_mode=parse_mode,
+            schedule=schedule,
+            voice_note=True,
+        )
+        return {
+            "status": "scheduled" if schedule else "sent",
+            "message_id": result.id,
+            "chat_id": chat_id,
+            "schedule_date": schedule.isoformat() if schedule else None,
+        }
+    except Exception as e:
+        log.exception("Failed to send voice to chat %d", chat_id)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/album")
+async def send_album(
+    chat_id: int = Form(...),
+    files: list[UploadFile] = File(...),
+    caption: str | None = Form(None),
+    reply_to_message_id: int | None = Form(None),
+    parse_mode: Literal["markdown", "html"] | None = Form(None),
+    schedule_date: datetime | None = Form(None),
+):
+    """Send multiple photos/files as a single album (media group)."""
+    client = await _check_client()
+    if len(files) < 2:
+        raise HTTPException(status_code=400, detail="Album requires at least 2 files")
+    if len(files) > 10:
+        raise HTTPException(status_code=400, detail="Album supports max 10 files")
+    try:
+        file_objects = []
+        for f in files:
+            data = await f.read()
+            bio = io.BytesIO(data)
+            bio.name = f.filename or "file"
+            file_objects.append(bio)
+
+        schedule = _to_utc(schedule_date)
+        result = await client.send_file(
+            entity=chat_id,
+            file=file_objects,
+            caption=caption,
+            reply_to=reply_to_message_id,
+            parse_mode=parse_mode,
+            schedule=schedule,
+        )
+        msg_ids = [m.id for m in result] if isinstance(result, list) else [result.id]
+        return {
+            "status": "scheduled" if schedule else "sent",
+            "message_ids": msg_ids,
+            "chat_id": chat_id,
+            "schedule_date": schedule.isoformat() if schedule else None,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("Failed to send album to chat %d", chat_id)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/poll")
+async def send_poll(req: SendPollRequest):
+    """Create a poll (regular or quiz) and send or schedule it to a chat."""
+    client = await _check_client()
+    try:
+        peer = await client.get_input_entity(req.chat_id)
+
+        answers = [
+            tl_types.PollAnswer(text=opt, option=bytes([i]))
+            for i, opt in enumerate(req.options)
+        ]
+        poll = tl_types.Poll(
+            id=0,
+            question=req.question,
+            answers=answers,
+            closed=False,
+            public_voters=not req.is_anonymous,
+            multiple_choice=req.allows_multiple,
+            quiz=req.quiz_correct_option is not None,
+        )
+
+        correct_answers = None
+        if req.quiz_correct_option is not None:
+            correct_answers = [bytes([req.quiz_correct_option])]
+
+        media = tl_types.InputMediaPoll(
+            poll=poll,
+            correct_answers=correct_answers,
+        )
+
+        schedule = _to_utc(req.schedule_date)
+        result = await client(
+            functions.messages.SendMediaRequest(
+                peer=peer,
+                media=media,
+                message="",
+                random_id=_random_id(),
+                reply_to=(
+                    tl_types.InputReplyToMessage(reply_to_msg_id=req.reply_to_message_id)
+                    if req.reply_to_message_id
+                    else None
+                ),
+                schedule_date=schedule,
+            )
+        )
+        msg_id = None
+        for upd in getattr(result, "updates", []):
+            if hasattr(upd, "id") and isinstance(getattr(upd, "id", None), int):
+                msg_id = upd.id
+                break
+            if hasattr(upd, "message") and hasattr(upd.message, "id"):
+                msg_id = upd.message.id
+                break
+        return {
+            "status": "scheduled" if schedule else "sent",
+            "message_id": msg_id,
+            "chat_id": req.chat_id,
+            "schedule_date": schedule.isoformat() if schedule else None,
+        }
+    except Exception as e:
+        log.exception("Failed to send poll to chat %d", req.chat_id)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.delete("/{chat_id}/{message_id}")
 async def delete_message(chat_id: int, message_id: int):
-    client = tg_bridge.client
-    if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+    client = await _check_client()
 
     try:
         await client.delete_messages(entity=chat_id, message_ids=[message_id])
@@ -155,9 +420,7 @@ async def delete_message(chat_id: int, message_id: int):
 
 @router.get("/{chat_id}/{message_id}/media")
 async def download_media(chat_id: int, message_id: int):
-    client = tg_bridge.client
-    if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+    client = await _check_client()
     try:
         msgs = await client.get_messages(entity=chat_id, ids=message_id)
         msg = msgs if not isinstance(msgs, list) else msgs[0] if msgs else None
@@ -168,17 +431,16 @@ async def download_media(chat_id: int, message_id: int):
         await client.download_media(msg, file=buffer)
         buffer.seek(0)
 
-        # Determine content type and filename
         content_type = "application/octet-stream"
         filename = f"media_{message_id}"
-        if hasattr(msg.media, 'document') and msg.media.document:
+        if hasattr(msg.media, "document") and msg.media.document:
             doc = msg.media.document
             content_type = doc.mime_type or content_type
             for attr in doc.attributes:
-                if hasattr(attr, 'file_name') and attr.file_name:
+                if hasattr(attr, "file_name") and attr.file_name:
                     filename = attr.file_name
                     break
-        elif hasattr(msg.media, 'photo'):
+        elif hasattr(msg.media, "photo"):
             content_type = "image/jpeg"
             filename = f"photo_{message_id}.jpg"
 
@@ -195,12 +457,10 @@ async def download_media(chat_id: int, message_id: int):
 
 
 @router.post("/{chat_id}/{message_id}/pin")
-async def pin_message(chat_id: int, message_id: int):
-    client = tg_bridge.client
-    if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+async def pin_message(chat_id: int, message_id: int, notify: bool = Query(True)):
+    client = await _check_client()
     try:
-        await client.pin_message(entity=chat_id, message=message_id)
+        await client.pin_message(entity=chat_id, message=message_id, notify=notify)
         return {"status": "pinned", "chat_id": chat_id, "message_id": message_id}
     except Exception as e:
         log.exception("Failed to pin message %d in chat %d", message_id, chat_id)
@@ -209,9 +469,7 @@ async def pin_message(chat_id: int, message_id: int):
 
 @router.post("/{chat_id}/{message_id}/unpin")
 async def unpin_message(chat_id: int, message_id: int):
-    client = tg_bridge.client
-    if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+    client = await _check_client()
     try:
         await client.unpin_message(entity=chat_id, message=message_id)
         return {"status": "unpinned", "chat_id": chat_id, "message_id": message_id}
@@ -222,20 +480,25 @@ async def unpin_message(chat_id: int, message_id: int):
 
 @router.post("/{chat_id}/{message_id}/react")
 async def react_to_message(chat_id: int, message_id: int, req: ReactRequest):
-    client = tg_bridge.client
-    if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+    client = await _check_client()
     try:
-        from telethon.tl.functions.messages import SendReactionRequest
-        from telethon.tl.types import ReactionEmoji
-
-        reaction = [ReactionEmoji(emoticon=req.emoticon)] if req.emoticon else []
-        await client(SendReactionRequest(
-            peer=chat_id,
-            msg_id=message_id,
-            reaction=reaction,
-        ))
-        return {"status": "reacted" if req.emoticon else "reaction_removed", "chat_id": chat_id, "message_id": message_id}
+        peer = await client.get_input_entity(chat_id)
+        reaction: list = []
+        if req.emoticon:
+            reaction = [tl_types.ReactionEmoji(emoticon=req.emoticon)]
+        await client(
+            functions.messages.SendReactionRequest(
+                peer=peer,
+                msg_id=message_id,
+                reaction=reaction,
+            )
+        )
+        return {
+            "status": "reacted" if req.emoticon else "unreacted",
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "emoticon": req.emoticon,
+        }
     except Exception as e:
         log.exception("Failed to react to message %d in chat %d", message_id, chat_id)
         raise HTTPException(status_code=400, detail=str(e))

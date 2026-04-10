@@ -43,6 +43,14 @@ tg_api("/chats/join", method="POST", data={"target": "@channel_username"})
 ### Статус подключения
 ```python
 tg_api("/auth/status")
+# → {"connected": bool, "phone_number": "...", "user_id": ..., "username": "..."}
+```
+
+### Подробная инфа о текущем юзере
+```python
+tg_api("/auth/me")
+# → {"user_id", "username", "first_name", "last_name", "phone",
+#     "is_premium", "is_verified", "is_bot", "dc_id", "lang_code"}
 ```
 
 ### Список чатов
@@ -76,8 +84,25 @@ tg_api("/messages/CHAT_ID/MESSAGE_ID")
 
 ### Отправить сообщение
 ```python
-tg_api("/messages", "POST", {"chat_id": CHAT_ID, "text": "Текст сообщения", "reply_to_message_id": None})
+tg_api("/messages", "POST", {"chat_id": CHAT_ID, "text": "Текст сообщения"})
+
+# С Markdown/HTML разметкой
+tg_api("/messages", "POST", {
+    "chat_id": CHAT_ID,
+    "text": "**жирный** и _курсив_",
+    "parse_mode": "markdown",  # или "html"
+})
+
+# Отложенное сообщение (schedule_date — ISO8601 UTC или с timezone)
+tg_api("/messages", "POST", {
+    "chat_id": CHAT_ID,
+    "text": "Отправится автоматически",
+    "schedule_date": "2026-04-13T07:00:00+00:00",  # 11:00 по Самаре = 07:00 UTC
+})
+# Ответ: {"status": "scheduled", "message_id": ..., "schedule_date": "..."}
 ```
+
+**Важно:** отложенные сообщения в каналы можно создавать только если юзер-аккаунт админ с правом post_messages. Проверь заранее через `GET /chats/{id}/my_rights`.
 
 ### Переслать сообщение
 ```python
@@ -92,6 +117,36 @@ tg_api("/messages/CHAT_ID/MESSAGE_ID", method="DELETE")
 ### Редактировать сообщение
 ```python
 tg_api("/messages/edit", "POST", {"chat_id": CHAT_ID, "message_id": MSG_ID, "text": "Новый текст"})
+
+# С parse_mode
+tg_api("/messages/edit", "POST", {
+    "chat_id": CHAT_ID,
+    "message_id": MSG_ID,
+    "text": "**Обновлённый** текст",
+    "parse_mode": "markdown",
+})
+
+# Редактирование отложенного (ещё не отправленного) сообщения
+tg_api("/messages/edit", "POST", {
+    "chat_id": CHAT_ID,
+    "message_id": MSG_ID,
+    "text": "Новый текст",
+    "scheduled": True,
+})
+```
+
+### Очередь отложенных сообщений
+
+```python
+# Список запланированных в чате
+tg_api(f"/messages/scheduled?chat_id={CHAT_ID}")
+# → {"items": [{"message_id", "date", "text", "has_media", ...}], "total": N}
+
+# Отменить отложенное сообщение
+tg_api(f"/messages/scheduled/{CHAT_ID}/{MSG_ID}", method="DELETE")
+
+# Отправить отложенное немедленно (до наступления schedule_date)
+tg_api(f"/messages/scheduled/{CHAT_ID}/{MSG_ID}/send-now", method="POST")
 ```
 
 ### Список пользователей
@@ -138,12 +193,68 @@ tg_api(f"/chats/{CHAT_ID}/read", "POST")
 tg_api(f"/chats/{CHAT_ID}/archive", "POST", {"archived": True})
 ```
 
-### Отправить файл
+### Права юзера в чате (важно перед scheduled-постингом)
 ```python
-# Для файлов используй multipart/form-data через curl:
-# curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" \
-#   -F "chat_id=CHAT_ID" -F "file=@/path/to/file.pdf" -F "caption=Описание" \
-#   "$TG_MYPERSON_URL/api/v1/messages/send-file"
+tg_api(f"/chats/{CHAT_ID}/my_rights")
+# → {"is_member", "is_admin", "is_creator",
+#    "can_post_messages", "can_edit_messages", "can_delete_messages",
+#    "can_pin_messages", "can_add_admins", "can_invite_users", "can_change_info",
+#    "raw": {...}}
+```
+Для публикации отложенных постов в канал юзер должен быть `is_admin=true` с `can_post_messages=true`.
+
+### Отправить файл / фото
+```bash
+curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" \
+  -F "chat_id=CHAT_ID" \
+  -F "file=@/path/to/file.pdf" \
+  -F "caption=Описание" \
+  -F "parse_mode=markdown" \
+  -F "schedule_date=2026-04-13T07:00:00+00:00" \
+  "$TG_MYPERSON_URL/api/v1/messages/send-file"
+```
+Параметры Form-body: `chat_id`, `file`, `caption`, `reply_to_message_id`, `parse_mode` (markdown/html), `schedule_date` (ISO8601), `voice_note` (bool, false по умолчанию).
+
+### Отправить голосовое сообщение
+```bash
+curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" \
+  -F "chat_id=CHAT_ID" \
+  -F "file=@/path/to/voice.ogg" \
+  "$TG_MYPERSON_URL/api/v1/messages/send-voice"
+```
+Convenience-обёртка — отправляет файл как voice note (ogg/opus).
+
+### Отправить альбом (несколько фото/файлов одной группой)
+```bash
+curl -s -X POST -H "X-API-Key: $TG_MYPERSON_API_KEY" \
+  -F "chat_id=CHAT_ID" \
+  -F "files=@/path/to/1.jpg" \
+  -F "files=@/path/to/2.jpg" \
+  -F "files=@/path/to/3.jpg" \
+  -F "caption=Общая подпись к альбому" \
+  -F "schedule_date=2026-04-13T07:00:00+00:00" \
+  "$TG_MYPERSON_URL/api/v1/messages/album"
+```
+От 2 до 10 файлов. Все пойдут одной media group.
+
+### Отправить опрос / викторину
+```python
+tg_api("/messages/poll", "POST", {
+    "chat_id": CHAT_ID,
+    "question": "Какой вариант вам ближе?",
+    "options": ["Вариант А", "Вариант Б", "Вариант В"],
+    "is_anonymous": True,
+    "allows_multiple": False,
+    "schedule_date": None,  # или ISO8601 для отложенного
+})
+
+# Викторина (quiz)
+tg_api("/messages/poll", "POST", {
+    "chat_id": CHAT_ID,
+    "question": "Сколько будет 2+2?",
+    "options": ["3", "4", "5"],
+    "quiz_correct_option": 1,  # индекс правильного ответа
+})
 ```
 
 ### Скачать медиафайл из сообщения

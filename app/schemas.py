@@ -1,6 +1,10 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
+
+
+ParseMode = Literal["markdown", "html"]
 
 
 # --- Auth ---
@@ -10,6 +14,18 @@ class AuthStatusResponse(BaseModel):
     phone_number: str | None = None
     user_id: int | None = None
     username: str | None = None
+
+class AuthMeResponse(BaseModel):
+    user_id: int
+    username: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    phone: str | None = None
+    is_premium: bool = False
+    is_verified: bool = False
+    is_bot: bool = False
+    dc_id: int | None = None
+    lang_code: str | None = None
 
 class LoginRequest(BaseModel):
     phone_number: str
@@ -58,6 +74,20 @@ class ChatResponse(BaseModel):
 class ChatUpdateRequest(BaseModel):
     is_monitored: bool
 
+class MyRightsResponse(BaseModel):
+    chat_id: int
+    is_member: bool = False
+    is_admin: bool = False
+    is_creator: bool = False
+    can_post_messages: bool = False
+    can_edit_messages: bool = False
+    can_delete_messages: bool = False
+    can_pin_messages: bool = False
+    can_add_admins: bool = False
+    can_invite_users: bool = False
+    can_change_info: bool = False
+    raw: dict | None = None
+
 
 # --- Media ---
 
@@ -101,11 +131,44 @@ class SendMessageRequest(BaseModel):
     chat_id: int
     text: str
     reply_to_message_id: int | None = None
+    parse_mode: ParseMode | None = None
+    schedule_date: datetime | None = Field(
+        default=None,
+        description="If set, message is scheduled for this UTC datetime instead of sent immediately",
+    )
 
 class ForwardMessageRequest(BaseModel):
     from_chat_id: int
-    message_id: int
     to_chat_id: int
+    message_id: int | None = None
+    message_ids: list[int] | None = Field(
+        default=None,
+        description="Batch forward. If provided, overrides message_id",
+    )
+
+class SendPollRequest(BaseModel):
+    chat_id: int
+    question: str
+    options: list[str] = Field(min_length=2, max_length=10)
+    is_anonymous: bool = True
+    allows_multiple: bool = False
+    quiz_correct_option: int | None = Field(
+        default=None,
+        description="If set, poll is a quiz; index of correct answer",
+    )
+    schedule_date: datetime | None = None
+    reply_to_message_id: int | None = None
+
+
+# --- Scheduled messages ---
+
+class ScheduledMessageItem(BaseModel):
+    message_id: int
+    chat_id: int
+    text: str | None = None
+    date: datetime
+    has_media: bool = False
+    media_type: str | None = None
 
 
 # --- Sync ---
@@ -162,6 +225,11 @@ class EditMessageRequest(BaseModel):
     chat_id: int
     message_id: int
     text: str
+    parse_mode: ParseMode | None = None
+    scheduled: bool = Field(
+        default=False,
+        description="True if editing a scheduled (not yet sent) message",
+    )
 
 class ReactRequest(BaseModel):
     emoticon: str | None = Field(None, description="Emoji to react with, or null to remove")
