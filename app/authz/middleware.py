@@ -34,6 +34,15 @@ _SKIP_PATHS = {
     "/redoc",
 }
 
+# Paths that must be excluded from audit_log and tool_authz warnings.
+# Health/readiness probes are infra-level — not user-facing tools.
+# Docs/schema paths never start with /api/ so they're already excluded
+# by the startswith("/api/") guard, but listed here for clarity.
+_HEALTH_PATHS = {
+    "/api/v1/healthz",
+    "/api/v1/readyz",
+}
+
 # Simple in-memory alias cache: {alias: (account_id, expiry_time)}
 _alias_cache: dict[str, tuple[int, float]] = {}
 _CACHE_TTL = 60.0  # seconds
@@ -166,8 +175,14 @@ async def tool_authz_middleware(request: Request, call_next):
     request.state.tool_is_write = False
 
     if tool_name is None or tool_name not in (READ_ONLY_TOOLS | WRITE_TOOLS):
-        # Unknown tool — log warning, pass through (don't break new endpoints)
-        if tool_name is not None and request.url.path.startswith("/api/"):
+        # Unknown tool — log warning, pass through (don't break new endpoints).
+        # Health/readiness probes are intentionally not in the tool catalog;
+        # suppress the warning for them to avoid log pollution.
+        if (
+            tool_name is not None
+            and request.url.path.startswith("/api/")
+            and request.url.path not in _HEALTH_PATHS
+        ):
             log.warning("tool_authz: unknown tool '%s' at %s", tool_name, request.url.path)
         return await call_next(request)
 
@@ -268,8 +283,12 @@ async def audit_log_middleware(request: Request, call_next):
     """
     response = await call_next(request)
 
-    # Skip non-API paths
+    # Skip non-API paths (docs, redoc, openapi.json, etc.)
     if not request.url.path.startswith("/api/"):
+        return response
+
+    # Skip health/readiness probes — infra-level, not user actions
+    if request.url.path in _HEALTH_PATHS:
         return response
 
     tool_name = getattr(request.state, "tool_name", "unknown")
