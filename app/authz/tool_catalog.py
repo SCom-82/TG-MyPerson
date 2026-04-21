@@ -39,6 +39,9 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "sync_status",
     # stream
     "stream_messages",
+    # snapshots reads (Phase 3)
+    "list_chat_snapshots",
+    "get_snapshot_members",
 })
 
 WRITE_TOOLS: frozenset[str] = frozenset({
@@ -73,6 +76,9 @@ WRITE_TOOLS: frozenset[str] = frozenset({
     # sync writes (call Telegram APIs, mutate DB)
     "sync_chats",
     "trigger_backfill",
+    # snapshots writes (Phase 3)
+    "snapshot_chat_members",
+    "snapshot_import_members",
 })
 
 # All known tool names (for validation)

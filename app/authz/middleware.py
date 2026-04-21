@@ -34,6 +34,9 @@ _SKIP_PATHS = {
     "/redoc",
 }
 
+# Admin path prefix — authenticated via X-Admin-Key, not X-API-Key + alias
+_ADMIN_PREFIX = "/api/v1/accounts"
+
 # Paths that must be excluded from audit_log and tool_authz warnings.
 # Health/readiness probes are infra-level — not user-facing tools.
 # Docs/schema paths never start with /api/ so they're already excluded
@@ -52,6 +55,41 @@ _CACHE_TTL = 60.0  # seconds
 # Middleware 1: resolve_alias
 # ---------------------------------------------------------------------------
 
+async def admin_auth_middleware(request: Request, call_next):
+    """Guard /api/v1/accounts/* with X-Admin-Key.
+
+    - If admin_api_key is empty in settings → 503 (misconfigured).
+    - If header missing or wrong → 401.
+    - Admin paths bypass resolve_alias / tool_authz entirely.
+    - audit_log is still written (account_id=None, alias=None, tool=<endpoint name>).
+    """
+    from app.config import settings as cfg
+
+    if not request.url.path.startswith(_ADMIN_PREFIX):
+        return await call_next(request)
+
+    # Mark as admin path so downstream middleware skips alias/tool checks
+    request.state.is_admin_path = True
+    request.state.session_alias = None
+    request.state.account_id = None
+    request.state.tool_is_write = True  # admin ops are "write" for audit purposes
+
+    if not cfg.admin_api_key:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "admin API key not configured on server"},
+        )
+
+    provided = request.headers.get("x-admin-key")
+    if not provided or provided != cfg.admin_api_key:
+        return JSONResponse(
+            status_code=401,
+            content={"error": "admin key required"},
+        )
+
+    return await call_next(request)
+
+
 async def resolve_alias_middleware(request: Request, call_next):
     """Resolve X-Session-Alias header (or ?session= query) to an account.
 
@@ -60,6 +98,10 @@ async def resolve_alias_middleware(request: Request, call_next):
     - Returns 404 if alias not found or disabled
     - Default alias = 'work' (backwards compat)
     """
+    # Skip admin paths — already handled by admin_auth_middleware
+    if getattr(request.state, "is_admin_path", False):
+        return await call_next(request)
+
     if request.url.path in _SKIP_PATHS:
         request.state.session_alias = "work"
         request.state.account_id = None
@@ -166,7 +208,11 @@ async def tool_authz_middleware(request: Request, call_next):
     - Reads accounts.mode for current account_id
     - Returns 403 if write tool called on ro account
     - Also checks account_tool_policy (deny > allow > mode default)
+    - Admin paths are skipped entirely (handled by admin_auth_middleware)
     """
+    # Skip admin paths
+    if getattr(request.state, "is_admin_path", False):
+        return await call_next(request)
     # Resolve tool name by matching route manually (scope["route"] not yet set)
     tool_name: str | None = _resolve_route_name(request)
 

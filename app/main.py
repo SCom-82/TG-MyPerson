@@ -7,6 +7,7 @@ from starlette.responses import JSONResponse
 
 from app.api.router import api_router
 from app.authz.middleware import (
+    admin_auth_middleware,
     audit_log_middleware,
     resolve_alias_middleware,
     tool_authz_middleware,
@@ -80,16 +81,22 @@ async def resolve_alias_mw(request, call_next):
 
 
 @app.middleware("http")
+async def admin_auth_mw(request, call_next):
+    return await admin_auth_middleware(request, call_next)
+
+
+@app.middleware("http")
 async def auth_and_https_middleware(request, call_next):
     # Trust X-Forwarded-Proto from Traefik
     if request.headers.get("x-forwarded-proto") == "https":
         request.scope["scheme"] = "https"
 
-    # API key check
+    # API key check — skip for public paths and admin paths (admin uses X-Admin-Key)
     if settings.api_key and request.url.path not in PUBLIC_PATHS:
-        api_key = request.headers.get("x-api-key") or request.query_params.get("api_key")
-        if api_key != settings.api_key:
-            return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
+        if not request.url.path.startswith("/api/v1/accounts"):
+            api_key = request.headers.get("x-api-key") or request.query_params.get("api_key")
+            if api_key != settings.api_key:
+                return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
 
     return await call_next(request)
 

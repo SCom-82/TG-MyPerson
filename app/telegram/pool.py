@@ -159,20 +159,69 @@ class TelegramClientPool:
                 log.warning("Pool: error stopping session '%s': %s", alias, exc)
             del self._pool[alias]
 
+    async def stop_alias(self, alias: str) -> None:
+        """Stop session for alias and remove from pool (Phase 3: called on account disable).
+
+        Thread-safe via alias lock. No-op if alias not in pool.
+        """
+        async with self._alias_lock(alias):
+            if alias in self._pool:
+                try:
+                    await self._pool[alias].stop()
+                except Exception as exc:
+                    log.warning("Pool: error stopping session '%s' via stop_alias: %s", alias, exc)
+                del self._pool[alias]
+                log.info("Pool: session '%s' stopped and removed via stop_alias", alias)
+
+    async def reload_account(self, alias: str) -> TelegramSession:
+        """Stop alias session, reload fresh account data from DB, lazy-start again.
+
+        Used when session_string or critical account params change.
+        """
+        async with self._alias_lock(alias):
+            # Stop and remove existing session
+            if alias in self._pool:
+                try:
+                    await self._pool[alias].stop()
+                except Exception as exc:
+                    log.warning("Pool: error stopping '%s' during reload: %s", alias, exc)
+                del self._pool[alias]
+
+        # get() will lazy-start from fresh DB data (re-reads account + session)
+        return await self.get(alias)
+
     async def restart(self, alias: str) -> TelegramSession:
         """Stop, remove and re-start a session."""
         await self.stop(alias)
         return await self.get(alias)
 
     def pool_status(self) -> list[dict]:
-        """Return status of all sessions (for /accounts/pool_status endpoint in Phase 3)."""
+        """Return status of all sessions in pool.
+
+        Includes last_started_at (ISO timestamp string or None) and
+        last_error for Phase 3 /accounts list endpoint.
+        """
+        import time as _time
+        from datetime import datetime, timezone
+
         result = []
         for alias, session in self._pool.items():
+            last_started_at_raw = session.last_started_at
+            last_started_at_iso: str | None = None
+            if last_started_at_raw is not None:
+                try:
+                    last_started_at_iso = datetime.fromtimestamp(
+                        last_started_at_raw, tz=timezone.utc
+                    ).isoformat()
+                except Exception:
+                    pass
+
             result.append({
                 "alias": alias,
                 "is_running": session.is_running,
                 "last_error": session.last_error,
-                "last_started_at": session.last_started_at,
+                "last_started_at": last_started_at_raw,  # float or None (raw)
+                "last_started_at_iso": last_started_at_iso,  # ISO string for API responses
             })
         return result
 
