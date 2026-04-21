@@ -210,8 +210,10 @@ async def tool_authz_middleware(request: Request, call_next):
     - Also checks account_tool_policy (deny > allow > mode default)
     - Admin paths are skipped entirely (handled by admin_auth_middleware)
     """
-    # Skip admin paths
+    # Skip admin paths — but still resolve and store route name for audit_log.
+    # tool_is_write is already set to True by admin_auth_middleware; leave it.
     if getattr(request.state, "is_admin_path", False):
+        request.state.tool_name = _resolve_route_name(request) or "unknown"
         return await call_next(request)
     # Resolve tool name by matching route manually (scope["route"] not yet set)
     tool_name: str | None = _resolve_route_name(request)
