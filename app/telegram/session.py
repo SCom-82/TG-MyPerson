@@ -1,7 +1,7 @@
 """TelegramSession — per-alias Telethon client instance.
 
-Replaces TelegramBridge singleton. Each account (alias) gets its own instance
-initialized from account_sessions table, not from env vars.
+Each account (alias) gets its own instance initialized from the
+account_sessions table (multi-account architecture, Phase 1+).
 """
 
 import asyncio

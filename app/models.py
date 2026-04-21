@@ -118,23 +118,6 @@ class TgMedia(Base):
     message: Mapped["TgMessage"] = relationship("TgMessage", back_populates="media")
 
 
-class TgSession(Base):
-    # DEPRECATED — dropped in migration 003 (Phase 4 of multi-account refactor).
-    # Data migrated to accounts + account_sessions in migration 002.
-    __tablename__ = "tg_session"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    session_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
-    session_string: Mapped[str] = mapped_column(Text, nullable=False)
-    phone_number: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    last_connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
-    )
-
-
 class TgSyncState(Base):
     __tablename__ = "tg_sync_state"
 
