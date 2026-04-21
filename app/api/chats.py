@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -10,7 +10,7 @@ from app.schemas import (
     MemberResponse, ArchiveRequest, MyRightsResponse,
 )
 from app.services.chat_service import get_chats, get_chat, update_chat, join_chat, leave_chat, resolve_target, get_members
-from app.telegram.client import tg_bridge
+from app.telegram.pool import require_authorized_client
 
 log = logging.getLogger(__name__)
 
@@ -38,10 +38,8 @@ async def list_chats(
 # --- Конкретные пути ПЕРЕД /{chat_id} чтобы FastAPI не матчил "join" как int ---
 
 @router.post("/join", response_model=ChatResponse)
-async def join_chat_endpoint(req: JoinChatRequest, db: AsyncSession = Depends(get_db)):
-    client = tg_bridge.client
-    if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+async def join_chat_endpoint(req: JoinChatRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    client = await require_authorized_client(request)
     try:
         db_chat = await join_chat(db, client, req.target)
         return ChatResponse.model_validate(db_chat)
@@ -51,10 +49,8 @@ async def join_chat_endpoint(req: JoinChatRequest, db: AsyncSession = Depends(ge
 
 
 @router.post("/leave")
-async def leave_chat_endpoint(req: LeaveChatRequest):
-    client = tg_bridge.client
-    if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+async def leave_chat_endpoint(req: LeaveChatRequest, request: Request):
+    client = await require_authorized_client(request)
     try:
         await leave_chat(client, req.chat_id)
         return {"status": "left", "chat_id": req.chat_id}
@@ -64,10 +60,8 @@ async def leave_chat_endpoint(req: LeaveChatRequest):
 
 
 @router.post("/resolve", response_model=ResolveResponse)
-async def resolve_chat_endpoint(req: ResolveRequest):
-    client = tg_bridge.client
-    if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+async def resolve_chat_endpoint(req: ResolveRequest, request: Request):
+    client = await require_authorized_client(request)
     try:
         info = await resolve_target(client, req.target)
         return ResolveResponse(**info)
@@ -97,12 +91,11 @@ async def update_chat_settings(chat_id: int, req: ChatUpdateRequest, db: AsyncSe
 @router.get("/{chat_id}/members")
 async def list_members(
     chat_id: int,
+    request: Request,
     search: str | None = Query(None),
     limit: int = Query(200, ge=1, le=1000),
 ):
-    client = tg_bridge.client
-    if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+    client = await require_authorized_client(request)
     try:
         members = await get_members(client, chat_id, search=search, limit=limit)
         return {"items": [MemberResponse(**m) for m in members], "total": len(members)}
@@ -112,10 +105,8 @@ async def list_members(
 
 
 @router.post("/{chat_id}/read")
-async def mark_read(chat_id: int):
-    client = tg_bridge.client
-    if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+async def mark_read(chat_id: int, request: Request):
+    client = await require_authorized_client(request)
     try:
         await client.send_read_acknowledge(entity=chat_id)
         return {"status": "read", "chat_id": chat_id}
@@ -125,10 +116,8 @@ async def mark_read(chat_id: int):
 
 
 @router.post("/{chat_id}/archive")
-async def archive_chat(chat_id: int, req: ArchiveRequest):
-    client = tg_bridge.client
-    if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+async def archive_chat(chat_id: int, req: ArchiveRequest, request: Request):
+    client = await require_authorized_client(request)
     try:
         await client.edit_folder(entity=chat_id, folder=1 if req.archived else 0)
         return {"status": "archived" if req.archived else "unarchived", "chat_id": chat_id}
@@ -138,15 +127,9 @@ async def archive_chat(chat_id: int, req: ArchiveRequest):
 
 
 @router.get("/{chat_id}/my_rights", response_model=MyRightsResponse)
-async def get_my_rights(chat_id: int):
-    """Return current user's permissions in the given chat/channel.
-
-    Needed before scheduled posting: only admins with post_messages right can
-    schedule posts in broadcast channels.
-    """
-    client = tg_bridge.client
-    if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+async def get_my_rights(chat_id: int, request: Request):
+    """Return current user's permissions in the given chat/channel."""
+    client = await require_authorized_client(request)
     try:
         perms = await client.get_permissions(chat_id, "me")
         raw = {}

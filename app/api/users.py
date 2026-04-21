@@ -1,12 +1,12 @@
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.schemas import UserResponse, PaginatedResponse, ResolveUserRequest, ResolveResponse
 from app.services.user_service import get_users, upsert_user
-from app.telegram.client import tg_bridge
+from app.telegram.pool import require_authorized_client
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/users", tags=["users"])
@@ -29,17 +29,14 @@ async def list_users(
 
 
 @router.post("/resolve", response_model=ResolveResponse)
-async def resolve_user(req: ResolveUserRequest, db: AsyncSession = Depends(get_db)):
-    client = tg_bridge.client
-    if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+async def resolve_user(req: ResolveUserRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    client = await require_authorized_client(request)
     try:
         from telethon.tl.types import User, Channel, Chat
 
         username = req.username.lstrip('@').strip()
         entity = await client.get_entity(username)
 
-        # If it's a User, upsert to DB
         if isinstance(entity, User):
             await upsert_user(db, entity)
             return ResolveResponse(
@@ -80,10 +77,8 @@ async def resolve_user(req: ResolveUserRequest, db: AsyncSession = Depends(get_d
 
 
 @router.post("/{user_id}/block")
-async def block_user(user_id: int):
-    client = tg_bridge.client
-    if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+async def block_user(user_id: int, request: Request):
+    client = await require_authorized_client(request)
     try:
         from telethon.tl.functions.contacts import BlockRequest
         await client(BlockRequest(id=user_id))
@@ -94,10 +89,8 @@ async def block_user(user_id: int):
 
 
 @router.post("/{user_id}/unblock")
-async def unblock_user(user_id: int):
-    client = tg_bridge.client
-    if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+async def unblock_user(user_id: int, request: Request):
+    client = await require_authorized_client(request)
     try:
         from telethon.tl.functions.contacts import UnblockRequest
         await client(UnblockRequest(id=user_id))

@@ -9,8 +9,6 @@ from app.database import async_session
 from app.models import TgChat, TgSyncState
 from app.services.chat_service import upsert_chat
 from app.services.message_service import upsert_message
-from app.telegram.client import tg_bridge
-
 log = logging.getLogger(__name__)
 
 # Track running backfill tasks
@@ -22,23 +20,27 @@ def is_backfill_running(chat_id: int) -> bool:
     return task is not None and not task.done()
 
 
-async def start_backfill(chat_id: int, limit: int = 1000) -> dict:
+async def start_backfill(chat_id: int, limit: int = 1000, alias: str = "work") -> dict:
     """Start a background backfill for a given chat."""
     if is_backfill_running(chat_id):
         return {"status": "already_running", "chat_id": chat_id}
 
-    client = tg_bridge.client
+    from app.telegram.pool import pool
+    tg_session = await pool.get(alias)
+    client = tg_session.client
     if not client or not await client.is_user_authorized():
-        return {"status": "error", "detail": "Telegram client not authorized"}
+        return {"status": "error", "detail": f"Session '{alias}' not authorized"}
 
-    task = asyncio.create_task(_run_backfill(chat_id, limit))
+    task = asyncio.create_task(_run_backfill(chat_id, limit, alias))
     _backfill_tasks[chat_id] = task
     return {"status": "started", "chat_id": chat_id, "limit": limit}
 
 
-async def _run_backfill(chat_id: int, limit: int) -> None:
+async def _run_backfill(chat_id: int, limit: int, alias: str = "work") -> None:
     """Background task: fetch history from Telegram and save to DB."""
-    client = tg_bridge.client
+    from app.telegram.pool import pool
+    tg_session = await pool.get(alias)
+    client = tg_session.client
     if not client:
         return
 

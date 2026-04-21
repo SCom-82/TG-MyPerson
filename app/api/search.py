@@ -1,8 +1,8 @@
 import logging
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
-from app.telegram.client import tg_bridge
+from app.telegram.pool import require_authorized_client
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/search", tags=["search"])
@@ -10,12 +10,11 @@ router = APIRouter(prefix="/search", tags=["search"])
 
 @router.get("/global")
 async def search_global(
+    request: Request,
     q: str = Query(..., description="Search query"),
     limit: int = Query(20, ge=1, le=100),
 ):
-    client = tg_bridge.client
-    if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+    client = await require_authorized_client(request)
 
     try:
         from telethon.tl.functions.messages import SearchGlobalRequest
@@ -33,7 +32,6 @@ async def search_global(
         ))
 
         messages = []
-        # Build a lookup for chats and users from the result
         chats_map = {}
         users_map = {}
         for c in getattr(result, 'chats', []):

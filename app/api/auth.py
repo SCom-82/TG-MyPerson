@@ -1,8 +1,11 @@
 import logging
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query, Request
+from sqlalchemy import select
 
-from app.config import settings
+from app.database import async_session
+from app.models import Account, AccountSession
 from app.schemas import (
     AuthStatusResponse,
     AuthMeResponse,
@@ -10,23 +13,28 @@ from app.schemas import (
     LoginCodeRequest,
     SessionImportRequest,
 )
-from app.telegram.client import tg_bridge
+from app.telegram.pool import pool
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+_DEFAULT_ALIAS = "work"
+
 
 @router.get("/status", response_model=AuthStatusResponse)
-async def auth_status():
-    return await tg_bridge.get_auth_status()
+async def auth_status(request: Request, session: str = Query(_DEFAULT_ALIAS)):
+    alias = request.query_params.get("session", session)
+    tg_session = await pool.get(alias)
+    return await tg_session.get_auth_status()
 
 
 @router.get("/me", response_model=AuthMeResponse)
-async def auth_me():
-    """Detailed info about the authorized user."""
-    client = tg_bridge.client
+async def auth_me(request: Request, session: str = Query(_DEFAULT_ALIAS)):
+    alias = getattr(request.state, "session_alias", session)
+    tg_session = await pool.get(alias)
+    client = tg_session.client
     if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+        raise HTTPException(status_code=503, detail=f"Session '{alias}' not authorized")
     me = await client.get_me()
     return AuthMeResponse(
         user_id=me.id,
@@ -43,66 +51,138 @@ async def auth_me():
 
 
 @router.post("/login")
-async def auth_login(req: LoginRequest):
-    return await tg_bridge.send_code(req.phone_number)
+async def auth_login(req: LoginRequest, request: Request, session: str = Query(_DEFAULT_ALIAS)):
+    """Send SMS login code to the phone associated with `session` alias."""
+    alias = getattr(request.state, "session_alias", session)
+    tg_session = await pool.get(alias)
+
+    # If already authorized — 409
+    if tg_session.client and await tg_session.client.is_user_authorized():
+        raise HTTPException(status_code=409, detail=f"Session '{alias}' is already authorized")
+
+    return await tg_session.send_code()
 
 
 @router.post("/code")
-async def auth_code(req: LoginCodeRequest):
-    result = await tg_bridge.sign_in(req.code, req.password)
+async def auth_code(req: LoginCodeRequest, request: Request, session: str = Query(_DEFAULT_ALIAS)):
+    """Complete sign-in with code (+optional 2FA) for `session` alias."""
+    alias = getattr(request.state, "session_alias", session)
+    tg_session = await pool.get(alias)
+    result = await tg_session.sign_in(req.code, req.password)
 
-    # Persist session string to DB if authorized
-    if result.get("status") == "authorized" and result.get("session_string"):
-        await _save_session(result["session_string"])
+    # On success: persist session string to DB and update account
+    if result.get("status") == "authorized":
+        session_string = tg_session.get_session_string()
+        user_id = result.get("user_id")
+        if session_string:
+            await _save_session_to_db(alias, session_string, user_id)
 
     return result
 
 
 @router.post("/session")
-async def auth_session(req: SessionImportRequest):
-    result = await tg_bridge.import_session(req.session_string)
+async def auth_session(req: SessionImportRequest, request: Request, session: str = Query(_DEFAULT_ALIAS)):
+    """Import a StringSession for `session` alias and restart it in pool."""
+    alias = getattr(request.state, "session_alias", session)
+    tg_session = await pool.get(alias)
+    result = await tg_session.import_session(req.session_string)
 
     if result.get("status") == "authorized":
-        session_str = tg_bridge.get_session_string()
-        if session_str:
-            await _save_session(session_str)
+        session_string = tg_session.get_session_string()
+        user_id = result.get("user_id")
+        if session_string:
+            await _save_session_to_db(alias, session_string, user_id)
+        # Restart in pool with new session string
+        await pool.restart(alias)
 
     return result
 
 
 @router.post("/logout")
-async def auth_logout():
-    return await tg_bridge.logout()
+async def auth_logout(request: Request, session: str = Query(_DEFAULT_ALIAS)):
+    """Log out `session` alias and clear session from DB."""
+    alias = getattr(request.state, "session_alias", session)
+    tg_session = await pool.get(alias)
+    result = await tg_session.logout()
+
+    # Clear session from DB
+    await _clear_session_in_db(alias)
+
+    # Remove from pool
+    await pool.stop(alias)
+
+    return result
 
 
-async def _save_session(session_string: str) -> None:
-    """Persist session string to tg_session table."""
-    from sqlalchemy import select
-    from app.database import async_session
-    from app.models import TgSession
-    from datetime import datetime, timezone
+# ---------------------------------------------------------------------------
+# DB helpers
+# ---------------------------------------------------------------------------
 
+async def _save_session_to_db(alias: str, session_string: str, user_id: int | None) -> None:
+    """Persist session string to account_sessions and update accounts.tg_user_id."""
+    now = datetime.now(timezone.utc)
     try:
-        async with async_session() as session:
-            stmt = select(TgSession).where(TgSession.session_name == "default")
-            result = await session.execute(stmt)
-            db_session = result.scalar_one_or_none()
+        async with async_session() as db:
+            # Get account
+            acc_result = await db.execute(select(Account).where(Account.alias == alias))
+            account = acc_result.scalar_one_or_none()
+            if account is None:
+                log.error("_save_session_to_db: account '%s' not found", alias)
+                return
 
-            if db_session is None:
-                db_session = TgSession(
-                    session_name="default",
-                    session_string=session_string,
-                    phone_number=settings.tg_phone_number,
-                    is_active=True,
-                    last_connected_at=datetime.now(timezone.utc),
+            # Update tg_user_id if provided
+            if user_id and not account.tg_user_id:
+                account.tg_user_id = user_id
+
+            # Upsert active account_session
+            sess_result = await db.execute(
+                select(AccountSession).where(
+                    AccountSession.account_id == account.id,
+                    AccountSession.is_active == True,  # noqa: E712
                 )
-                session.add(db_session)
-            else:
-                db_session.session_string = session_string
-                db_session.is_active = True
-                db_session.last_connected_at = datetime.now(timezone.utc)
+            )
+            account_session = sess_result.scalar_one_or_none()
 
-            await session.commit()
-            log.info("Session string saved to database")
+            if account_session is None:
+                account_session = AccountSession(
+                    account_id=account.id,
+                    session_plaintext=session_string,
+                    authorized_at=now,
+                    last_connected_at=now,
+                    is_active=True,
+                )
+                db.add(account_session)
+            else:
+                account_session.session_plaintext = session_string
+                account_session.authorized_at = now
+                account_session.last_connected_at = now
+
+            await db.commit()
+            log.info("Session saved to DB for alias '%s'", alias)
     except Exception:
-        log.exception("Failed to save session string to database")
+        log.exception("Failed to save session to DB for alias '%s'", alias)
+
+
+async def _clear_session_in_db(alias: str) -> None:
+    """Set session_plaintext = NULL and is_active = false for alias."""
+    try:
+        async with async_session() as db:
+            acc_result = await db.execute(select(Account).where(Account.alias == alias))
+            account = acc_result.scalar_one_or_none()
+            if account is None:
+                return
+
+            sess_result = await db.execute(
+                select(AccountSession).where(
+                    AccountSession.account_id == account.id,
+                    AccountSession.is_active == True,  # noqa: E712
+                )
+            )
+            account_session = sess_result.scalar_one_or_none()
+            if account_session:
+                account_session.session_plaintext = None
+                account_session.is_active = False
+                await db.commit()
+                log.info("Session cleared in DB for alias '%s'", alias)
+    except Exception:
+        log.exception("Failed to clear session in DB for alias '%s'", alias)
