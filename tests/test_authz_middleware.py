@@ -552,3 +552,90 @@ async def test_cache_hit_within_ttl():
     assert call_count == 1, (
         f"Within TTL, DB must be called only once (cache hit), got {call_count} calls"
     )
+
+
+# ---------------------------------------------------------------------------
+# Tests 17-20: WRITE_DB / MANAGE_SESSION allowed on ro (f5df2f64)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_ro_mode_auth_login_allowed(ro_client):
+    """mode=ro + auth_login (MANAGE_SESSION) → must NOT return 403.
+
+    We mock pool.get so the request doesn't hit real Telegram.
+    The key assertion: authz layer passes (not 403) even on ro account.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+    from fastapi import HTTPException
+
+    # Mock TG session that returns 409 (already authorized) — avoids TG call
+    mock_session = MagicMock()
+    mock_session.client = MagicMock()
+    mock_session.client.is_user_authorized = AsyncMock(return_value=True)
+    mock_session.send_code = AsyncMock(
+        side_effect=HTTPException(status_code=409, detail="already authorized")
+    )
+
+    with patch("app.api.auth.pool.get", AsyncMock(return_value=mock_session)):
+        resp = await ro_client.post(
+            "/api/v1/auth/login",
+            headers={"x-api-key": "test-api-key"},
+            json={"phone_number": "+79001234567"},
+        )
+
+    # authz layer must pass (not 403) — downstream 409 is fine
+    assert resp.status_code != 403, (
+        f"auth_login is MANAGE_SESSION — must pass ro authz, got {resp.status_code}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ro_mode_snapshot_chat_allowed(ro_client):
+    """mode=ro + snapshot_chat_members (WRITE_DB) → must NOT return 403.
+
+    We mock pool.get to return an unauthorized session (→ 503).
+    The key assertion: authz layer passes (not 403) even on ro account.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    # Mock session that appears not authorized → endpoint returns 503
+    mock_session = MagicMock()
+    mock_session.client = MagicMock()
+    mock_session.client.is_user_authorized = AsyncMock(return_value=False)
+
+    with patch("app.api.snapshots.pool.get", AsyncMock(return_value=mock_session)):
+        resp = await ro_client.post(
+            "/api/v1/snapshots/chat/123456789",
+            headers={"x-api-key": "test-api-key"},
+        )
+
+    # authz layer must pass (not 403) — downstream 503 is fine
+    assert resp.status_code != 403, (
+        f"snapshot_chat_members is WRITE_DB — must pass ro authz, got {resp.status_code}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ro_mode_send_message_blocked(ro_client):
+    """mode=ro + send_message (WRITE_TG) → 403."""
+    resp = await ro_client.post(
+        "/api/v1/messages",
+        headers={"x-api-key": "test-api-key"},
+        json={"chat_id": 123, "text": "hi"},
+    )
+    assert resp.status_code == 403, (
+        f"send_message is WRITE_TG — must be 403 on ro, got {resp.status_code}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ro_mode_join_chat_blocked(ro_client):
+    """mode=ro + join_chat (WRITE_TG) → 403."""
+    resp = await ro_client.post(
+        "/api/v1/chats/join",
+        headers={"x-api-key": "test-api-key"},
+        json={"target": "@testchannel"},
+    )
+    assert resp.status_code == 403, (
+        f"join_chat_endpoint is WRITE_TG — must be 403 on ro, got {resp.status_code}"
+    )
