@@ -22,7 +22,7 @@ from typing import Any
 from fastapi import Request
 from starlette.responses import JSONResponse
 
-from app.authz.tool_catalog import READ_ONLY_TOOLS, WRITE_TOOLS, tool_is_write
+from app.authz.tool_catalog import READ_ONLY_TOOLS, WRITE_TOOLS, WRITE_TG_TOOLS, tool_is_write
 
 log = logging.getLogger(__name__)
 

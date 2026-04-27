@@ -1,12 +1,25 @@
+import asyncio
 import logging
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.schemas import UserResponse, PaginatedResponse, ResolveUserRequest, ResolveResponse
+from app.schemas import (
+    UserResponse,
+    PaginatedResponse,
+    ResolveUserRequest,
+    ResolveResponse,
+    BulkResolveByIdRequest,
+    BulkResolveResponse,
+    BulkResolveStats,
+    ResolvedUserItem,
+    UnresolvedUserItem,
+)
 from app.services.user_service import get_users, upsert_user
-from app.telegram.pool import require_authorized_client
+from app.services import registry_service
+from app.telegram.pool import require_authorized_client, pool
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/users", tags=["users"])
@@ -74,6 +87,134 @@ async def resolve_user(req: ResolveUserRequest, request: Request, db: AsyncSessi
     except Exception as e:
         log.exception("Failed to resolve user: %s", req.username)
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/resolve_by_id", response_model=BulkResolveResponse, name="resolve_by_id")
+async def bulk_resolve_by_id(
+    req: BulkResolveByIdRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> BulkResolveResponse:
+    """Bulk-resolve Telegram user IDs via Telethon get_entity.
+
+    Accepts up to 500 user_ids per request.  For each id, tries
+    client.get_entity(id).  If persist=True (default), resolved users are
+    upserted into users_registry.
+
+    Returns:
+      - resolved: list of user dicts with username, names, etc.
+      - unresolved: list of {user_id, error} for failures.
+      - stats: counts and elapsed time.
+    """
+    from telethon.tl.types import User
+    from telethon.errors import FloodWaitError
+
+    if len(req.user_ids) > 500:
+        raise HTTPException(status_code=400, detail="max 500 user_ids per request")
+
+    alias = getattr(request.state, "session_alias", "work")
+    account_id = getattr(request.state, "account_id", None)
+
+    tg_session = await pool.get(alias)
+    if not tg_session.client:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Session '{alias}' not authorized — use /auth/login?session={alias}",
+        )
+    try:
+        is_auth = await tg_session.client.is_user_authorized()
+    except Exception:
+        is_auth = False
+    if not is_auth:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Session '{alias}' not authorized — use /auth/login?session={alias}",
+        )
+
+    client = tg_session.client
+    resolved: list[ResolvedUserItem] = []
+    unresolved: list[UnresolvedUserItem] = []
+    t0 = time.monotonic()
+
+    for uid in req.user_ids:
+        retry = False
+        for attempt in range(2):
+            try:
+                entity = await client.get_entity(uid)
+                if not isinstance(entity, User):
+                    unresolved.append(
+                        UnresolvedUserItem(
+                            user_id=uid,
+                            error=f"NotAUser: {type(entity).__name__}",
+                        )
+                    )
+                else:
+                    item = ResolvedUserItem(
+                        user_id=entity.id,
+                        username=getattr(entity, "username", None),
+                        first_name=getattr(entity, "first_name", None),
+                        last_name=getattr(entity, "last_name", None),
+                        phone=getattr(entity, "phone", None),
+                        is_premium=bool(getattr(entity, "premium", False)),
+                    )
+                    resolved.append(item)
+                    if req.persist:
+                        member_data = {
+                            "tg_user_id": entity.id,
+                            "username": item.username,
+                            "first_name": item.first_name,
+                            "last_name": item.last_name,
+                            "phone": item.phone,
+                        }
+                        await registry_service.upsert_user_from_member(
+                            session=db,
+                            member_data=member_data,
+                            account_id=account_id,
+                            snapshot_id=None,
+                        )
+                break  # success or non-retryable error
+            except FloodWaitError as e:
+                if e.seconds > 30:
+                    raise HTTPException(
+                        status_code=429,
+                        detail=f"Telegram FloodWait: retry after {e.seconds}s",
+                        headers={"Retry-After": str(e.seconds)},
+                    )
+                if attempt == 0:
+                    # Short wait — sleep and retry once
+                    await asyncio.sleep(e.seconds)
+                    retry = True
+                    continue
+                # Second attempt also flood-waited — record as unresolved
+                unresolved.append(
+                    UnresolvedUserItem(user_id=uid, error=f"FloodWaitError: {e.seconds}s")
+                )
+                break
+            except Exception as e:
+                unresolved.append(
+                    UnresolvedUserItem(
+                        user_id=uid,
+                        error=f"{type(e).__name__}: {str(e)}",
+                    )
+                )
+                break
+
+    if req.persist:
+        await db.commit()
+
+    took_ms = int((time.monotonic() - t0) * 1000)
+
+    return BulkResolveResponse(
+        session=alias,
+        resolved=resolved,
+        unresolved=unresolved,
+        stats=BulkResolveStats(
+            requested=len(req.user_ids),
+            resolved=len(resolved),
+            unresolved=len(unresolved),
+            took_ms=took_ms,
+        ),
+    )
 
 
 @router.post("/{user_id}/block")

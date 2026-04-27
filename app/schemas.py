@@ -252,3 +252,43 @@ class MemberResponse(BaseModel):
 
 class ResolveUserRequest(BaseModel):
     username: str
+
+
+# --- Bulk resolve by tg_user_id ---
+
+class BulkResolveByIdRequest(BaseModel):
+    user_ids: list[int] = Field(
+        description="List of Telegram user IDs to resolve. Max 500 per request.",
+    )
+    persist: bool = Field(
+        default=True,
+        description="If true, resolved users are upserted into users_registry.",
+    )
+
+
+class ResolvedUserItem(BaseModel):
+    user_id: int
+    username: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    phone: str | None = None
+    is_premium: bool = False
+
+
+class UnresolvedUserItem(BaseModel):
+    user_id: int
+    error: str
+
+
+class BulkResolveStats(BaseModel):
+    requested: int
+    resolved: int
+    unresolved: int
+    took_ms: int
+
+
+class BulkResolveResponse(BaseModel):
+    session: str
+    resolved: list[ResolvedUserItem]
+    unresolved: list[UnresolvedUserItem]
+    stats: BulkResolveStats
