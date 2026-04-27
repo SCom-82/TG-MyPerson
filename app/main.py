@@ -1,4 +1,5 @@
 import logging
+import secrets
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -95,7 +96,7 @@ async def auth_and_https_middleware(request, call_next):
     if settings.api_key and request.url.path not in PUBLIC_PATHS:
         if not request.url.path.startswith("/api/v1/accounts"):
             api_key = request.headers.get("x-api-key") or request.query_params.get("api_key")
-            if api_key != settings.api_key:
+            if not api_key or not secrets.compare_digest(api_key.encode(), settings.api_key.encode()):
                 return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
 
     return await call_next(request)

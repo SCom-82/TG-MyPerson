@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import secrets
 import time
 from typing import Any
 
@@ -81,7 +82,7 @@ async def admin_auth_middleware(request: Request, call_next):
         )
 
     provided = request.headers.get("x-admin-key")
-    if not provided or provided != cfg.admin_api_key:
+    if not provided or not secrets.compare_digest(provided.encode(), cfg.admin_api_key.encode()):
         return JSONResponse(
             status_code=401,
             content={"error": "admin key required"},
