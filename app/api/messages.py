@@ -4,7 +4,7 @@ import os
 from datetime import datetime, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 from telethon.tl import functions, types as tl_types
@@ -21,7 +21,7 @@ from app.schemas import (
     ScheduledMessageItem,
 )
 from app.services.message_service import get_messages, get_message
-from app.telegram.client import tg_bridge
+from app.telegram.pool import require_authorized_client
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/messages", tags=["messages"])
@@ -34,13 +34,6 @@ def _to_utc(dt: datetime | None) -> datetime | None:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
-
-
-async def _check_client():
-    client = tg_bridge.client
-    if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
-    return client
 
 
 def _random_id() -> int:
@@ -83,9 +76,9 @@ async def list_messages(
 # --- Scheduled queue (должно быть ПЕРЕД /{chat_id}/{message_id} чтобы не поймать "scheduled" как int) ---
 
 @router.get("/scheduled")
-async def list_scheduled(chat_id: int = Query(...)):
+async def list_scheduled(chat_id: int = Query(...), request: Request = None):
     """List messages scheduled for future delivery in a chat."""
-    client = await _check_client()
+    client = await require_authorized_client(request)
     try:
         peer = await client.get_input_entity(chat_id)
         result = await client(functions.messages.GetScheduledHistoryRequest(peer=peer, hash=0))
@@ -114,9 +107,9 @@ async def list_scheduled(chat_id: int = Query(...)):
 
 
 @router.delete("/scheduled/{chat_id}/{message_id}")
-async def cancel_scheduled(chat_id: int, message_id: int):
+async def cancel_scheduled(chat_id: int, message_id: int, request: Request):
     """Cancel a scheduled message before it is sent."""
-    client = await _check_client()
+    client = await require_authorized_client(request)
     try:
         peer = await client.get_input_entity(chat_id)
         await client(
@@ -129,9 +122,9 @@ async def cancel_scheduled(chat_id: int, message_id: int):
 
 
 @router.post("/scheduled/{chat_id}/{message_id}/send-now")
-async def send_scheduled_now(chat_id: int, message_id: int):
+async def send_scheduled_now(chat_id: int, message_id: int, request: Request):
     """Send a scheduled message immediately (before its scheduled time)."""
-    client = await _check_client()
+    client = await require_authorized_client(request)
     try:
         peer = await client.get_input_entity(chat_id)
         await client(
@@ -154,8 +147,8 @@ async def get_single_message(chat_id: int, message_id: int, db: AsyncSession = D
 # --- Sending ---
 
 @router.post("")
-async def send_message(req: SendMessageRequest):
-    client = await _check_client()
+async def send_message(req: SendMessageRequest, request: Request):
+    client = await require_authorized_client(request)
 
     try:
         schedule = _to_utc(req.schedule_date)
@@ -178,8 +171,8 @@ async def send_message(req: SendMessageRequest):
 
 
 @router.post("/forward")
-async def forward_message(req: ForwardMessageRequest):
-    client = await _check_client()
+async def forward_message(req: ForwardMessageRequest, request: Request):
+    client = await require_authorized_client(request)
 
     ids = req.message_ids if req.message_ids else ([req.message_id] if req.message_id else [])
     if not ids:
@@ -206,8 +199,8 @@ async def forward_message(req: ForwardMessageRequest):
 
 
 @router.post("/edit")
-async def edit_message(req: EditMessageRequest):
-    client = await _check_client()
+async def edit_message(req: EditMessageRequest, request: Request):
+    client = await require_authorized_client(request)
     try:
         kwargs: dict = {
             "entity": req.chat_id,
@@ -217,7 +210,6 @@ async def edit_message(req: EditMessageRequest):
         if req.parse_mode:
             kwargs["parse_mode"] = req.parse_mode
         if req.scheduled:
-            # For scheduled messages Telethon needs the schedule=True hint to look in scheduled queue
             kwargs["schedule"] = True
         await client.edit_message(**kwargs)
         return {"status": "edited", "chat_id": req.chat_id, "message_id": req.message_id}
@@ -228,6 +220,7 @@ async def edit_message(req: EditMessageRequest):
 
 @router.post("/send-file")
 async def send_file(
+    request: Request,
     chat_id: int = Form(...),
     file: UploadFile = File(...),
     caption: str | None = Form(None),
@@ -237,9 +230,8 @@ async def send_file(
     voice_note: bool = Form(False),
     force_document: bool = Form(False),
 ):
-    """Send any file. By default auto-detects images and sends them as photos.
-    Set force_document=true to always send as a document attachment."""
-    client = await _check_client()
+    """Send any file. By default auto-detects images and sends them as photos."""
+    client = await require_authorized_client(request)
     try:
         file_bytes = await file.read()
         bio = io.BytesIO(file_bytes)
@@ -268,6 +260,7 @@ async def send_file(
 
 @router.post("/send-voice")
 async def send_voice(
+    request: Request,
     chat_id: int = Form(...),
     file: UploadFile = File(...),
     caption: str | None = Form(None),
@@ -276,7 +269,7 @@ async def send_voice(
     schedule_date: datetime | None = Form(None),
 ):
     """Convenience wrapper: forces voice_note=True for sending as voice message."""
-    client = await _check_client()
+    client = await require_authorized_client(request)
     try:
         file_bytes = await file.read()
         bio = io.BytesIO(file_bytes)
@@ -304,6 +297,7 @@ async def send_voice(
 
 @router.post("/album")
 async def send_album(
+    request: Request,
     chat_id: int = Form(...),
     files: list[UploadFile] = File(...),
     caption: str | None = Form(None),
@@ -312,7 +306,7 @@ async def send_album(
     schedule_date: datetime | None = Form(None),
 ):
     """Send multiple photos/files as a single album (media group)."""
-    client = await _check_client()
+    client = await require_authorized_client(request)
     if len(files) < 2:
         raise HTTPException(status_code=400, detail="Album requires at least 2 files")
     if len(files) > 10:
@@ -349,9 +343,9 @@ async def send_album(
 
 
 @router.post("/poll")
-async def send_poll(req: SendPollRequest):
+async def send_poll(req: SendPollRequest, request: Request):
     """Create a poll (regular or quiz) and send or schedule it to a chat."""
-    client = await _check_client()
+    client = await require_authorized_client(request)
     try:
         peer = await client.get_input_entity(req.chat_id)
 
@@ -413,8 +407,8 @@ async def send_poll(req: SendPollRequest):
 
 
 @router.delete("/{chat_id}/{message_id}")
-async def delete_message(chat_id: int, message_id: int):
-    client = await _check_client()
+async def delete_message(chat_id: int, message_id: int, request: Request):
+    client = await require_authorized_client(request)
 
     try:
         await client.delete_messages(entity=chat_id, message_ids=[message_id])
@@ -425,8 +419,8 @@ async def delete_message(chat_id: int, message_id: int):
 
 
 @router.get("/{chat_id}/{message_id}/media")
-async def download_media(chat_id: int, message_id: int):
-    client = await _check_client()
+async def download_media(chat_id: int, message_id: int, request: Request):
+    client = await require_authorized_client(request)
     try:
         msgs = await client.get_messages(entity=chat_id, ids=message_id)
         msg = msgs if not isinstance(msgs, list) else msgs[0] if msgs else None
@@ -463,8 +457,8 @@ async def download_media(chat_id: int, message_id: int):
 
 
 @router.post("/{chat_id}/{message_id}/pin")
-async def pin_message(chat_id: int, message_id: int, notify: bool = Query(True)):
-    client = await _check_client()
+async def pin_message(chat_id: int, message_id: int, request: Request, notify: bool = Query(True)):
+    client = await require_authorized_client(request)
     try:
         await client.pin_message(entity=chat_id, message=message_id, notify=notify)
         return {"status": "pinned", "chat_id": chat_id, "message_id": message_id}
@@ -474,8 +468,8 @@ async def pin_message(chat_id: int, message_id: int, notify: bool = Query(True))
 
 
 @router.post("/{chat_id}/{message_id}/unpin")
-async def unpin_message(chat_id: int, message_id: int):
-    client = await _check_client()
+async def unpin_message(chat_id: int, message_id: int, request: Request):
+    client = await require_authorized_client(request)
     try:
         await client.unpin_message(entity=chat_id, message=message_id)
         return {"status": "unpinned", "chat_id": chat_id, "message_id": message_id}
@@ -485,8 +479,8 @@ async def unpin_message(chat_id: int, message_id: int):
 
 
 @router.post("/{chat_id}/{message_id}/react")
-async def react_to_message(chat_id: int, message_id: int, req: ReactRequest):
-    client = await _check_client()
+async def react_to_message(chat_id: int, message_id: int, req: ReactRequest, request: Request):
+    client = await require_authorized_client(request)
     try:
         peer = await client.get_input_entity(chat_id)
         reaction: list = []

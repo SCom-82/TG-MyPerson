@@ -1,9 +1,8 @@
 import logging
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
-from app.schemas import UserResponse
-from app.telegram.client import tg_bridge
+from app.telegram.pool import require_authorized_client
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/contacts", tags=["contacts"])
@@ -11,12 +10,11 @@ router = APIRouter(prefix="/contacts", tags=["contacts"])
 
 @router.get("")
 async def list_contacts(
+    request: Request,
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ):
-    client = tg_bridge.client
-    if not client or not await client.is_user_authorized():
-        raise HTTPException(status_code=503, detail="Telegram client not authorized")
+    client = await require_authorized_client(request)
 
     try:
         from telethon.tl.functions.contacts import GetContactsRequest
