@@ -24,6 +24,12 @@ dev = [
     "httpx",
 ]
 
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+
 [tool.setuptools.packages.find]
 include = ["app*"]
 
