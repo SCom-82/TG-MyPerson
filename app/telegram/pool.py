@@ -119,11 +119,19 @@ class TelegramClientPool:
 
     async def start_all(self) -> None:
         """Start all enabled accounts. Errors per session are isolated."""
-        async with async_session() as db:
-            result = await db.execute(
-                select(Account).where(Account.is_enabled == True)  # noqa: E712
+        try:
+            async with async_session() as db:
+                result = await db.execute(
+                    select(Account).where(Account.is_enabled == True)  # noqa: E712
+                )
+                accounts = result.scalars().all()
+        except Exception as exc:
+            log.error(
+                "pool.start_all: failed to load accounts (db likely unavailable): %s. "
+                "Sessions will be lazy-started on first request.",
+                exc,
             )
-            accounts = result.scalars().all()
+            return  # graceful degradation — pool stays empty
 
         if not accounts:
             log.info("Pool: no enabled accounts found, skipping start_all")
