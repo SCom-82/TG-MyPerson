@@ -38,9 +38,9 @@ END;
 $$;
 """)
 
-    op.execute("""
+    op.execute(r"""
 CREATE OR REPLACE FUNCTION drop_old_audit_partitions(retention_days int DEFAULT 90)
-RETURNS SETOF text LANGUAGE plpgsql AS $$
+RETURNS SETOF text LANGUAGE plpgsql AS $func$
 DECLARE
     part_record record;
     cutoff      date := current_date - (retention_days || ' days')::interval;
@@ -50,7 +50,7 @@ BEGIN
             inhrelid::regclass::text AS part_name,
             (regexp_match(
                 pg_get_expr(c.relpartbound, c.oid),
-                'TO \(''([0-9-]+)''\)'
+                $$TO \('([0-9-]+)'\)$$
             ))[1]::date AS upper_bound
         FROM pg_inherits
         JOIN pg_class c ON c.oid = inhrelid
@@ -62,7 +62,7 @@ BEGIN
         END IF;
     END LOOP;
 END;
-$$;
+$func$;
 """)
 
 
