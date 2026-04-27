@@ -48,9 +48,6 @@ WRITE_TG_TOOLS: frozenset[str] = frozenset({
     # user writes
     "block_user",
     "unblock_user",
-    # sync writes (call Telegram APIs and mutate DB)
-    "sync_chats",
-    "trigger_backfill",
 })
 
 # ---------------------------------------------------------------------------
@@ -59,6 +56,8 @@ WRITE_TG_TOOLS: frozenset[str] = frozenset({
 WRITE_DB_TOOLS: frozenset[str] = frozenset({
     "snapshot_chat_members",    # reads TG members, writes to our DB
     "snapshot_import_members",  # manual import, writes to our DB
+    "sync_chats",               # iter_dialogs (TG read), writes to our DB
+    "trigger_backfill",         # iter_messages (TG read), writes to our DB
 })
 
 # ---------------------------------------------------------------------------

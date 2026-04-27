@@ -616,6 +616,55 @@ async def test_ro_mode_snapshot_chat_allowed(ro_client):
 
 
 @pytest.mark.asyncio
+async def test_ro_mode_trigger_backfill_allowed(ro_client):
+    """mode=ro + trigger_backfill (WRITE_DB) → must NOT return 403.
+
+    Backfill iter_messages reads from TG, writes only to our DB.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    with patch(
+        "app.api.sync.start_backfill",
+        AsyncMock(return_value={"status": "ok", "messages": 0}),
+    ):
+        resp = await ro_client.post(
+            "/api/v1/sync/backfill",
+            headers={"x-api-key": "test-api-key"},
+            json={"chat_id": -100123, "limit": 10},
+        )
+
+    assert resp.status_code != 403, (
+        f"trigger_backfill is WRITE_DB — must pass ro authz, got {resp.status_code}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ro_mode_sync_chats_allowed(ro_client):
+    """mode=ro + sync_chats (WRITE_DB) → must NOT return 403.
+
+    sync_chats iter_dialogs reads from TG, writes only to our DB.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    mock_client = MagicMock()
+    with patch(
+        "app.api.sync.require_authorized_client",
+        AsyncMock(return_value=mock_client),
+    ), patch(
+        "app.api.sync.sync_chat_list",
+        AsyncMock(return_value=0),
+    ):
+        resp = await ro_client.post(
+            "/api/v1/sync/chats",
+            headers={"x-api-key": "test-api-key"},
+        )
+
+    assert resp.status_code != 403, (
+        f"sync_chats is WRITE_DB — must pass ro authz, got {resp.status_code}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_ro_mode_send_message_blocked(ro_client):
     """mode=ro + send_message (WRITE_TG) → 403."""
     resp = await ro_client.post(
