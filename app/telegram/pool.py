@@ -177,6 +177,7 @@ class TelegramClientPool:
         """Stop alias session, reload fresh account data from DB, lazy-start again.
 
         Used when session_string or critical account params change.
+        After restart, re-registers event handlers for the 'work' alias.
         """
         async with self._alias_lock(alias):
             # Stop and remove existing session
@@ -188,12 +189,19 @@ class TelegramClientPool:
                 del self._pool[alias]
 
         # get() will lazy-start from fresh DB data (re-reads account + session)
-        return await self.get(alias)
+        session = await self.get(alias)
+        await _maybe_register_handlers(alias, session)
+        return session
 
     async def restart(self, alias: str) -> TelegramSession:
-        """Stop, remove and re-start a session."""
+        """Stop, remove and re-start a session.
+
+        After restart, re-registers event handlers for the 'work' alias.
+        """
         await self.stop(alias)
-        return await self.get(alias)
+        session = await self.get(alias)
+        await _maybe_register_handlers(alias, session)
+        return session
 
     def pool_status(self) -> list[dict]:
         """Return status of all sessions in pool.
@@ -261,6 +269,26 @@ async def require_authorized_client(request: Request) -> "TelegramClient":
             detail=f"Session '{alias}' not authorized — use /auth/login?session={alias}",
         )
     return session.client
+
+
+async def _maybe_register_handlers(alias: str, session: TelegramSession) -> None:
+    """Re-register event handlers after restart/reload for the 'work' alias.
+
+    Only 'work' is handled here because that is the only alias that has
+    real-time event handlers (message capture, stream broadcasting).
+    TODO: generalise via a callback registry if more aliases need handlers.
+    """
+    if alias != "work":
+        return
+    if not session.client:
+        return
+    try:
+        if await session.client.is_user_authorized():
+            from app.telegram.handlers import register_handlers
+            register_handlers(session.client)
+            log.info("Pool: re-registered handlers for alias 'work' after restart/reload")
+    except Exception as exc:
+        log.warning("Pool: failed to re-register handlers for 'work': %s", exc)
 
 
 # Singleton pool instance
