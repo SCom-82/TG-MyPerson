@@ -9,6 +9,7 @@ import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from telethon.errors import FloodWaitError
 from sqlalchemy import select, func, desc
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -135,6 +136,12 @@ async def snapshot_chat(
     try:
         async for participant in session.client.iter_participants(chat_id, aggressive=True):
             members_raw.append(_participant_to_dict(participant))
+    except FloodWaitError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Telegram flood wait: retry after {exc.seconds}s",
+            headers={"Retry-After": str(exc.seconds)},
+        )
     except Exception as exc:
         err_str = str(exc).lower()
         if "chat not found" in err_str or "invalid" in err_str:
