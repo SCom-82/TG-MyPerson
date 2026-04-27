@@ -86,6 +86,7 @@ Migrations:
 | 002 | Multi-account schema (accounts, account_sessions, audit_logs, snapshots, registry) |
 | 003 | Fix index on chat_members_snapshots.taken_at (DESC) |
 | 004 | Drop legacy tg_session table (Phase 4 cleanup) |
+| 005 | Partition rotation SQL helpers for audit_logs |
 
 ## Environment variables
 
@@ -107,6 +108,32 @@ docker compose up -d
 
 The `docker-compose.yml` starts the app and a PostgreSQL instance. Migrations run
 automatically on container start.
+
+## Operational maintenance
+
+### audit_logs partition rotation
+
+The `audit_logs` table is partitioned by month. Partitions must be created
+**before** the month begins, otherwise INSERTs will fail with a partition
+constraint violation.
+
+**Retention policy:** partitions with an upper bound older than 90 days are
+dropped automatically.
+
+**How to run:**
+
+```bash
+python -m app.scripts.audit_partitions
+```
+
+The script calls two SQL functions installed by migration 005:
+- `create_audit_partition(months_ahead int)` — idempotent, safe to run multiple times
+- `drop_old_audit_partitions(retention_days int)` — drops expired partitions
+
+**Automated schedule:** a ClaudeClaw cron job on the server runs this script on
+the 1st of each month at 02:00 UTC. Tracked in ticket
+`[tg-myperson] partition rotation cron — ClaudeClaw job`. Until that job is
+configured, run the script manually before each new month.
 
 ## API overview
 
