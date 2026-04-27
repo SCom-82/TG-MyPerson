@@ -49,7 +49,7 @@ _HEALTH_PATHS = {
 
 # Simple in-memory alias cache: {alias: (account_id, expiry_time)}
 _alias_cache: dict[str, tuple[int, float]] = {}
-_CACHE_TTL = 60.0  # seconds
+_CACHE_TTL = 10.0  # seconds — keep short; see single-worker note in README
 
 
 # ---------------------------------------------------------------------------

@@ -109,6 +109,27 @@ docker compose up -d
 The `docker-compose.yml` starts the app and a PostgreSQL instance. Migrations run
 automatically on container start.
 
+## Security
+
+**Warning: database backups expose Telegram sessions.** Until Phase 5
+(encryption-at-rest) is implemented, `account_sessions.session_plaintext`
+stores raw Telethon `StringSession` strings in plaintext. **Anyone with read
+access to a DB dump can fully impersonate the corresponding Telegram account**
+— read all messages, send messages, join/leave groups. Treat backups with the
+same sensitivity as the Telegram credentials themselves: encrypt at rest
+(e.g., `age`), restrict access, never commit to git. Tracked in ticket
+`[tg-myperson] Шифрование session at rest (Phase 5)`.
+
+## Operational notes
+
+**Single-worker assumption.** Service caches `alias → account_id/mode` for
+10 seconds in process memory. `PATCH is_enabled=false` invalidates this cache
+only in the worker that handled the request. Running uvicorn with
+`--workers > 1` will cause stale cache for up to 10 seconds in other workers,
+allowing disabled accounts to keep working briefly. For production: run with
+`--workers 1` (or 1 per container, scale horizontally) until pub/sub-based
+invalidation is added.
+
 ## Operational maintenance
 
 ### audit_logs partition rotation
