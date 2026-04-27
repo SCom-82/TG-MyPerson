@@ -93,11 +93,15 @@ async def _run_backfill(chat_id: int, limit: int, alias: str = "work") -> None:
                     if msg is None or msg.id is None:
                         continue
 
-                    # Upsert sender if available
+                    # Upsert sender if available — only for User entities.
+                    # Channel/Chat objects (e.g. broadcast senders) have no
+                    # first_name and must not be passed to upsert_user.
                     if msg.sender:
                         from app.services.user_service import upsert_user
+                        from app.utils.sender import is_user_entity
                         try:
-                            await upsert_user(session, msg.sender)
+                            if is_user_entity(msg.sender):
+                                await upsert_user(session, msg.sender)
                         except Exception:
                             pass
 
