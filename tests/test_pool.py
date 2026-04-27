@@ -86,15 +86,10 @@ async def test_get_disabled_alias_raises_404():
 async def test_start_all_with_db_error_graceful():
     """pool.start_all() must not crash when DB is unavailable.
 
-    KNOWN DEFECT (M2 — open): start_all() currently propagates OperationalError
-    from the top-level DB query in start_all() itself. The supervisor pattern
-    only isolates errors inside _start_one() per-session, but the initial
-    'SELECT all enabled accounts' query is unprotected.
-
-    This test is marked xfail to document the regression. When M2 is fixed,
-    remove the xfail marker and verify it passes.
+    Fixed by BUG-M2: the initial SELECT query is now wrapped in try/except so
+    that OperationalError causes graceful degradation (pool stays empty, log error)
+    instead of propagating and crashing the lifespan.
     """
-    import pytest
     from app.telegram.pool import TelegramClientPool
     from sqlalchemy.exc import OperationalError
 
@@ -111,18 +106,13 @@ async def test_start_all_with_db_error_graceful():
         raised = False
         try:
             await pool.start_all()
-        except OperationalError:
-            raised = True
         except Exception:
             raised = True
 
-    # Document current behavior: start_all() propagates DB error (M2 open)
-    # When M2 is fixed, this assert must be: assert not raised
-    if raised:
-        pytest.xfail(
-            "M2 (open): start_all() propagates OperationalError from top-level DB query — "
-            "not isolated by supervisor pattern. dev-coder must wrap the initial SELECT in try/except."
-        )
+    assert not raised, (
+        "pool.start_all() must not propagate DB errors — graceful degradation required"
+    )
+    assert pool._pool == {}, "pool._pool must remain empty when DB is unavailable"
 
 
 # ---------------------------------------------------------------------------

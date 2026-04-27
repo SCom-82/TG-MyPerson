@@ -156,33 +156,9 @@ async def test_insert_future_audit_log_lands_in_partition(pg: AsyncSession):
 async def test_drop_old_audit_partitions_drops_expired(pg: AsyncSession):
     """drop_old_audit_partitions(0) must drop partitions whose upper_bound <= today.
 
-    BUG DETECTED (C2): regexp_match pattern in drop_old_audit_partitions uses
-    $$TO \\('([0-9-]+)'\\)$$ which does NOT match bound expressions that include
-    time component, e.g. 'TO ('2026-02-01 00:00:00+00')'.
-
-    Result: upper_bound is always NULL → IF condition never triggers →
-    NO partitions are ever dropped by this function.
-
-    Reproduction:
-        SELECT (regexp_match(
-            pg_get_expr(c.relpartbound, c.oid),
-            $$TO \\('([0-9-]+)'\\)$$
-        ))[1]
-        FROM pg_class c WHERE relname = 'audit_logs_2026_01';
-        -- Returns: NULL (should return '2026-02-01')
-
-    Fix for dev-coder: update regex to handle datetime+tz format:
-        regexp_match(..., $$TO \\('([0-9-]+)[^']*'\\)$$)
-        or use: substring(pg_get_expr(...) from $$TO \\('([0-9-]+)$$)
-
-    This test is xfail to document the bug. Remove xfail when C2 regex is fixed.
+    Fixed by migration 006: regex updated from ([0-9-]+) to ([^']+)::timestamptz::date
+    to correctly handle timezone-aware partition bounds like '2026-02-01 00:00:00+00'.
     """
-    pytest.xfail(
-        "BUG C2: drop_old_audit_partitions regex does not match timezone-aware "
-        "partition bounds ('2026-02-01 00:00:00+00'). upper_bound always NULL → "
-        "no partitions ever dropped. Fix: update regex in migration 005."
-    )
-
     from datetime import date
 
     today = date.today()
