@@ -26,6 +26,16 @@ from app.telegram.pool import pool
 
 router = APIRouter(prefix="/snapshots", tags=["snapshots"])
 
+# Search letters used to bypass Telegram's 200-member API limit for non-admins.
+# The strategy: iterate participants for each search string, deduplicate by id.
+# Covers Latin, Cyrillic, and digits.  For truly huge groups (>5000) this still
+# won't get everyone, but it is the best non-admin approach.
+_SEARCH_LETTERS: list[str] = (
+    list("abcdefghijklmnopqrstuvwxyz")
+    + list("абвгдежзийклмнопрстуфхцчшщъыьэюя")
+    + list("0123456789")
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -130,12 +140,37 @@ async def snapshot_chat(
             detail=f"Session '{alias}' not authorized — use /auth/login?session={alias}",
         )
 
-    # Collect participants from Telegram
+    # Collect participants from Telegram.
+    # Strategy: first do an un-filtered pass (works for small chats / when admin),
+    # then iterate with search=letter for each letter in _SEARCH_LETTERS to
+    # bypass the Telegram 200-participant API limit for non-admins in supergroups.
+    # Deduplication is done by participant user id via a dict.
     t0 = time.monotonic()
-    members_raw: list[dict] = []
+    seen: dict[int, object] = {}  # tg_user_id → participant object
+
+    async def _collect_participants(search: str | None = None) -> None:
+        """Add participants to seen dict, deduplicating by id."""
+        kwargs: dict = {"aggressive": True}
+        if search is not None:
+            kwargs["search"] = search
+        try:
+            async for participant in session.client.iter_participants(chat_id, **kwargs):
+                pid = getattr(participant, "id", None)
+                if pid is not None and pid not in seen:
+                    seen[pid] = participant
+        except FloodWaitError:
+            raise  # propagate to outer handler
+        except Exception:
+            pass  # partial search letter failure — tolerate and continue
+
     try:
-        async for participant in session.client.iter_participants(chat_id, aggressive=True):
-            members_raw.append(_participant_to_dict(participant))
+        # Pass 1: unfiltered (fast for small chats; gets everyone if we're admin)
+        await _collect_participants(search=None)
+
+        # Pass 2: search-by-letter to surface members hidden by 200-limit
+        for letter in _SEARCH_LETTERS:
+            await _collect_participants(search=letter)
+
     except FloodWaitError as exc:
         raise HTTPException(
             status_code=429,
@@ -149,6 +184,8 @@ async def snapshot_chat(
         if "forbidden" in err_str or "not allowed" in err_str or "admin" in err_str:
             raise HTTPException(status_code=403, detail=f"Access denied to chat {chat_id}: {exc}")
         raise HTTPException(status_code=503, detail=f"Telegram error: {exc}")
+
+    members_raw: list[dict] = [_participant_to_dict(p) for p in seen.values()]
 
     took_ms = int((time.monotonic() - t0) * 1000)
     members_count = len(members_raw)
