@@ -176,6 +176,14 @@ class ScheduledMessageItem(BaseModel):
 class BackfillRequest(BaseModel):
     chat_id: int
     limit: int = Field(default=1000, ge=1, le=10000)
+    direction: Literal["backward", "forward"] = Field(
+        default="backward",
+        description=(
+            "backward: fetch older messages from oldest_message_id back into history "
+            "(default, original PR #1 behaviour). "
+            "forward: fetch newer messages from newest_message_id forward to chat.last_message_id."
+        ),
+    )
 
 class SyncStateResponse(BaseModel):
     chat_id: int
