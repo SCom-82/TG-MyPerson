@@ -280,23 +280,21 @@ async def require_authorized_client(request: Request) -> "TelegramClient":
 
 
 async def _maybe_register_handlers(alias: str, session: TelegramSession) -> None:
-    """Re-register event handlers after restart/reload for the 'work' alias.
+    """Re-register event handlers after restart/reload for any authorized session.
 
-    Only 'work' is handled here because that is the only alias that has
+    PR #4: removed the 'work'-only guard — all authorized sessions receive
     real-time event handlers (message capture, stream broadcasting).
-    TODO: generalise via a callback registry if more aliases need handlers.
+    Dedup is handled inside upsert_message_from_event per (message_id, chat_id).
     """
-    if alias != "work":
-        return
     if not session.client:
         return
     try:
         if await session.client.is_user_authorized():
             from app.telegram.handlers import register_handlers
             register_handlers(session.client)
-            log.info("Pool: re-registered handlers for alias 'work' after restart/reload")
+            log.info("Pool: re-registered handlers for alias '%s' after restart/reload", alias)
     except Exception as exc:
-        log.warning("Pool: failed to re-register handlers for 'work': %s", exc)
+        log.warning("Pool: failed to re-register handlers for '%s': %s", alias, exc)
 
 
 # Singleton pool instance

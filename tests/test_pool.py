@@ -6,7 +6,7 @@ Tests:
   3. pool.start_all() with unavailable DB → graceful (no crash)
   4. Lazy start: 10 concurrent pool.get("work") → _start_one called once (lock)
   5. pool.restart("work") → old session stopped, new started, handlers registered
-  6. pool.restart("personal-ro") → register_handlers NOT called
+  6. pool.restart("personal-ro") → _maybe_register_handlers called (PR #4: no longer skipped)
   7. pool.stop_alias("work") → alias removed from _pool, session.stop() called
 """
 
@@ -185,14 +185,17 @@ async def test_restart_work_registers_handlers():
 
 
 # ---------------------------------------------------------------------------
-# Test 6: pool.restart("personal-ro") → handlers NOT called
+# Test 6: pool.restart("personal-ro") → _maybe_register_handlers called (PR #4)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_restart_non_work_alias_does_not_register_handlers():
-    """pool.restart('personal-ro') must NOT call register_handlers."""
+async def test_restart_personal_ro_calls_maybe_register_handlers():
+    """PR #4: pool.restart('personal-ro') must call _maybe_register_handlers.
+
+    Unlike before PR #4, the alias guard is removed — authorized sessions of any
+    alias get handlers registered.
+    """
     from app.telegram.pool import TelegramClientPool
-    from app.telegram.handlers import register_handlers
 
     pool = TelegramClientPool()
     old_session = _make_mock_session("personal-ro", is_running=True)
@@ -203,23 +206,21 @@ async def test_restart_non_work_alias_does_not_register_handlers():
 
     async def _fake_maybe_register(alias, session):
         register_called_for.append(alias)
-        # Real implementation: only 'work' registers
-        if alias == "work" and session.client:
-            if await session.client.is_user_authorized():
-                register_handlers(session.client)
 
     with patch("app.telegram.pool._maybe_register_handlers", side_effect=_fake_maybe_register), \
          patch.object(pool, "get", AsyncMock(return_value=new_session)):
 
         await pool.restart("personal-ro")
 
-    # _maybe_register_handlers is called, but inside it no-ops for non-work
-    # Verify the actual behavior: register_handlers must not be invoked
+    assert "personal-ro" in register_called_for, (
+        "_maybe_register_handlers must be called for 'personal-ro' after restart"
+    )
+
+    # Also verify the real _maybe_register_handlers now registers for personal-ro
     with patch("app.telegram.handlers.register_handlers") as mock_reg:
-        # Re-run the real _maybe_register_handlers logic
         from app.telegram.pool import _maybe_register_handlers
         await _maybe_register_handlers("personal-ro", new_session)
-        mock_reg.assert_not_called()
+        mock_reg.assert_called_once_with(new_session.client)
 
 
 # ---------------------------------------------------------------------------

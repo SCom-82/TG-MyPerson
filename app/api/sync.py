@@ -16,7 +16,9 @@ router = APIRouter(prefix="/sync", tags=["sync"])
 @router.post("/backfill")
 async def trigger_backfill(req: BackfillRequest, request: Request):
     alias = getattr(request.state, "session_alias", "work")
-    result = await start_backfill(req.chat_id, req.limit, alias=alias)
+    result = await start_backfill(
+        req.chat_id, req.limit, alias=alias, direction=req.direction
+    )
     if result.get("status") == "error":
         raise HTTPException(status_code=503, detail=result.get("detail"))
     return result
