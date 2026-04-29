@@ -25,13 +25,16 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    log = logging.getLogger(__name__)
+
     # Start all enabled Telegram sessions (supervisor pattern)
     await pool.start_all()
 
-    # Register event handlers for the 'work' session if authorized
-    work_session = pool._pool.get("work")
-    if work_session and work_session.client and await work_session.client.is_user_authorized():
-        register_handlers(work_session.client)
+    # Register event handlers for ALL authorized sessions (PR #4: was 'work'-only)
+    for alias, session in pool._pool.items():
+        if session.client and await session.client.is_user_authorized():
+            register_handlers(session.client)
+            log.info("Lifespan: registered handlers for alias '%s'", alias)
 
     yield
 
