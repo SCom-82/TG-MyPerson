@@ -87,6 +87,7 @@ Migrations:
 | 003 | Fix index on chat_members_snapshots.taken_at (DESC) |
 | 004 | Drop legacy tg_session table (Phase 4 cleanup) |
 | 005 | Partition rotation SQL helpers for audit_logs |
+| 006 | Fix regex in drop_old_audit_partitions to handle timezone-aware bounds |
 
 ## Environment variables
 
@@ -151,10 +152,18 @@ The script calls two SQL functions installed by migration 005:
 - `create_audit_partition(months_ahead int)` — idempotent, safe to run multiple times
 - `drop_old_audit_partitions(retention_days int)` — drops expired partitions
 
-**Automated schedule:** a ClaudeClaw cron job on the server runs this script on
-the 1st of each month at 02:00 UTC. Tracked in ticket
-`[tg-myperson] partition rotation cron — ClaudeClaw job`. Until that job is
-configured, run the script manually before each new month.
+**Automated schedule:** partition rotation is currently **manual**. Run the
+script on the 1st of each month before the new month begins.
+
+> **Note (2026-05-03):** `pg_cron` is not available in the `postgres:18-alpine`
+> image used by this deployment (extension not compiled in). The previous
+> ClaudeClaw cron job (`tg-audit-partitions`) was removed because the
+> `claude-code` container lacks an `ssh` binary, causing the job to silently
+> fail (exit 0 masking the error). Alternatives being evaluated:
+> a) sidecar cron container running `psql` directly,
+> b) APScheduler inside the app process,
+> c) upgrading to a PostgreSQL image that includes pg_cron.
+> Requires decision from @scom before implementation.
 
 ## API overview
 
