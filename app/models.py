@@ -75,6 +75,7 @@ class TgMessage(Base):
     message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     chat_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tg_chats.id"), nullable=False)
     from_user_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("tg_users.id"), nullable=True)
+    sender_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     reply_to_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     forward_from_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     forward_from_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -98,6 +99,7 @@ class TgMessage(Base):
         Index("ix_tg_messages_chat_date", "chat_id", "tg_date"),
         Index("ix_tg_messages_from_user", "from_user_id"),
         Index("ix_tg_messages_type", "message_type"),
+        Index("ix_tg_messages_sender_chat", "sender_chat_id"),
     )
 
 
