@@ -110,6 +110,7 @@ class MessageResponse(BaseModel):
     message_id: int
     chat_id: int
     from_user_id: int | None = None
+    sender_chat_id: int | None = None
     from_user: UserResponse | None = None
     reply_to_message_id: int | None = None
     forward_from_chat_id: int | None = None
