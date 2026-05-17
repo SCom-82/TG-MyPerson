@@ -15,6 +15,7 @@ from telethon.tl.types import (
 from app.models import TgMessage, TgMedia, TgChat
 from app.services.chat_service import upsert_chat
 from app.services.user_service import upsert_user
+from app.utils.sender import classify_sender, is_user_entity
 
 log = logging.getLogger(__name__)
 
@@ -34,9 +35,11 @@ async def upsert_message_from_event(session: AsyncSession, event, is_edit: bool 
     if not db_chat.is_monitored:
         return None
 
-    # Upsert sender
+    # Upsert sender — only for User entities.
+    # Channel/Chat senders must not be passed to upsert_user (no first_name).
+    # Attribution for non-user senders goes into sender_chat_id via classify_sender.
     sender = await event.get_sender()
-    if sender and hasattr(sender, "id"):
+    if sender is not None and is_user_entity(sender):
         await upsert_user(session, sender)
 
     return await upsert_message(session, message, db_chat)
@@ -49,6 +52,7 @@ async def upsert_message(session: AsyncSession, message, db_chat: TgChat) -> dic
     chat_id = db_chat.id
     msg_id = message.id
     sender_id = message.sender_id
+    from_user_id, sender_chat_id = classify_sender(sender_id)
 
     # Determine message type
     msg_type = _detect_message_type(message)
@@ -76,7 +80,8 @@ async def upsert_message(session: AsyncSession, message, db_chat: TgChat) -> dic
         db_msg = TgMessage(
             message_id=msg_id,
             chat_id=chat_id,
-            from_user_id=sender_id,
+            from_user_id=from_user_id,
+            sender_chat_id=sender_chat_id,
             reply_to_message_id=_get_reply_to(message),
             forward_from_chat_id=_get_forward_chat_id(message),
             forward_from_message_id=_get_forward_msg_id(message),
@@ -115,7 +120,8 @@ async def upsert_message(session: AsyncSession, message, db_chat: TgChat) -> dic
         "event": "message",
         "message_id": msg_id,
         "chat_id": chat_id,
-        "from_user_id": sender_id,
+        "from_user_id": from_user_id,
+        "sender_chat_id": sender_chat_id,
         "text": text_content,
         "message_type": msg_type,
         "tg_date": message.date.isoformat() if message.date else None,

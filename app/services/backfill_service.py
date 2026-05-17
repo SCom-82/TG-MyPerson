@@ -128,8 +128,18 @@ async def _run_backward_fill(
                 except Exception:
                     pass
 
-            await upsert_message(session, msg, db_chat)
-            count += 1
+            try:
+                await upsert_message(session, msg, db_chat)
+                count += 1
+            except Exception:
+                await session.rollback()
+                log.warning(
+                    "Skipped message %s in chat %d (upsert failed)",
+                    getattr(msg, "id", "?"),
+                    chat_id,
+                    exc_info=True,
+                )
+                continue
 
             if oldest_id == 0 or msg.id < oldest_id:
                 oldest_id = msg.id
@@ -191,8 +201,18 @@ async def _run_forward_fill(
                 except Exception:
                     pass
 
-            await upsert_message(session, msg, db_chat)
-            count += 1
+            try:
+                await upsert_message(session, msg, db_chat)
+                count += 1
+            except Exception:
+                await session.rollback()
+                log.warning(
+                    "Skipped message %s in chat %d (upsert failed)",
+                    getattr(msg, "id", "?"),
+                    chat_id,
+                    exc_info=True,
+                )
+                continue
 
             if msg.id > newest_id_seen:
                 newest_id_seen = msg.id
