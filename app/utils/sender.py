@@ -35,3 +35,20 @@ def is_user_entity(entity) -> bool:
     except ImportError:
         # Fallback: check for first_name attribute (User-specific)
         return hasattr(entity, "first_name") and hasattr(entity, "username")
+
+
+def classify_sender(sender_id: int | None) -> tuple[int | None, int | None]:
+    """Return (from_user_id, sender_chat_id) based on the marked sender_id.
+
+    Telethon message.sender_id is already marked via utils.get_peer_id:
+    negative values represent channels/chats, positive values represent users.
+
+    sender_id is None  -> (None, None)       # service messages
+    sender_id < 0      -> (None, sender_id)  # channel/chat (broadcast, anon-admin, linked)
+    sender_id > 0      -> (sender_id, None)  # user
+    """
+    if sender_id is None:
+        return (None, None)
+    if sender_id < 0:
+        return (None, sender_id)
+    return (sender_id, None)
