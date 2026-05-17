@@ -1,13 +1,24 @@
 import io
 import logging
 import os
+import urllib.parse
 from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
+from telethon.errors import (
+    ChannelPrivateError,
+    FileReferenceExpiredError,
+    FloodWaitError,
+)
 from telethon.tl import functions, types as tl_types
+from telethon.tl.types import (
+    DocumentAttributeFilename,
+    MessageMediaDocument,
+    MessageMediaPhoto,
+)
 
 from app.database import get_db
 from app.schemas import (
@@ -25,6 +36,10 @@ from app.telegram.pool import require_authorized_client
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/messages", tags=["messages"])
+
+# Chunk size for iter_download: 256 KiB — divisible by 4096, safe for MTProto parts,
+# keeps constant memory regardless of file size (up to 3.6 GB).
+_DOWNLOAD_CHUNK_SIZE = 256 * 1024
 
 
 def _to_utc(dt: datetime | None) -> datetime | None:
@@ -421,39 +436,116 @@ async def delete_message(chat_id: int, message_id: int, request: Request):
 @router.get("/{chat_id}/{message_id}/media")
 async def download_media(chat_id: int, message_id: int, request: Request):
     client = await require_authorized_client(request)
+
+    # --- 1. Resolve message & media ---
     try:
         msgs = await client.get_messages(entity=chat_id, ids=message_id)
         msg = msgs if not isinstance(msgs, list) else msgs[0] if msgs else None
         if not msg or not msg.media:
             raise HTTPException(status_code=404, detail="Message has no media")
-
-        buffer = io.BytesIO()
-        await client.download_media(msg, file=buffer)
-        buffer.seek(0)
-
-        content_type = "application/octet-stream"
-        filename = f"media_{message_id}"
-        if hasattr(msg.media, "document") and msg.media.document:
-            doc = msg.media.document
-            content_type = doc.mime_type or content_type
-            for attr in doc.attributes:
-                if hasattr(attr, "file_name") and attr.file_name:
-                    filename = attr.file_name
-                    break
-        elif hasattr(msg.media, "photo"):
-            content_type = "image/jpeg"
-            filename = f"photo_{message_id}.jpg"
-
-        return StreamingResponse(
-            buffer,
-            media_type=content_type,
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        )
     except HTTPException:
         raise
+    except (ChannelPrivateError,) as e:
+        raise HTTPException(status_code=403, detail=f"{type(e).__name__}: {e}")
+    except (FileReferenceExpiredError, FloodWaitError) as e:
+        raise HTTPException(status_code=502, detail=f"{type(e).__name__}: {e}")
     except Exception as e:
-        log.exception("Failed to download media for message %d in chat %d", message_id, chat_id)
-        raise HTTPException(status_code=500, detail=str(e))
+        log.exception("Failed to get message %d in chat %d", message_id, chat_id)
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+    # --- 2. Determine media object and metadata ---
+    media = msg.media
+
+    if isinstance(media, MessageMediaDocument) and media.document:
+        media_obj = media.document
+        mime = media_obj.mime_type or "application/octet-stream"
+        size: int | None = media_obj.size
+        filename = f"media_{message_id}"
+        for attr in media_obj.attributes:
+            if isinstance(attr, DocumentAttributeFilename) and attr.file_name:
+                filename = attr.file_name
+                break
+    elif isinstance(media, MessageMediaPhoto) and media.photo:
+        media_obj = media.photo
+        mime = "image/jpeg"
+        filename = f"photo_{message_id}.jpg"
+        # Best-effort size from largest PhotoSize; None is acceptable (chunked response).
+        size = None
+        try:
+            photo_sizes = [
+                s for s in media.photo.sizes
+                if hasattr(s, "size") and isinstance(s.size, int)
+            ]
+            if photo_sizes:
+                size = max(s.size for s in photo_sizes)
+        except Exception:
+            pass
+    else:
+        raise HTTPException(status_code=404, detail="No downloadable media")
+
+    # --- 3. Range header parsing (prefix form bytes=N- only, for resume) ---
+    offset = 0
+    status_code = 200
+    range_header = request.headers.get("range", "")
+    if range_header and size is not None:
+        import re
+        m = re.match(r"bytes=(\d+)-$", range_header.strip())
+        if m:
+            offset = int(m.group(1))
+            if offset >= size:
+                raise HTTPException(
+                    status_code=416,
+                    detail="Range Not Satisfiable",
+                    headers={"Content-Range": f"bytes */{size}"},
+                )
+            status_code = 206
+
+    # --- 4. Build response headers ---
+    def _content_disposition(name: str) -> str:
+        # ASCII-safe fallback + RFC 5987 encoded name for non-ASCII (e.g. Cyrillic)
+        try:
+            name.encode("ascii")
+            ascii_name = name
+        except UnicodeEncodeError:
+            ascii_name = "download"
+        encoded = urllib.parse.quote(name, safe="")
+        return f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{encoded}'
+
+    resp_headers: dict[str, str] = {
+        "Accept-Ranges": "bytes",
+        "Content-Disposition": _content_disposition(filename),
+    }
+    if size is not None:
+        if status_code == 206:
+            resp_headers["Content-Length"] = str(size - offset)
+            resp_headers["Content-Range"] = f"bytes {offset}-{size - 1}/{size}"
+            resp_headers["X-Expected-Size"] = str(size)
+        else:
+            resp_headers["Content-Length"] = str(size)
+            resp_headers["X-Expected-Size"] = str(size)
+
+    # --- 5. Streaming generator (no BytesIO, constant RAM) ---
+    async def _body():
+        try:
+            async for chunk in client.iter_download(
+                media_obj, offset=offset, chunk_size=_DOWNLOAD_CHUNK_SIZE
+            ):
+                yield chunk
+        except Exception:
+            # Headers already sent — log and let client detect truncation via
+            # Content-Length / X-Expected-Size mismatch (SPEC §3.1 point 6 / R6).
+            log.exception(
+                "Stream error during media download for message %d in chat %d",
+                message_id,
+                chat_id,
+            )
+
+    return StreamingResponse(
+        _body(),
+        status_code=status_code,
+        media_type=mime,
+        headers=resp_headers,
+    )
 
 
 @router.post("/{chat_id}/{message_id}/pin")
