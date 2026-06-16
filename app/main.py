@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import secrets
 from contextlib import asynccontextmanager
@@ -14,6 +15,7 @@ from app.authz.middleware import (
     tool_authz_middleware,
 )
 from app.config import settings
+from app.services.partition_maintenance import ensure_partitions, partition_loop
 from app.telegram.pool import pool
 from app.telegram.handlers import register_handlers
 
@@ -36,9 +38,16 @@ async def lifespan(app: FastAPI):
             register_handlers(session.client)
             log.info("Lifespan: registered handlers for alias '%s'", alias)
 
+    # Self-sufficient audit_logs partition maintenance (ADR 2026-06-16):
+    # ensure on startup (Layer 1), then a daily background tick (Layer 2).
+    # No external cron/sidecar — rotation lives and dies with this process.
+    await ensure_partitions()
+    partition_task = asyncio.create_task(partition_loop())
+
     yield
 
-    # Shutdown all sessions
+    # Stop the partition loop, then shut down all sessions
+    partition_task.cancel()
     await pool.stop_all()
 
 

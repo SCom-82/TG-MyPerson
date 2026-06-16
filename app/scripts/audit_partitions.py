@@ -1,4 +1,10 @@
-"""Audit log partition maintenance — run monthly via cron.
+"""Audit log partition maintenance — MANUAL fallback / escape hatch only.
+
+Self-sufficient rotation now runs in-process: ensure-on-startup + a daily
+background loop inside the app (see app/services/partition_maintenance.py and
+ADR 2026-06-16-tg-myperson-self-sufficient-partition-lifecycle.md). There is no
+external cron, sidecar, or scheduled task — this script is NOT the normal
+mechanism. Use it only for debugging or a one-off manual run.
 
 Creates audit_logs partitions for N+1 and N+2 months (double safety margin)
 and drops partitions whose upper bound is older than 90 days.
@@ -6,7 +12,7 @@ and drops partitions whose upper bound is older than 90 days.
 Usage:
     python -m app.scripts.audit_partitions
 
-The script calls SQL functions installed by migration 005:
+The script calls SQL functions installed by migrations 005/008:
     create_audit_partition(months_ahead int)
     drop_old_audit_partitions(retention_days int)
 """

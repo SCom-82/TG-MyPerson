@@ -135,35 +135,51 @@ invalidation is added.
 
 ### audit_logs partition rotation
 
-The `audit_logs` table is partitioned by month. Partitions must be created
-**before** the month begins, otherwise INSERTs will fail with a partition
-constraint violation.
+The `audit_logs` table is partitioned by month. Partition rotation is
+**fully self-sufficient** — it runs inside the service itself, with **no
+external cron, no sidecar, and no scheduled task of any kind**. See ADR
+`_system/docs/architect/2026-06-16-tg-myperson-self-sufficient-partition-lifecycle.md`
+in the vault for the full design and rationale.
+
+**How it works (defense-in-depth, all in-process / in-DB):**
+
+- **DEFAULT partition (safety-net).** `audit_logs_default` catches any row
+  whose month has no dedicated partition, so an INSERT can **never** fail with
+  a partition constraint violation — even at a month boundary.
+- **Ensure-on-startup.** On every boot, `lifespan()` calls
+  `ensure_partitions()`, which materializes the current + next 2 months and
+  drops partitions older than the retention window (90 days), under a
+  PostgreSQL advisory lock.
+- **Daily in-process loop.** A lightweight `asyncio` task re-runs
+  `ensure_partitions()` every 24h, so long-running containers self-heal across
+  month boundaries without needing a restart. No APScheduler — plain asyncio.
+- **Drain-from-default.** When a new month's partition is created while the
+  DEFAULT already holds rows for that month, those rows are redistributed into
+  the new partition (only runs when DEFAULT is non-empty).
 
 **Retention policy:** partitions with an upper bound older than 90 days are
-dropped automatically.
+dropped automatically by `drop_old_audit_partitions(90)`. The DEFAULT
+partition is never dropped (it has no upper bound).
 
-**How to run:**
+SQL functions (migrations 005/006/008):
+- `create_audit_partition(months_ahead int)` — idempotent partition creation
+- `drop_old_audit_partitions(retention_days int)` — drops expired partitions
+- `drain_audit_default_for_month(target_start date)` — redistributes rows out
+  of DEFAULT into a month partition (migration 008)
+
+**Manual fallback (debugging only):**
 
 ```bash
 python -m app.scripts.audit_partitions
 ```
 
-The script calls two SQL functions installed by migration 005:
-- `create_audit_partition(months_ahead int)` — idempotent, safe to run multiple times
-- `drop_old_audit_partitions(retention_days int)` — drops expired partitions
+This script is no longer the operational mechanism — rotation happens
+automatically in-process. It exists only as a manual escape hatch.
 
-**Automated schedule:** partition rotation is currently **manual**. Run the
-script on the 1st of each month before the new month begins.
-
-> **Note (2026-05-03):** `pg_cron` is not available in the `postgres:18-alpine`
-> image used by this deployment (extension not compiled in). The previous
-> ClaudeClaw cron job (`tg-audit-partitions`) was removed because the
-> `claude-code` container lacks an `ssh` binary, causing the job to silently
-> fail (exit 0 masking the error). Alternatives being evaluated:
-> a) sidecar cron container running `psql` directly,
-> b) APScheduler inside the app process,
-> c) upgrading to a PostgreSQL image that includes pg_cron.
-> Requires decision from @scom before implementation.
+> **Note (2026-06-16):** the previous manual/cron approaches (ClaudeClaw job,
+> sidecar `psql` container, Coolify Scheduled Task, pg_cron/pg_partman) were
+> all rejected — the service now owns its own partition lifecycle end-to-end.
+> The DB image is `postgres:16-alpine`.
 
 ## API overview
 
