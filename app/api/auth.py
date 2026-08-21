@@ -23,7 +23,12 @@ _DEFAULT_ALIAS = "work"
 
 @router.get("/status", response_model=AuthStatusResponse)
 async def auth_status(request: Request, session: str = Query(_DEFAULT_ALIAS)):
-    alias = request.query_params.get("session", session)
+    # Алиас берём из request.state, как все остальные эндпоинты: middleware уже
+    # разрешил его по X-Session-Alias -> ?session= -> "work". Раньше здесь читался
+    # ТОЛЬКО query-параметр, поэтому запрос с заголовком X-Session-Alias и без
+    # ?session= молча сваливался в дефолтный "work" и отдавал личность чужого
+    # аккаунта — /auth/me на тех же заголовках возвращал другое.
+    alias = getattr(request.state, "session_alias", session)
     tg_session = await pool.get(alias)
     return await tg_session.get_auth_status()
 

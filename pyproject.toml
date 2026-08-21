@@ -23,6 +23,12 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "httpx",
+    # tests/test_download_media_streaming.py импортирует MCP-клиент
+    # (_system/scripts/tg-myperson-mcp.py), который тянет mcp.server.
+    # Без этого T8/T9 падают ModuleNotFoundError на чистом main.
+    # Верхняя граница обязательна: в mcp 2.x у Server убрали декоратор
+    # .list_tools(), а боевой скрипт написан под low-level API 1.x.
+    "mcp>=1.0,<2",
 ]
 
 [tool.pytest.ini_options]
