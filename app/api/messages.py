@@ -20,6 +20,8 @@ from telethon.tl.types import (
     MessageMediaPhoto,
 )
 
+from app.telegram.photo_size import photo_byte_count
+
 from app.database import get_db
 from app.schemas import (
     MessageResponse,
@@ -469,17 +471,14 @@ async def download_media(chat_id: int, message_id: int, request: Request):
         media_obj = media.photo
         mime = "image/jpeg"
         filename = f"photo_{message_id}.jpg"
-        # Best-effort size from largest PhotoSize; None is acceptable (chunked response).
-        size = None
-        try:
-            photo_sizes = [
-                s for s in media.photo.sizes
-                if hasattr(s, "size") and isinstance(s.size, int)
-            ]
-            if photo_sizes:
-                size = max(s.size for s in photo_sizes)
-        except Exception:
-            pass
+        # Content-Length ОБЯЗАН совпадать с тем, что реально отдаст iter_download,
+        # иначе uvicorn рвёт ответ ("Response content longer than Content-Length")
+        # и клиент получает 200 + 0 байт. iter_download резолвит фото через
+        # utils._get_file_info -> _photo_size_byte_count(photo.sizes[-1]), поэтому
+        # размер считаем ровно так же. Прежний вариант (max по PhotoSize.size)
+        # отбрасывал PhotoSizeProgressive — у него нет поля .size — и брал длину
+        # мелкого превью, из-за чего ни одно прогрессивное фото не скачивалось.
+        size = photo_byte_count(media.photo)
     else:
         raise HTTPException(status_code=404, detail="No downloadable media")
 
