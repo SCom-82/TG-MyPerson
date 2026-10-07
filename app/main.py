@@ -142,7 +142,8 @@ app.include_router(max_api_router, prefix=MAX_INTERNAL_PREFIX, include_in_schema
 
 # Tool-name lookup for authz/audit middleware: our routers + their mount prefix.
 app.state.route_table = RouteTable(
-    (settings.api_prefix, router.routes) for router in API_ROUTERS
+    [(settings.api_prefix, router.routes) for router in API_ROUTERS]
+    + [(MAX_INTERNAL_PREFIX, max_api_router.routes)]
 )
 # Fail closed: without resolvable tool names tool_authz lets every write through.
 verify_route_table(app.state.route_table)

@@ -143,6 +143,8 @@ def test_every_route_name_is_a_cataloged_tool(fastapi_app):
     for entry in fastapi_app.state.route_table.entries:
         if entry.path.startswith(_ADMIN_PREFIX):
             continue  # admin API: X-Admin-Key, no tool authz
+        if entry.name == "max_unsupported":
+            continue  # internal MAX catch-all; the real tool comes from forced_tool_name
         assert entry.name in ALL_TOOLS, (
             f"route {sorted(entry.methods)} {entry.path} ('{entry.name}') is not in "
             "app/authz/tool_catalog.py"

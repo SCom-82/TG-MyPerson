@@ -225,7 +225,8 @@ async def platform_dispatch_middleware(request: Request, call_next):
       audit see the real tool. Then scope["path"] is rewritten to the internal
       MAX router, which has the same paths and route names. If the MAX router
       has no such route, the path goes to the 501 catch-all instead.
-      Paths unknown to both routers are left as is (→ 404/405 like Telegram).
+      A path whose tool name does not resolve → 404 right here, without
+      call_next: a MAX request must never reach a Telegram route.
     """
     if getattr(request.state, "is_admin_path", False):
         return await call_next(request)
@@ -249,7 +250,10 @@ async def platform_dispatch_middleware(request: Request, call_next):
 
     tool_name = max_only_tool or _resolve_route_name(request)
     if tool_name is None:
-        return await call_next(request)
+        # Never fall through to the Telegram routes: if name resolution breaks
+        # (e.g. a FastAPI change), a MAX alias would read tg_* data and bypass ro.
+        request.state.tool_name = "unknown"
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
     request.state.forced_tool_name = tool_name
     request.state.max_rewritten = True

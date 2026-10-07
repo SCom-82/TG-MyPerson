@@ -199,6 +199,46 @@ async def test_max_unknown_path_404_like_telegram(client, accounts):
     assert resp.json() == {"detail": "Not Found"}
 
 
+@pytest.mark.parametrize("path", ["/api/v1/messages", "/api/v1/chats", "/api/v1/sync/status"])
+@pytest.mark.asyncio
+async def test_max_unresolved_tool_404_never_reaches_tg_routes(client, accounts, path):
+    """Review 07.10: if name resolution breaks, a MAX alias must get 404, not TG data.
+
+    The TG read services are replaced by mocks that must never be awaited.
+    """
+    import app.authz.middleware as mw
+
+    tg_services = {
+        "app.api.messages.get_messages": AsyncMock(return_value=([], 0)),
+        "app.api.chats.get_chats": AsyncMock(return_value=([], 0)),
+        "app.api.sync.get_sync_states": AsyncMock(return_value=[]),
+    }
+    patches = [patch(target, mock) for target, mock in tg_services.items()]
+    for p in patches:
+        p.start()
+    try:
+        with patch.object(mw, "_resolve_route_name", return_value=None):
+            resp = await client.get(path, headers=_h(accounts["max_ro"]["alias"]))
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert resp.status_code == 404
+    assert resp.json() == {"detail": "Not Found"}
+    for target, mock in tg_services.items():
+        mock.assert_not_awaited(), target
+
+
+@pytest.mark.asyncio
+async def test_max_route_table_contains_internal_router(accounts):
+    """The resolver sees /_max routes, so PR-3+ MAX endpoints are found after the rewrite."""
+    import app.main as main_module
+
+    table = main_module.app.state.route_table
+    assert table.resolve("GET", "/api/v1/_max/_unsupported") == "max_unsupported"
+    assert table.resolve("GET", "/api/v1/chats") == "list_chats"
+
+
 # ---------------------------------------------------------------------------
 # A-4: MAX-only tools on a Telegram alias → 501
 # ---------------------------------------------------------------------------
