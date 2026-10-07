@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from app import database
 from app.max.config import MaxSettings
+from app.max.ingest import MaxIngest
 from app.max.session import ClientFactory, MaxSession
 from app.models import Account
 
@@ -30,13 +31,16 @@ class MaxPool:
         self._lock = asyncio.Lock()
 
     def _make(self, account: Account) -> MaxSession:
-        return MaxSession(
+        session = MaxSession(
             account_id=account.id,
             alias=account.alias,
             phone=account.phone,
             settings=self.settings,
             client_factory=self._client_factory,
         )
+        session.ingest = MaxIngest(session)
+        session.ingest.install()
+        return session
 
     async def _load_accounts(self, alias: str | None = None) -> list[Account]:
         stmt = select(Account).where(

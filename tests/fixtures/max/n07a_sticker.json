@@ -1,0 +1,60 @@
+{
+  "description": "N-7 sticker",
+  "source": "synthesized from pymax 2.4.1 model fields (camelCase wire aliases); replace with live frames after PR-6",
+  "me_id": 100,
+  "chat_type": null,
+  "frame": {
+    "opcode": 128,
+    "cmd": 0,
+    "payload": {
+      "chatId": 100500,
+      "message": {
+        "id": "71",
+        "time": 1791398400000,
+        "type": "USER",
+        "text": "",
+        "attaches": [
+          {
+            "_type": "STICKER",
+            "url": "https://s.oneme.ru/s.webp",
+            "stickerId": 9005,
+            "width": 512,
+            "height": 512,
+            "time": 1791398400000,
+            "stickerType": "STATIC",
+            "audio": false
+          }
+        ],
+        "sender": 200
+      }
+    }
+  },
+  "expect": {
+    "from_user_id": 200,
+    "sender_chat_id": null,
+    "reply_to_message_id": null,
+    "forward_from_chat_id": null,
+    "forward_from_message_id": null,
+    "text_html": null,
+    "tg_date": "2026-10-07T18:40:00+00:00",
+    "is_outgoing": false,
+    "is_edited": false,
+    "views": null,
+    "deleted_at": null,
+    "message_id": 71,
+    "chat_id": 100500,
+    "message_type": "sticker",
+    "text": null
+  },
+  "expect_media": [
+    {
+      "attach_index": 0,
+      "file_type": "sticker",
+      "file_id": "9005",
+      "file_unique_id": null,
+      "file_name": null,
+      "file_size": null,
+      "mime_type": null
+    }
+  ]
+}

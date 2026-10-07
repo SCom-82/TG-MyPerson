@@ -154,15 +154,11 @@ async def test_max_list_members_501_and_audit_error(client, accounts):
 @pytest.mark.parametrize(
     "method,path,tool",
     [
-        ("GET", "/api/v1/chats", "list_chats"),
-        ("GET", "/api/v1/chats/-100123", "get_chat_detail"),
-        ("GET", "/api/v1/messages?chat_id=1", "list_messages"),
-        ("GET", "/api/v1/messages/-100123/5", "get_single_message"),
-        ("GET", "/api/v1/users", "list_users"),
-        ("GET", "/api/v1/sync/status", "sync_status"),
+        ("GET", "/api/v1/messages/scheduled?chat_id=1", "list_scheduled"),
+        ("GET", "/api/v1/snapshots/chat/-100123", "list_chat_snapshots"),
         ("POST", "/api/v1/sync/backfill", "trigger_backfill"),
-        ("GET", "/api/v1/contacts", "list_contacts"),
-        ("GET", "/api/v1/search/global?q=x", "search_global"),
+        ("POST", "/api/v1/sync/chats", "sync_chats"),
+        ("GET", "/api/v1/messages/-100123/5/media", "download_media"),
     ],
 )
 @pytest.mark.asyncio
@@ -186,7 +182,7 @@ async def test_max_rw_write_passes_authz_then_501(client, accounts):
 @pytest.mark.asyncio
 async def test_max_alias_via_query_param(client, accounts):
     alias = accounts["max_ro"]["alias"]
-    resp = await client.get(f"/api/v1/chats?session={alias}", headers=API_KEY)
+    resp = await client.get(f"/api/v1/chats/-100123/members?session={alias}", headers=API_KEY)
     assert resp.status_code == 501
     assert resp.json()["alias"] == alias
 
@@ -319,11 +315,11 @@ async def test_alias_cache_keeps_platform(client, accounts):
     import app.authz.middleware as mw
 
     alias = accounts["max_ro"]["alias"]
-    first = await client.get("/api/v1/chats", headers=_h(alias))
+    first = await client.get("/api/v1/chats/-100123/members", headers=_h(alias))
     assert mw._alias_cache[alias][0] == (accounts["max_ro"]["id"], "max")
 
     with patch.object(mw, "_resolve_alias_from_db", AsyncMock(side_effect=AssertionError("cache miss"))):
-        second = await client.get("/api/v1/chats", headers=_h(alias))
+        second = await client.get("/api/v1/chats/-100123/members", headers=_h(alias))
     assert first.status_code == second.status_code == 501
 
 

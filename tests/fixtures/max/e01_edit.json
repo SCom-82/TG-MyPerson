@@ -1,0 +1,40 @@
+{
+  "description": "edit (MSG_EDIT, status EDITED)",
+  "source": "synthesized from pymax 2.4.1 model fields (camelCase wire aliases); replace with live frames after PR-6",
+  "me_id": 100,
+  "chat_type": null,
+  "frame": {
+    "opcode": 67,
+    "cmd": 0,
+    "payload": {
+      "chatId": 100500,
+      "message": {
+        "id": "1",
+        "time": 1791398400000,
+        "type": "USER",
+        "text": "Привет!",
+        "attaches": [],
+        "sender": 200,
+        "status": "EDITED"
+      }
+    }
+  },
+  "expect": {
+    "from_user_id": 200,
+    "sender_chat_id": null,
+    "reply_to_message_id": null,
+    "forward_from_chat_id": null,
+    "forward_from_message_id": null,
+    "text_html": null,
+    "tg_date": "2026-10-07T18:40:00+00:00",
+    "is_outgoing": false,
+    "is_edited": true,
+    "views": null,
+    "deleted_at": null,
+    "message_id": 1,
+    "chat_id": 100500,
+    "message_type": "text",
+    "text": "Привет!"
+  },
+  "expect_media": []
+}

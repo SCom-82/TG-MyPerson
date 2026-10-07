@@ -20,6 +20,7 @@ from pymax.types.domain.auth import (
     RequestQrResponse,
     StartAuthResponse,
 )
+from pymax.types import Chat, User
 from pymax.types.domain.profile import Profile
 from pymax.types.domain.sync import SyncState
 
@@ -48,6 +49,12 @@ class FakeMaxServer:
         # SMS
         self.sms_code = "12345"
         self.code_requests = 0
+
+        # Login snapshot and user directory
+        self.chats: list[dict] = []
+        self.contacts: list[dict] = []
+        self.users: dict[int, dict] = {}
+        self.get_users_calls: list[list[int]] = []
 
         self.factory_calls: list[dict] = []
         self.clients: list["FakePyMaxClient"] = []
@@ -130,7 +137,10 @@ class FakePyMaxClient:
             config=SimpleNamespace(phone=phone, password_max_attempts=extra_config.password_max_attempts),
         )
         self.me = None
+        self.chats: list = []
+        self.contacts: list = []
         self.is_connected = False
+        self._frame_hooks: list = []
         self.closed = False
         self.calls: list[str] = []  # every network-ish method called on the client
         self._closed = asyncio.Event()
@@ -166,7 +176,24 @@ class FakePyMaxClient:
             {"contact": {"id": self.server.user_id, "names": [{"firstName": "Сергей", "lastName": "С"}],
                          "link": "sergey", "phone": 79001112233}}
         )
+        self.chats = [Chat.model_validate(c) for c in self.server.chats]
+        self.contacts = [User.model_validate(u) for u in self.server.contacts]
         self.is_connected = True
+
+    # -- adapter surface (app.max.session._AdapterMixin) --------------------
+
+    def add_frame_hook(self, hook) -> None:
+        self._frame_hooks.append(hook)
+
+    async def push(self, frame: dict) -> None:
+        """Deliver a server frame the way the adapter's frame hook sees it."""
+        for hook in self._frame_hooks:
+            await hook(frame["opcode"], frame.get("cmd", 0), frame.get("payload"))
+
+    async def get_users(self, user_ids: list[int]) -> list:
+        self.calls.append("get_users")
+        self.server.get_users_calls.append(list(user_ids))
+        return [User.model_validate(self.server.users[i]) for i in user_ids if i in self.server.users]
 
     async def wait_closed(self) -> None:
         await self._closed.wait()

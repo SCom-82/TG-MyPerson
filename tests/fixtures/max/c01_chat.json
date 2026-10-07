@@ -1,0 +1,29 @@
+{
+  "description": "NOTIF_CHAT",
+  "source": "synthesized from pymax 2.4.1 model fields (camelCase wire aliases); replace with live frames after PR-6",
+  "frame": {
+    "opcode": 135,
+    "cmd": 0,
+    "payload": {
+      "chat": {
+        "id": -70000000001,
+        "type": "CHAT",
+        "status": "ACTIVE",
+        "owner": 200,
+        "title": "Рабочий чат",
+        "link": "https://max.ru/join/xyz",
+        "participantsCount": 12,
+        "description": "описание",
+        "lastMessage": {
+          "id": "3",
+          "time": 1791398400000,
+          "type": "USER",
+          "text": "фото",
+          "attaches": [],
+          "sender": 200
+        },
+        "lastEventTime": 1791398400000
+      }
+    }
+  }
+}

@@ -20,6 +20,7 @@ from app.authz.route_table import RouteTable, verify_route_table
 from app.config import settings
 from app.max import pool as max_pool_module
 from app.max.config import max_settings
+from app.max.maintenance import raw_events_loop
 from app.max.api import MAX_API_ROUTERS, max_api_router
 from app.services.partition_maintenance import ensure_partitions, partition_loop
 from app.telegram.pool import pool
@@ -52,17 +53,19 @@ async def lifespan(app: FastAPI):
 
     # MAX (ADR §2.C/§2.I): only with MAX_ENABLED=true; started in the background
     # so a hanging MAX handshake never delays startup or touches the TG pool.
-    max_start_task = None
+    max_start_task = max_retention_task = None
     if max_settings.enabled:
         max_pool_module.max_pool = max_pool_module.MaxPool(max_settings)
         max_start_task = asyncio.create_task(max_pool_module.max_pool.start_all())
+        max_retention_task = asyncio.create_task(raw_events_loop(max_settings))
 
     yield
 
     # Stop the partition loop, then shut down all sessions
     partition_task.cancel()
-    if max_start_task is not None:
-        max_start_task.cancel()
+    for task in (max_start_task, max_retention_task):
+        if task is not None:
+            task.cancel()
     if max_pool_module.max_pool is not None:
         await max_pool_module.max_pool.stop_all()
         max_pool_module.max_pool = None

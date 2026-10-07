@@ -1,0 +1,16 @@
+{
+  "description": "NOTIF_MSG_DELETE",
+  "source": "synthesized from pymax 2.4.1 model fields (camelCase wire aliases); replace with live frames after PR-6",
+  "frame": {
+    "opcode": 142,
+    "cmd": 0,
+    "payload": {
+      "chatId": 100500,
+      "messageIds": [
+        "1",
+        "2",
+        "999"
+      ]
+    }
+  }
+}

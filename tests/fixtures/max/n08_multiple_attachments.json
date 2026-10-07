@@ -1,0 +1,91 @@
+{
+  "description": "N-8 several attachments: type by the first, one media row each",
+  "source": "synthesized from pymax 2.4.1 model fields (camelCase wire aliases); replace with live frames after PR-6",
+  "me_id": 100,
+  "chat_type": null,
+  "frame": {
+    "opcode": 128,
+    "cmd": 0,
+    "payload": {
+      "chatId": -70000000001,
+      "message": {
+        "id": "8",
+        "time": 1791398400000,
+        "type": "USER",
+        "text": "",
+        "attaches": [
+          {
+            "_type": "PHOTO",
+            "baseUrl": "https://i.oneme.ru/i?r=abc",
+            "height": 1280,
+            "width": 960,
+            "photoId": 9001,
+            "photoToken": "ptok"
+          },
+          {
+            "_type": "FILE",
+            "fileId": 9002,
+            "name": "Договор.pdf",
+            "size": 48213,
+            "token": "ftok"
+          },
+          {
+            "_type": "PHOTO",
+            "baseUrl": "https://i.oneme.ru/i?r=abc",
+            "height": 1280,
+            "width": 960,
+            "photoId": 9011,
+            "photoToken": "ptok"
+          }
+        ],
+        "sender": 200
+      }
+    }
+  },
+  "expect": {
+    "from_user_id": 200,
+    "sender_chat_id": null,
+    "reply_to_message_id": null,
+    "forward_from_chat_id": null,
+    "forward_from_message_id": null,
+    "text_html": null,
+    "tg_date": "2026-10-07T18:40:00+00:00",
+    "is_outgoing": false,
+    "is_edited": false,
+    "views": null,
+    "deleted_at": null,
+    "message_id": 8,
+    "chat_id": -70000000001,
+    "message_type": "photo",
+    "text": null
+  },
+  "expect_media": [
+    {
+      "attach_index": 0,
+      "file_type": "photo",
+      "file_id": "9001",
+      "file_unique_id": null,
+      "file_name": null,
+      "file_size": null,
+      "mime_type": null
+    },
+    {
+      "attach_index": 1,
+      "file_type": "document",
+      "file_id": "9002",
+      "file_unique_id": null,
+      "file_name": "Договор.pdf",
+      "file_size": 48213,
+      "mime_type": null
+    },
+    {
+      "attach_index": 2,
+      "file_type": "photo",
+      "file_id": "9011",
+      "file_unique_id": null,
+      "file_name": null,
+      "file_size": null,
+      "mime_type": null
+    }
+  ]
+}

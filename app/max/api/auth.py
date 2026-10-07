@@ -10,29 +10,11 @@ import qrcode.image.pure
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
-from app.max.pool import MaxAliasNotFound, get_max_pool
+from app.max.api.common import session_or_error as _session
 from app.max.session import MaxLoginConflict, MaxSession, MaxSessionUnavailable
 from app.schemas import AuthMeResponse, AuthStatusResponse, LoginCodeRequest, LoginRequest, SessionImportRequest
 
 router = APIRouter(prefix="/auth", tags=["max-auth"])
-
-
-def _alias(request: Request) -> str:
-    return getattr(request.state, "session_alias", "")
-
-
-async def _session(request: Request) -> MaxSession | JSONResponse:
-    alias = _alias(request)
-    pool = get_max_pool()
-    if pool is None:
-        return JSONResponse(
-            status_code=503,
-            content={"detail": f"Session '{alias}' not available", "state": "stopped", "reason": "MAX is disabled"},
-        )
-    try:
-        return await pool.get(alias)
-    except MaxAliasNotFound:
-        return JSONResponse(status_code=404, content={"error": f"Session alias '{alias}' not registered or disabled"})
 
 
 def _unavailable(exc: MaxSessionUnavailable) -> JSONResponse:

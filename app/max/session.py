@@ -94,7 +94,36 @@ guard_pymax_logger()
 # Thin PyMax subclasses
 # ---------------------------------------------------------------------------
 
+FrameHook = Callable[[int, int, dict | None], Awaitable[None]]
+
+
 class _AdapterMixin:
+    """Guards + a frame hook in front of PyMax's dispatcher.
+
+    The hook sees every inbound frame before PyMax parses it (ingest journals raw
+    frames there, ADR §2.E). It is re-applied to every App PyMax builds, i.e. on
+    each (re)connect. Hook errors are logged and never reach PyMax.
+    """
+
+    def add_frame_hook(self, hook: FrameHook) -> None:
+        self.__dict__.setdefault("_frame_hooks", []).append(hook)
+
+    def _build_app(self):  # noqa: ANN202 — pymax App
+        app = super()._build_app()
+        hooks: list[FrameHook] = self.__dict__.setdefault("_frame_hooks", [])
+        dispatch = app.on_event
+
+        async def on_event(frame) -> None:  # noqa: ANN001 — pymax InboundFrame
+            for hook in hooks:
+                try:
+                    await hook(frame.opcode, frame.cmd, frame.payload)
+                except Exception:  # noqa: BLE001
+                    log.exception("max: frame hook failed opcode=%s", frame.opcode)
+            await dispatch(frame)
+
+        app.connection.on_event = on_event
+        return app
+
     async def _prepare_config(self):  # noqa: ANN202 — pymax ClientConfig
         config = await super()._prepare_config()
         # ExtraConfig has no `interactive`; ClientConfig defaults it to True.
@@ -202,8 +231,11 @@ class MaxSession:
         self.login: LoginController | None = None
         self.qr_expired = False
 
-        # PR-4: ingest registers event handlers on every freshly built client.
+        # Ingest (PR-4) attaches to every freshly built client and gets the
+        # login snapshot (chats, contacts) once authorized.
         self.client_hooks: list[Callable[[Any], None]] = []
+        self.authorized_hooks: list[Callable[[Any], Awaitable[None]]] = []
+        self.ingest: Any = None  # app.max.ingest.MaxIngest, set by MaxPool
 
         self._client: Any = None
         self._task: asyncio.Task | None = None
@@ -385,6 +417,11 @@ class MaxSession:
                     await db.commit()
             except Exception:  # noqa: BLE001
                 log.warning("max[%s]: failed to store platform_user_id", self.alias, exc_info=True)
+        for hook in self.authorized_hooks:
+            try:
+                await hook(client)
+            except Exception:  # noqa: BLE001
+                log.warning("max[%s]: authorized hook failed", self.alias, exc_info=True)
         self.login = None
         self.qr_expired = False
         self._set_state("authorized")
