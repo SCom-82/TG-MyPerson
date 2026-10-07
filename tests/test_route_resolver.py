@@ -190,3 +190,22 @@ def test_app_import_fails_when_key_routes_do_not_resolve(monkeypatch):
         importlib.reload(main_module)
     monkeypatch.undo()
     importlib.reload(main_module)  # restore a healthy module for later tests
+
+
+def test_every_max_api_router_is_registered():
+    """Same guard for the internal MAX router: every APIRouter in app/max/api/*
+    except the aggregate max_api_router must be a leaf listed in MAX_API_ROUTERS."""
+    import app.max.api
+    from app.max.api.router import MAX_API_ROUTERS, max_api_router
+
+    found = 0
+    for info in pkgutil.iter_modules(app.max.api.__path__):
+        module = importlib.import_module(f"app.max.api.{info.name}")
+        for attr, candidate in vars(module).items():
+            if not isinstance(candidate, APIRouter) or candidate is max_api_router:
+                continue
+            found += 1
+            assert any(candidate is r for r in MAX_API_ROUTERS), (
+                f"app/max/api/{info.name}.py: {attr} is not in MAX_API_ROUTERS"
+            )
+    assert found >= len(MAX_API_ROUTERS)

@@ -18,7 +18,9 @@ from app.authz.middleware import (
 )
 from app.authz.route_table import RouteTable, verify_route_table
 from app.config import settings
-from app.max.api import max_api_router
+from app.max import pool as max_pool_module
+from app.max.config import max_settings
+from app.max.api import MAX_API_ROUTERS, max_api_router
 from app.services.partition_maintenance import ensure_partitions, partition_loop
 from app.telegram.pool import pool
 from app.telegram.handlers import register_handlers
@@ -48,10 +50,22 @@ async def lifespan(app: FastAPI):
     await ensure_partitions()
     partition_task = asyncio.create_task(partition_loop())
 
+    # MAX (ADR §2.C/§2.I): only with MAX_ENABLED=true; started in the background
+    # so a hanging MAX handshake never delays startup or touches the TG pool.
+    max_start_task = None
+    if max_settings.enabled:
+        max_pool_module.max_pool = max_pool_module.MaxPool(max_settings)
+        max_start_task = asyncio.create_task(max_pool_module.max_pool.start_all())
+
     yield
 
     # Stop the partition loop, then shut down all sessions
     partition_task.cancel()
+    if max_start_task is not None:
+        max_start_task.cancel()
+    if max_pool_module.max_pool is not None:
+        await max_pool_module.max_pool.stop_all()
+        max_pool_module.max_pool = None
     await pool.stop_all()
 
 
@@ -143,7 +157,7 @@ app.include_router(max_api_router, prefix=MAX_INTERNAL_PREFIX, include_in_schema
 # Tool-name lookup for authz/audit middleware: our routers + their mount prefix.
 app.state.route_table = RouteTable(
     [(settings.api_prefix, router.routes) for router in API_ROUTERS]
-    + [(MAX_INTERNAL_PREFIX, max_api_router.routes)]
+    + [(MAX_INTERNAL_PREFIX, router.routes) for router in MAX_API_ROUTERS]
 )
 # Fail closed: without resolvable tool names tool_authz lets every write through.
 verify_route_table(app.state.route_table)

@@ -160,10 +160,9 @@ async def test_max_list_members_501_and_audit_error(client, accounts):
         ("GET", "/api/v1/messages/-100123/5", "get_single_message"),
         ("GET", "/api/v1/users", "list_users"),
         ("GET", "/api/v1/sync/status", "sync_status"),
-        ("GET", "/api/v1/auth/status", "auth_status"),
         ("POST", "/api/v1/sync/backfill", "trigger_backfill"),
-        ("POST", "/api/v1/auth/qr", "auth_qr_start"),
-        ("GET", "/api/v1/auth/qr.png", "auth_qr_status"),
+        ("GET", "/api/v1/contacts", "list_contacts"),
+        ("GET", "/api/v1/search/global?q=x", "search_global"),
     ],
 )
 @pytest.mark.asyncio
@@ -399,7 +398,8 @@ async def test_admin_create_max_account(client, admin_aliases):
     assert body["platform_user_id"] is None
     assert body["write_chat_ids"] is None
     assert body["write_rate_per_hour"] is None
-    assert body["runtime"] == {"state": "stopped"}
+    assert body["runtime"]["state"] == "stopped"
+    assert body["runtime"]["pymax"] == "2.4.1"
     assert body["watch_chat_ids"] == []  # ignored for MAX
     assert "warning" not in body
 
@@ -482,7 +482,7 @@ async def test_admin_list_shows_platform(client, accounts):
     by_alias = {a["alias"]: a for a in resp.json()}
     assert by_alias[accounts["tg_rw"]["alias"]]["platform"] == "telegram"
     assert "runtime" not in by_alias[accounts["tg_rw"]["alias"]]
-    assert by_alias[accounts["max_ro"]["alias"]]["runtime"] == {"state": "stopped"}
+    assert by_alias[accounts["max_ro"]["alias"]]["runtime"]["state"] == "stopped"
 
 
 # ---------------------------------------------------------------------------

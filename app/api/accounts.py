@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.database import async_session
 from app.models import Account, AuditLog
+from app.max import pool as max_pool_module
 from app.telegram.pool import pool
 from app.authz.middleware import invalidate_alias_cache
 
@@ -24,8 +25,6 @@ router = APIRouter(prefix="/accounts", tags=["accounts-admin"])
 
 _PHONE_RE = re.compile(r"^\+\d{7,15}$")
 _VALID_MODES = {"rw", "ro"}
-# Placeholder until the MAX pool lands (PR-3): MAX sessions are not started yet.
-_MAX_RUNTIME_STOPPED = {"state": "stopped"}
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +87,20 @@ class AuditQueryParams(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _max_runtime_stopped() -> dict:
+    """runtime of a MAX account the pool does not hold (MAX disabled / never started)."""
+    from app.max.session import PYMAX_VERSION
+
+    return {
+        "state": "stopped", "connected": False, "authorized": False, "transport": None,
+        "proxy": False, "last_event_at": None, "last_catchup_at": None,
+        "catchup_backlog_chats": 0, "last_error": None, "pymax": PYMAX_VERSION,
+    }
+
+
 def _account_to_dict(account: Account, pool_status_map: dict[str, dict] | None = None) -> dict:
+    if account.platform == "max":
+        return _max_account_to_dict(account)
     pool_entry = (pool_status_map or {}).get(account.alias, {})
     data = {
         "id": account.id,
@@ -112,13 +124,36 @@ def _account_to_dict(account: Account, pool_status_map: dict[str, dict] | None =
         ),
         "platform": account.platform,
     }
-    if account.platform == "max":
-        # API spec §1.3: MAX-only fields are not shown for Telegram accounts.
-        data["platform_user_id"] = account.platform_user_id
-        data["write_chat_ids"] = account.write_chat_ids
-        data["write_rate_per_hour"] = account.write_rate_per_hour
-        data["runtime"] = dict(_MAX_RUNTIME_STOPPED)
     return data
+
+
+def _max_account_to_dict(account: Account) -> dict:
+    """API spec §1.3: same common fields, filled from the MAX runtime, plus MAX-only fields."""
+    max_pool = max_pool_module.get_max_pool()
+    entry = max_pool.pool_status().get(account.alias) if max_pool is not None else None
+    runtime = entry["runtime"] if entry else _max_runtime_stopped()
+    started_at = entry["started_at"] if entry else None
+    return {
+        "id": account.id,
+        "alias": account.alias,
+        "phone": account.phone,
+        "tg_user_id": account.tg_user_id,
+        "mode": account.mode,
+        "display_name": account.display_name,
+        "is_enabled": account.is_enabled,
+        "notes": account.notes,
+        "watch_chat_ids": account.watch_chat_ids or [],
+        "created_at": account.created_at.isoformat() if account.created_at else None,
+        "last_started_at": account.last_started_at.isoformat() if account.last_started_at else None,
+        "is_running": runtime["connected"],
+        "last_error": runtime["last_error"],
+        "last_started_at_pool": started_at.isoformat() if started_at else None,
+        "platform": account.platform,
+        "platform_user_id": account.platform_user_id,
+        "write_chat_ids": account.write_chat_ids,
+        "write_rate_per_hour": account.write_rate_per_hour,
+        "runtime": runtime,
+    }
 
 
 def _build_pool_map() -> dict[str, dict]:
@@ -239,6 +274,12 @@ async def patch_account(account_id: int, body: AccountPatch) -> dict:
             await pool.stop_alias(old_alias)
         except Exception:
             pass  # Non-fatal: session may not be in pool
+        max_pool = max_pool_module.get_max_pool()
+        if max_pool is not None:
+            try:
+                await max_pool.stop_alias(old_alias)
+            except Exception:
+                pass
 
     pool_map = _build_pool_map()
     return _account_to_dict(account, pool_map)

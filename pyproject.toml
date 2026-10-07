@@ -19,6 +19,12 @@ dependencies = [
     "sse-starlette>=2.0",
     "python-multipart>=0.0.9",
     "aiohttp>=3.9",
+    # MAX transport. Exact pin: PyMax follows an undocumented protocol and its
+    # models change between releases. Bump only by the procedure in README
+    # («Платформа MAX → обновление PyMax»): changelog → pin → pytest → deploy.
+    "maxapi-python==2.4.1",
+    # QR PNG for /auth/qr.png (pure-python PNG writer, no Pillow).
+    "qrcode[png]>=8.0",
 ]
 
 [project.optional-dependencies]
