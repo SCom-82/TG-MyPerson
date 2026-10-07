@@ -1,7 +1,13 @@
 """Authorization middleware stack.
 
-Registration order in app/main.py (outermost = first to execute):
-  X-API-Key (existing) → resolve_alias → tool_authz → audit_log → route
+Execution order (see app/main.py for the registration side):
+  audit_log → X-API-Key → admin_auth → resolve_alias → platform_dispatch → tool_authz → route
+
+platform_dispatch (MAX ADR 2026-10-07 §2.B) routes requests of 'max' aliases to
+the internal /api/v1/_max router; for 'telegram' aliases it is a no-op except
+for the MAX-only paths (→ 501).
+
+Historical note below describes the original three-layer registration:
 
 Middleware are registered as @app.middleware("http") decorators in reverse
 order (last registered = outermost), so in main.py we register:
@@ -22,7 +28,13 @@ from typing import Any
 from fastapi import Request
 from starlette.responses import JSONResponse
 
-from app.authz.tool_catalog import READ_ONLY_TOOLS, WRITE_TOOLS, WRITE_TG_TOOLS, tool_is_write
+from app.authz.tool_catalog import (
+    MAX_ONLY_TOOLS,
+    READ_ONLY_TOOLS,
+    WRITE_TG_TOOLS,
+    WRITE_TOOLS,
+    tool_is_write,
+)
 
 log = logging.getLogger(__name__)
 
@@ -47,9 +59,25 @@ _HEALTH_PATHS = {
     "/api/v1/readyz",
 }
 
-# Simple in-memory alias cache: {alias: (account_id, expiry_time)}
-_alias_cache: dict[str, tuple[int, float]] = {}
+# Simple in-memory alias cache: {alias: ((account_id, platform), expiry_time)}
+_alias_cache: dict[str, tuple[tuple[int, str] | int, float]] = {}
 _CACHE_TTL = 10.0  # seconds — keep short; see single-worker note in README
+
+_DEFAULT_PLATFORM = "telegram"
+
+# Internal router for platform 'max'. Reachable only via platform_dispatch rewrite.
+_API_PREFIX = "/api/v1"
+MAX_INTERNAL_PREFIX = "/api/v1/_max"
+MAX_UNSUPPORTED_PATH = MAX_INTERNAL_PREFIX + "/_unsupported"
+
+# MAX-only endpoints: (method, path) → tool name. The routes themselves exist only
+# in the MAX router (PR-3); a Telegram alias gets 501 for them (API spec §2.3).
+_MAX_ONLY_PATHS: dict[tuple[str, str], str] = {
+    ("POST", "/api/v1/auth/qr"): "auth_qr_start",
+    ("GET", "/api/v1/auth/qr"): "auth_qr_status",
+    ("GET", "/api/v1/auth/qr.png"): "auth_qr_status",
+}
+assert set(_MAX_ONLY_PATHS.values()) <= MAX_ONLY_TOOLS
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +134,7 @@ async def resolve_alias_middleware(request: Request, call_next):
     if request.url.path in _SKIP_PATHS:
         request.state.session_alias = "work"
         request.state.account_id = None
+        request.state.platform = _DEFAULT_PLATFORM
         return await call_next(request)
 
     alias = (
@@ -118,44 +147,57 @@ async def resolve_alias_middleware(request: Request, call_next):
     now = time.monotonic()
     cached = _alias_cache.get(alias)
     if cached and cached[1] > now:
-        account_id = cached[0]
+        account_id, platform = _split_account_ref(cached[0])
         request.state.session_alias = alias
         request.state.account_id = account_id
+        request.state.platform = platform
         return await call_next(request)
 
     # Cache miss — query DB
     try:
-        account_id = await _resolve_alias_from_db(alias)
+        resolved = await _resolve_alias_from_db(alias)
     except Exception as exc:
         log.error("resolve_alias: DB error for alias '%s': %s", alias, exc)
-        account_id = None
+        resolved = None
 
-    if account_id is None:
+    if resolved is None:
         return JSONResponse(
             status_code=404,
             content={"error": f"Session alias '{alias}' not registered or disabled"},
         )
 
-    _alias_cache[alias] = (account_id, now + _CACHE_TTL)
+    account_id, platform = _split_account_ref(resolved)
+    _alias_cache[alias] = ((account_id, platform), now + _CACHE_TTL)
     request.state.session_alias = alias
     request.state.account_id = account_id
+    request.state.platform = platform
     return await call_next(request)
 
 
-async def _resolve_alias_from_db(alias: str) -> int | None:
+def _split_account_ref(ref: tuple[int, str] | int) -> tuple[int, str]:
+    """(account_id, platform) from a resolver/cache value.
+
+    A bare int is the pre-MAX shape (account_id only) and means Telegram.
+    """
+    if isinstance(ref, tuple):
+        return ref[0], ref[1]
+    return ref, _DEFAULT_PLATFORM
+
+
+async def _resolve_alias_from_db(alias: str) -> tuple[int, str] | None:
     from sqlalchemy import select
     from app.database import async_session
     from app.models import Account
 
     async with async_session() as db:
         result = await db.execute(
-            select(Account.id).where(
+            select(Account.id, Account.platform).where(
                 Account.alias == alias,
                 Account.is_enabled == True,  # noqa: E712
             )
         )
-        row = result.scalar_one_or_none()
-    return row
+        row = result.one_or_none()
+    return (row.id, row.platform) if row is not None else None
 
 
 def invalidate_alias_cache(alias: str | None = None) -> None:
@@ -164,6 +206,75 @@ def invalidate_alias_cache(alias: str | None = None) -> None:
         _alias_cache.clear()
     else:
         _alias_cache.pop(alias, None)
+
+
+# ---------------------------------------------------------------------------
+# Middleware 1b: platform_dispatch (MAX ADR §2.B)
+# ---------------------------------------------------------------------------
+
+async def platform_dispatch_middleware(request: Request, call_next):
+    """Route the request by the platform of the resolved alias.
+
+    Runs after resolve_alias and before tool_authz.
+
+    - External request to /api/v1/_max... → 404 (internal router, reachable only
+      through the rewrite below).
+    - telegram: no-op, except MAX-only paths (/auth/qr*) → 501.
+    - max: the tool name is resolved against the Telegram routes first and put
+      into request.state.forced_tool_name, so tool_authz (ro check, policy) and
+      audit see the real tool. Then scope["path"] is rewritten to the internal
+      MAX router, which has the same paths and route names. If the MAX router
+      has no such route, the path goes to the 501 catch-all instead.
+      Paths unknown to both routers are left as is (→ 404/405 like Telegram).
+    """
+    if getattr(request.state, "is_admin_path", False):
+        return await call_next(request)
+
+    path = request.url.path
+    if path == MAX_INTERNAL_PREFIX or path.startswith(MAX_INTERNAL_PREFIX + "/"):
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+    if not path.startswith(_API_PREFIX + "/") or path in _SKIP_PATHS:
+        return await call_next(request)
+
+    platform = getattr(request.state, "platform", _DEFAULT_PLATFORM)
+    max_only_tool = _MAX_ONLY_PATHS.get((request.method, path))
+
+    if platform != "max":
+        if max_only_tool is not None:
+            request.state.tool_name = max_only_tool
+            request.state.tool_is_write = False
+            return _not_supported(request, max_only_tool, platform)
+        return await call_next(request)
+
+    tool_name = max_only_tool or _resolve_route_name(request)
+    if tool_name is None:
+        return await call_next(request)
+
+    request.state.forced_tool_name = tool_name
+    request.state.max_rewritten = True
+    _rewrite_path(request, MAX_INTERNAL_PREFIX + path[len(_API_PREFIX):])
+    if _resolve_route_name(request) is None:
+        _rewrite_path(request, MAX_UNSUPPORTED_PATH)
+    return await call_next(request)
+
+
+def _rewrite_path(request: Request, new_path: str) -> None:
+    request.scope["path"] = new_path
+    request.scope["raw_path"] = new_path.encode()
+
+
+def _not_supported(request: Request, tool_name: str, platform: str) -> JSONResponse:
+    """501 body from API spec §0.4."""
+    return JSONResponse(
+        status_code=501,
+        content={
+            "error": f"tool '{tool_name}' is not supported for platform {platform}",
+            "tool": tool_name,
+            "platform": platform,
+            "alias": getattr(request.state, "session_alias", None),
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +311,7 @@ async def tool_authz_middleware(request: Request, call_next):
         request.state.tool_name = _resolve_route_name(request) or "unknown"
         return await call_next(request)
     # Resolve tool name by matching route manually (scope["route"] not yet set)
-    tool_name: str | None = _resolve_route_name(request)
+    tool_name: str | None = getattr(request.state, "forced_tool_name", None) or _resolve_route_name(request)
 
     # Store for audit; default sentinel values
     request.state.tool_name = tool_name or "unknown"

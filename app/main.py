@@ -9,13 +9,16 @@ from starlette.responses import JSONResponse
 
 from app.api.router import API_ROUTERS, api_router
 from app.authz.middleware import (
+    MAX_INTERNAL_PREFIX,
     admin_auth_middleware,
     audit_log_middleware,
+    platform_dispatch_middleware,
     resolve_alias_middleware,
     tool_authz_middleware,
 )
 from app.authz.route_table import RouteTable, verify_route_table
 from app.config import settings
+from app.max.api import max_api_router
 from app.services.partition_maintenance import ensure_partitions, partition_loop
 from app.telegram.pool import pool
 from app.telegram.handlers import register_handlers
@@ -78,15 +81,25 @@ PUBLIC_PATHS = {"/api/v1/healthz", "/api/v1/readyz", "/docs", "/openapi.json", "
 #   audit_log(outer) → X-API-Key → resolve_alias → tool_authz → route
 # Registration order (last=outermost):
 #   1. tool_authz (innermost)
-#   2. resolve_alias
-#   3. auth_and_https
-#   4. audit_log (outermost — sees all responses including 403)
+#   2. platform_dispatch (MAX ADR §2.B: needs the alias' platform, must run
+#      before tool_authz so it sees the real tool name of a rewritten path)
+#   3. resolve_alias
+#   4. admin_auth
+#   5. auth_and_https
+#   6. audit_log (outermost — sees all responses including 403)
+# Execution:
+#   audit_log → auth_and_https → admin_auth → resolve_alias → platform_dispatch → tool_authz → route
 # ---------------------------------------------------------------------------
 
 
 @app.middleware("http")
 async def tool_authz_mw(request, call_next):
     return await tool_authz_middleware(request, call_next)
+
+
+@app.middleware("http")
+async def platform_dispatch_mw(request, call_next):
+    return await platform_dispatch_middleware(request, call_next)
 
 
 @app.middleware("http")
@@ -123,6 +136,9 @@ async def audit_log_mw(request, call_next):
 
 
 app.include_router(api_router, prefix=settings.api_prefix)
+# Internal MAX router: same paths and route names as the TG one, reachable only
+# via platform_dispatch rewrite. Hidden from OpenAPI (duplicate operation names).
+app.include_router(max_api_router, prefix=MAX_INTERNAL_PREFIX, include_in_schema=False)
 
 # Tool-name lookup for authz/audit middleware: our routers + their mount prefix.
 app.state.route_table = RouteTable(

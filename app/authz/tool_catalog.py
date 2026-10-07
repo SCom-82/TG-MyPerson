@@ -5,8 +5,10 @@ They match FastAPI's route.name attribute.
 
 Classification:
   READ_ONLY_TOOLS   — returns data only, no state mutation anywhere.
-  WRITE_TG_TOOLS    — sends data to Telegram or mutates Telegram state.
-                      Blocked on ro accounts.
+  WRITE_MESSENGER_TOOLS — sends data to an external messenger (Telegram, MAX)
+                      or mutates its state. Blocked on ro accounts.
+                      WRITE_TG_TOOLS is the historical name, kept as an alias
+                      of the same object.
   WRITE_DB_TOOLS    — writes ONLY to our local database, not to Telegram
                       (snapshots, imports). Allowed on ro accounts.
   MANAGE_SESSION_TOOLS — session lifecycle (login, code, logout, import).
@@ -15,16 +17,16 @@ Classification:
                       authorised in the first place.
 
 Authz decision for ro accounts:
-  - WRITE_TG_TOOLS  → 403
+  - WRITE_MESSENGER_TOOLS → 403
   - WRITE_DB_TOOLS  → pass
   - MANAGE_SESSION_TOOLS → pass
   - READ_ONLY_TOOLS → pass
 """
 
 # ---------------------------------------------------------------------------
-# Category 1: pure Telegram writes — blocked on ro
+# Category 1: writes to the external messenger — blocked on ro
 # ---------------------------------------------------------------------------
-WRITE_TG_TOOLS: frozenset[str] = frozenset({
+WRITE_MESSENGER_TOOLS: frozenset[str] = frozenset({
     # message writes
     "send_message",
     "send_file",
@@ -50,6 +52,9 @@ WRITE_TG_TOOLS: frozenset[str] = frozenset({
     "unblock_user",
 })
 
+# Backward-compatible name: same object, so `in` checks and imports keep working.
+WRITE_TG_TOOLS: frozenset[str] = WRITE_MESSENGER_TOOLS
+
 # ---------------------------------------------------------------------------
 # Category 2: writes only to our local DB — allowed on ro
 # ---------------------------------------------------------------------------
@@ -68,6 +73,18 @@ MANAGE_SESSION_TOOLS: frozenset[str] = frozenset({
     "auth_code",
     "auth_session",
     "auth_logout",
+    # MAX-only: QR login (WebClient)
+    "auth_qr_start",
+    "auth_qr_status",
+})
+
+# ---------------------------------------------------------------------------
+# Tools that exist only for platform 'max'. For a Telegram alias they answer
+# 501 (platform_dispatch middleware), see API spec §2.3.
+# ---------------------------------------------------------------------------
+MAX_ONLY_TOOLS: frozenset[str] = frozenset({
+    "auth_qr_start",
+    "auth_qr_status",
 })
 
 # ---------------------------------------------------------------------------
@@ -109,22 +126,22 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset({
 # ---------------------------------------------------------------------------
 # WRITE_TOOLS used by middleware to build ALL_TOOLS set.  We expose all three
 # "write-ish" categories under this name so unknown-tool detection still works.
-WRITE_TOOLS: frozenset[str] = WRITE_TG_TOOLS | WRITE_DB_TOOLS | MANAGE_SESSION_TOOLS
+WRITE_TOOLS: frozenset[str] = WRITE_MESSENGER_TOOLS | WRITE_DB_TOOLS | MANAGE_SESSION_TOOLS
 
 # All known tool names (for validation)
 ALL_TOOLS: frozenset[str] = READ_ONLY_TOOLS | WRITE_TOOLS
 
 
 def tool_is_write(tool_name: str) -> bool:
-    """Return True if tool_name is a Telegram write operation (blocks ro).
+    """Return True if tool_name is a messenger write operation (blocks ro).
 
-    Only WRITE_TG_TOOLS returns True.
+    Only WRITE_MESSENGER_TOOLS returns True.
     WRITE_DB_TOOLS and MANAGE_SESSION_TOOLS return False (allowed on ro).
 
     Raises KeyError for unknown tools so missing catalog entries are caught
     at registration time rather than silently passed through.
     """
-    if tool_name in WRITE_TG_TOOLS:
+    if tool_name in WRITE_MESSENGER_TOOLS:
         return True
     if tool_name in READ_ONLY_TOOLS or tool_name in WRITE_DB_TOOLS or tool_name in MANAGE_SESSION_TOOLS:
         return False

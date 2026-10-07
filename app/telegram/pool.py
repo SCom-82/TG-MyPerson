@@ -47,7 +47,11 @@ class TelegramClientPool:
         """Load account + session from DB and create TelegramSession."""
         async with async_session() as db:
             result = await db.execute(
-                select(Account).where(Account.alias == alias, Account.is_enabled == True)  # noqa: E712
+                select(Account).where(
+                    Account.alias == alias,
+                    Account.is_enabled == True,  # noqa: E712
+                    Account.platform == "telegram",  # MAX accounts live in app/max (ADR §2.C)
+                )
             )
             account = result.scalar_one_or_none()
             if account is None:
@@ -122,7 +126,10 @@ class TelegramClientPool:
         try:
             async with async_session() as db:
                 result = await db.execute(
-                    select(Account).where(Account.is_enabled == True)  # noqa: E712
+                    select(Account).where(
+                        Account.is_enabled == True,  # noqa: E712
+                        Account.platform == "telegram",  # MAX accounts live in app/max (ADR §2.C)
+                    )
                 )
                 accounts = result.scalars().all()
         except Exception as exc:
@@ -247,7 +254,11 @@ async def _load_and_start(alias: str, pool: TelegramClientPool) -> TelegramSessi
     # Check DB first to give 404 on unknown alias
     async with async_session() as db:
         result = await db.execute(
-            select(Account).where(Account.alias == alias, Account.is_enabled == True)  # noqa: E712
+            select(Account).where(
+                Account.alias == alias,
+                Account.is_enabled == True,  # noqa: E712
+                Account.platform == "telegram",  # a MAX alias never gets a Telethon session
+            )
         )
         account = result.scalar_one_or_none()
 

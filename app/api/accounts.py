@@ -8,10 +8,10 @@ after creating an account record.
 import re
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -24,6 +24,8 @@ router = APIRouter(prefix="/accounts", tags=["accounts-admin"])
 
 _PHONE_RE = re.compile(r"^\+\d{7,15}$")
 _VALID_MODES = {"rw", "ro"}
+# Placeholder until the MAX pool lands (PR-3): MAX sessions are not started yet.
+_MAX_RUNTIME_STOPPED = {"state": "stopped"}
 
 
 # ---------------------------------------------------------------------------
@@ -37,6 +39,7 @@ class AccountCreate(BaseModel):
     display_name: str | None = None
     notes: str | None = None
     watch_chat_ids: list[int] | None = None
+    platform: Literal["telegram", "max"] = "telegram"
 
     @field_validator("phone")
     @classmethod
@@ -59,9 +62,13 @@ class AccountPatch(BaseModel):
     notes: str | None = None
     watch_chat_ids: list[int] | None = None
     is_enabled: bool | None = None
-    # Reject alias/phone changes
+    # Phase-2 write guards (MAX). Explicit null clears the value.
+    write_chat_ids: list[int] | None = None
+    write_rate_per_hour: int | None = Field(default=None, ge=1, le=200)
+    # Reject alias/phone/platform changes
     alias: str | None = None
     phone: str | None = None
+    platform: str | None = None
 
     @field_validator("mode")
     @classmethod
@@ -83,7 +90,7 @@ class AuditQueryParams(BaseModel):
 
 def _account_to_dict(account: Account, pool_status_map: dict[str, dict] | None = None) -> dict:
     pool_entry = (pool_status_map or {}).get(account.alias, {})
-    return {
+    data = {
         "id": account.id,
         "alias": account.alias,
         "phone": account.phone,
@@ -103,7 +110,15 @@ def _account_to_dict(account: Account, pool_status_map: dict[str, dict] | None =
             if pool_entry.get("last_started_at")
             else None
         ),
+        "platform": account.platform,
     }
+    if account.platform == "max":
+        # API spec §1.3: MAX-only fields are not shown for Telegram accounts.
+        data["platform_user_id"] = account.platform_user_id
+        data["write_chat_ids"] = account.write_chat_ids
+        data["write_rate_per_hour"] = account.write_rate_per_hour
+        data["runtime"] = dict(_MAX_RUNTIME_STOPPED)
+    return data
 
 
 def _build_pool_map() -> dict[str, dict]:
@@ -125,8 +140,10 @@ async def create_account(body: AccountCreate) -> dict:
             mode=body.mode,
             display_name=body.display_name,
             notes=body.notes,
-            watch_chat_ids=body.watch_chat_ids,
+            # watch_chat_ids is a Telethon-side setting; ignored for MAX (API spec §1.1)
+            watch_chat_ids=body.watch_chat_ids if body.platform == "telegram" else None,
             is_enabled=True,
+            platform=body.platform,
         )
         db.add(account)
         try:
@@ -139,7 +156,10 @@ async def create_account(body: AccountCreate) -> dict:
                 detail=f"Account with alias '{body.alias}' already exists",
             )
 
-    return _account_to_dict(account)
+    data = _account_to_dict(account)
+    if body.platform == "max" and body.mode != "ro":
+        data["warning"] = "max accounts should start in ro"
+    return data
 
 
 @router.get("", name="admin_list_accounts")
@@ -179,6 +199,8 @@ async def patch_account(account_id: int, body: AccountPatch) -> dict:
             status_code=400,
             detail="alias and phone cannot be changed via PATCH (would break session linkage)",
         )
+    if body.platform is not None:
+        raise HTTPException(status_code=400, detail="platform cannot be changed via PATCH")
 
     async with async_session() as db:
         result = await db.execute(select(Account).where(Account.id == account_id))
@@ -200,6 +222,10 @@ async def patch_account(account_id: int, body: AccountPatch) -> dict:
             account.watch_chat_ids = body.watch_chat_ids
         if body.is_enabled is not None:
             account.is_enabled = body.is_enabled
+        if "write_chat_ids" in body.model_fields_set:
+            account.write_chat_ids = body.write_chat_ids
+        if "write_rate_per_hour" in body.model_fields_set:
+            account.write_rate_per_hour = body.write_rate_per_hour
 
         await db.commit()
         await db.refresh(account)
