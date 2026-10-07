@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Telegram Personal Account Bridge: MTProto → PostgreSQL → REST API"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.115",
+    # <0.137: FastAPI 0.137 wraps included routers in _IncludedRouter, and
+    # authz _resolve_route_name stops finding route names → ro/policy checks
+    # silently pass every write. Do not lift without fixing the resolver.
+    "fastapi>=0.115,<0.137",
     "uvicorn[standard]>=0.34",
     "sqlalchemy[asyncio]>=2.0",
     "asyncpg>=0.30",
