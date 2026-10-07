@@ -1,0 +1,5 @@
+{
+  "status": 200,
+  "content_type": "application/json",
+  "body": "{\"items\":[{\"id\":103,\"username\":null,\"first_name\":\"Bot\",\"last_name\":null,\"phone\":null,\"is_bot\":true,\"is_self\":false,\"first_seen_at\":\"2026-01-01T12:00:00Z\",\"updated_at\":\"2026-01-02T12:00:00Z\"},{\"id\":102,\"username\":\"bob\",\"first_name\":\"Bob\",\"last_name\":null,\"phone\":null,\"is_bot\":false,\"is_self\":true,\"first_seen_at\":\"2026-01-01T11:00:00Z\",\"updated_at\":\"2026-01-02T11:00:00Z\"},{\"id\":101,\"username\":\"alice\",\"first_name\":\"Alice\",\"last_name\":\"A\",\"phone\":\"+70000000101\",\"is_bot\":false,\"is_self\":false,\"first_seen_at\":\"2026-01-01T10:00:00Z\",\"updated_at\":\"2026-01-02T10:00:00Z\"}],\"total\":3,\"limit\":50,\"offset\":0}"
+}

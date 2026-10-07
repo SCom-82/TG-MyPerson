@@ -1,0 +1,5 @@
+{
+  "status": 403,
+  "content_type": "application/json",
+  "body": "{\"error\":\"tool 'join_chat_endpoint' not allowed on read-only account 'golden-ro'\",\"tool\":\"join_chat_endpoint\",\"alias\":\"golden-ro\",\"mode\":\"ro\",\"reason\":\"read-only account\"}"
+}

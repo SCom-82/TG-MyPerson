@@ -1,0 +1,5 @@
+{
+  "status": 200,
+  "content_type": "application/json",
+  "body": "{\"items\":[{\"id\":-1001000000002,\"chat_type\":\"channel\",\"title\":\"Golden Channel\",\"username\":null,\"description\":null,\"members_count\":1000,\"is_monitored\":false,\"last_message_id\":21,\"last_message_at\":\"2026-02-02T09:00:00Z\",\"created_at\":\"2026-01-01T00:00:00Z\",\"updated_at\":\"2026-02-02T09:00:00Z\"},{\"id\":-1001000000001,\"chat_type\":\"group\",\"title\":\"Golden Group\",\"username\":\"golden_group\",\"description\":\"desc\",\"members_count\":42,\"is_monitored\":true,\"last_message_id\":12,\"last_message_at\":\"2026-02-01T09:00:00Z\",\"created_at\":\"2026-01-01T00:00:00Z\",\"updated_at\":\"2026-02-01T09:00:00Z\"},{\"id\":101,\"chat_type\":\"private\",\"title\":\"Alice\",\"username\":\"alice\",\"description\":null,\"members_count\":null,\"is_monitored\":true,\"last_message_id\":null,\"last_message_at\":null,\"created_at\":\"2026-01-01T00:00:00Z\",\"updated_at\":\"2026-01-01T00:00:00Z\"}],\"total\":3,\"limit\":50,\"offset\":0}"
+}

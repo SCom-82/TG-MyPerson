@@ -1,0 +1,5 @@
+{
+  "status": 200,
+  "content_type": "application/json",
+  "body": "{\"states\":[{\"chat_id\":-1001000000001,\"chat_title\":\"Golden Group\",\"oldest_message_id\":11,\"newest_message_id\":12,\"is_fully_synced\":true,\"total_messages_synced\":2,\"last_backfill_at\":\"2026-02-03T00:00:00+00:00\",\"is_running\":false}]}"
+}

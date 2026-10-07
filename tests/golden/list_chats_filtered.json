@@ -1,0 +1,5 @@
+{
+  "status": 200,
+  "content_type": "application/json",
+  "body": "{\"items\":[{\"id\":-1001000000001,\"chat_type\":\"group\",\"title\":\"Golden Group\",\"username\":\"golden_group\",\"description\":\"desc\",\"members_count\":42,\"is_monitored\":true,\"last_message_id\":12,\"last_message_at\":\"2026-02-01T09:00:00Z\",\"created_at\":\"2026-01-01T00:00:00Z\",\"updated_at\":\"2026-02-01T09:00:00Z\"}],\"total\":1,\"limit\":1,\"offset\":0}"
+}

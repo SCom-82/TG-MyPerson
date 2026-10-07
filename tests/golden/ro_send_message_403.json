@@ -1,0 +1,5 @@
+{
+  "status": 403,
+  "content_type": "application/json",
+  "body": "{\"error\":\"tool 'send_message' not allowed on read-only account 'golden-ro'\",\"tool\":\"send_message\",\"alias\":\"golden-ro\",\"mode\":\"ro\",\"reason\":\"read-only account\"}"
+}
