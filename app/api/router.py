@@ -11,18 +11,25 @@ from app.api.users import router as users_router
 from app.api.stream import router as stream_router
 from app.api.sync import router as sync_router
 
+# Leaf routers in inclusion order. Single source for both include_router below and
+# the authz route table (app/authz/route_table.py) — a router missing here would
+# be served but invisible to tool authz.
+API_ROUTERS = (
+    # Admin endpoints (X-Admin-Key auth, separate from user API)
+    accounts_router,
+    # User endpoints (X-API-Key + X-Session-Alias)
+    auth_router,
+    chats_router,
+    contacts_router,
+    messages_router,
+    search_router,
+    snapshots_router,
+    users_router,
+    stream_router,
+    sync_router,
+)
+
 api_router = APIRouter()
 
-# Admin endpoints (X-Admin-Key auth, separate from user API)
-api_router.include_router(accounts_router)
-
-# User endpoints (X-API-Key + X-Session-Alias)
-api_router.include_router(auth_router)
-api_router.include_router(chats_router)
-api_router.include_router(contacts_router)
-api_router.include_router(messages_router)
-api_router.include_router(search_router)
-api_router.include_router(snapshots_router)
-api_router.include_router(users_router)
-api_router.include_router(stream_router)
-api_router.include_router(sync_router)
+for _router in API_ROUTERS:
+    api_router.include_router(_router)

@@ -174,32 +174,15 @@ def _resolve_route_name(request: Request) -> str | None:
     """Resolve the FastAPI route name for a request BEFORE call_next.
 
     @app.middleware("http") is called before routing, so scope["route"] is
-    not yet set. We manually match the request against the app's router to
-    get the route name.
+    not yet set. The name comes from the flat table built in app/main.py
+    (app.state.route_table) — see app/authz/route_table.py for why app.routes
+    is not walked any more.
     """
-    from starlette.routing import Match
-
-    app = request.app
-    routes = getattr(app, "routes", [])
-    # Also check subrouters (api_router mounted under /api/v1)
-    for route in routes:
-        # Check direct routes
-        match, _ = route.matches(request.scope)
-        if match == Match.FULL:
-            return getattr(route, "name", None)
-        # Check mounted routes (APIRouter)
-        if hasattr(route, "routes"):
-            for sub_route in route.routes:
-                match, _ = sub_route.matches(request.scope)
-                if match == Match.FULL:
-                    return getattr(sub_route, "name", None)
-                # One more level deep (nested mounts)
-                if hasattr(sub_route, "routes"):
-                    for sub_sub_route in sub_route.routes:
-                        match, _ = sub_sub_route.matches(request.scope)
-                        if match == Match.FULL:
-                            return getattr(sub_sub_route, "name", None)
-    return None
+    table = getattr(request.app.state, "route_table", None)
+    if table is None:
+        log.error("tool_authz: app.state.route_table is not set — tool names cannot be resolved")
+        return None
+    return table.resolve(request.method, request.scope["path"])
 
 
 async def tool_authz_middleware(request: Request, call_next):

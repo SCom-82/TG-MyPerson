@@ -7,13 +7,14 @@ from fastapi import FastAPI
 from sqlalchemy import text
 from starlette.responses import JSONResponse
 
-from app.api.router import api_router
+from app.api.router import API_ROUTERS, api_router
 from app.authz.middleware import (
     admin_auth_middleware,
     audit_log_middleware,
     resolve_alias_middleware,
     tool_authz_middleware,
 )
+from app.authz.route_table import RouteTable, verify_route_table
 from app.config import settings
 from app.services.partition_maintenance import ensure_partitions, partition_loop
 from app.telegram.pool import pool
@@ -122,6 +123,13 @@ async def audit_log_mw(request, call_next):
 
 
 app.include_router(api_router, prefix=settings.api_prefix)
+
+# Tool-name lookup for authz/audit middleware: our routers + their mount prefix.
+app.state.route_table = RouteTable(
+    (settings.api_prefix, router.routes) for router in API_ROUTERS
+)
+# Fail closed: without resolvable tool names tool_authz lets every write through.
+verify_route_table(app.state.route_table)
 
 
 @app.get("/api/v1/healthz")
