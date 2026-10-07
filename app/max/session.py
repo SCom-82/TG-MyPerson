@@ -236,6 +236,9 @@ class MaxSession:
         self.client_hooks: list[Callable[[Any], None]] = []
         self.authorized_hooks: list[Callable[[Any], Awaitable[None]]] = []
         self.ingest: Any = None  # app.max.ingest.MaxIngest, set by MaxPool
+        # Chats caught up IN THE CURRENT CONNECTION (ADR §2.J, fixed 07.10): only for
+        # these a live event may move newest_time_ms. Reset before every connect().
+        self.caught_up: set[int] = set()
 
         self._client: Any = None
         self._task: asyncio.Task | None = None
@@ -345,6 +348,8 @@ class MaxSession:
                 )
                 for hook in self.client_hooks:
                     hook(client)
+                # A new connection: nothing is caught up until the gap fill says so.
+                self.caught_up = set()
                 await client.connect()
                 if not client.is_connected:
                     raise ConnectionError("client did not start")

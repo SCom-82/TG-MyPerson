@@ -102,9 +102,18 @@ class MaxIngest:
         return None
 
     async def store_message(self, msg: Any, *, received_at: datetime | None = None, is_edit: bool = False,
-                            chat_id: int | None = None) -> dict:
-        """Upsert one PyMax message (live event, history page). Returns the row."""
+                            chat_id: int | None = None, advance_cursor: bool | None = None) -> dict:
+        """Upsert one PyMax message (live event, history page). Returns the row.
+
+        newest_time_ms means "everything up to here, without gaps" (ADR §2.J).
+        History paths pass advance_cursor=True. A live event (None) moves it only
+        for a chat already caught up in the current connection; otherwise it
+        stores the message but leaves max_sync_state alone (and does not create
+        it, so a never-seen chat still gets its catch-up seed).
+        """
         cid = msg.chat_id if msg.chat_id is not None else chat_id
+        if advance_cursor is None:
+            advance_cursor = cid in self.session.caught_up
         async with database.async_session() as db:
             chat = await repo.get_chat(db, cid) if cid is not None else None
             row, media = normalize.normalize_message(
@@ -120,7 +129,8 @@ class MaxIngest:
             missing = await repo.ensure_users(db, {row["from_user_id"]} - self._known_users)
             await repo.upsert_message(db, row, media)
             await repo.bump_chat_last_message(db, row["chat_id"], row["message_id"], row["tg_date"])
-            await repo.advance_cursor(db, row["chat_id"], row["message_id"], msg.time)
+            if advance_cursor:
+                await repo.advance_cursor(db, row["chat_id"], row["message_id"], msg.time)
             await db.commit()
         if row["from_user_id"] is not None:
             self._known_users.add(row["from_user_id"])

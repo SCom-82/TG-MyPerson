@@ -171,11 +171,9 @@ async def test_message_frame_is_journaled_and_stored(env, clean_max):
     assert rows == [(3, GROUP, "photo", "фото")]
     assert _q("SELECT attach_index, file_type, file_id FROM max_media") == [(0, "photo", "9001")]
     assert _q("SELECT opcode, normalized, error FROM max_raw_events") == [(128, True, None)]
-    # chat stub and cursor
+    # chat stub; no cursor: the chat is not caught up in this connection (ADR §2.J)
     assert _q("SELECT chat_type FROM max_chats WHERE id = %s", GROUP) == [("group",)]
-    assert _q("SELECT newest_time_ms, newest_message_id FROM max_sync_state WHERE chat_id = %s", GROUP) == [
-        (1791398400000, 3)
-    ]
+    assert _q("SELECT count(*) FROM max_sync_state") == [(0,)]
     assert (await env.session()).runtime()["last_event_at"] is not None
 
 
@@ -332,6 +330,7 @@ async def test_read_endpoints(env, clean_max, aliases):
     env.server.contacts = [{"id": 200, "names": [{"firstName": "Анна"}], "link": "anna", "phone": 79005556677}]
     env.server.chats = [fx("c01_chat")["frame"]["payload"]["chat"]]
     client = await _authorized(env)
+    (await env.session()).caught_up.add(GROUP)  # so live events keep the cursor
     for name in ("n03_photo", "n09_reply", "n01_text_private_incoming", "d01_delete"):
         await client.push(fx(name)["frame"])
     h = env.h()
@@ -460,3 +459,54 @@ async def test_raw_events_retention(clean_max):
     _q("INSERT INTO max_raw_events (opcode, payload) VALUES (128, '{}')")
     assert await purge_raw_events_once(MaxSettings(raw_events_retention_days=30)) == 1
     assert _q("SELECT count(*) FROM max_raw_events") == [(1,)]
+
+
+# ---------------------------------------------------------------------------
+# Cursor vs live events (ADR §2.J, fixed 07.10)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_b13_live_event_in_unknown_chat_creates_no_sync_state(env, clean_max):
+    """B-13: the first live message of a never-seen chat is stored, but no
+    max_sync_state row appears — so the catch-up seed still runs later."""
+    client = await _authorized(env)
+    await client.push(fx("n03_photo")["frame"])
+    assert _q("SELECT message_id FROM max_messages") == [(3,)]
+    assert _q("SELECT count(*) FROM max_sync_state") == [(0,)]
+
+
+@pytest.mark.asyncio
+async def test_live_event_keeps_cursor_of_chat_not_caught_up(env, clean_max):
+    """The race of B-12 at ingest level: cursor at T0, a live message at T0+30 min
+    arrives before catch-up — the cursor must stay at T0."""
+    client = await _authorized(env)
+    session = await env.session()
+    session.caught_up.add(GROUP)
+    await client.push(fx("n03_photo")["frame"])  # cursor at T0 (message 3)
+    session.caught_up.discard(GROUP)
+    later = fx("n04_file")["frame"]
+    later["payload"]["message"]["time"] += 30 * 60_000
+    await client.push(later)
+    assert _q("SELECT count(*) FROM max_messages") == [(2,)]
+    assert _q("SELECT newest_message_id FROM max_sync_state WHERE chat_id = %s", GROUP) == [(3,)]
+
+
+@pytest.mark.asyncio
+async def test_b14_live_event_moves_cursor_of_caught_up_chat(env, clean_max):
+    """B-14: a chat already caught up in this connection — the cursor moves at once."""
+    client = await _authorized(env)
+    (await env.session()).caught_up.add(GROUP)
+    await client.push(fx("n03_photo")["frame"])
+    assert _q("SELECT newest_time_ms, newest_message_id FROM max_sync_state WHERE chat_id = %s", GROUP) == [
+        (1791398400000, 3)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_caught_up_set_resets_on_every_connect(env, clean_max):
+    await _authorized(env)
+    session = await env.session()
+    session.caught_up.add(GROUP)
+    env.server.clients[-1].drop()  # network drop → reconnect
+    await session.wait_until(lambda: len(env.server.factory_calls) == 2 and session.state == "authorized", 5)
+    assert GROUP not in session.caught_up

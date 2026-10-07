@@ -144,7 +144,8 @@ async def bump_chat_last_message(db: AsyncSession, chat_id: int, message_id: int
 
 
 async def advance_cursor(db: AsyncSession, chat_id: int, message_id: int, time_ms: int) -> None:
-    """newest_time_ms is the single "we have everything up to here" point (ADR §2.J)."""
+    """newest_time_ms: "everything up to here, without gaps" (ADR §2.J). Callers decide
+    whether they may move it — see MaxIngest.store_message."""
     stmt = insert(MaxSyncState).values(
         chat_id=chat_id,
         newest_message_id=message_id,
