@@ -214,6 +214,20 @@ def normalize_user(user: User, *, me_id: int | None = None) -> dict:
 
 # -- raw frames --------------------------------------------------------------
 
+def frame_chat_id(opcode: int, payload: dict) -> int | None:
+    """Chat of a journaled frame without validating it (used to order frames per chat)."""
+    try:
+        if opcode == OP_CHAT:
+            chat = payload.get("chat")
+            return int(chat["id"]) if isinstance(chat, dict) and "id" in chat else None
+        value = payload.get("chatId")
+        if value is None and isinstance(payload.get("message"), dict):
+            value = payload["message"].get("chatId")
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_message(payload: dict) -> Message:
     """NOTIF_MESSAGE / MSG_EDIT payload → Message (raises pydantic ValidationError)."""
     return Message.model_validate(payload)

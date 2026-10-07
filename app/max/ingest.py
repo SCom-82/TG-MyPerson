@@ -37,6 +37,7 @@ class MaxIngest:
         self.session = session
         self._client: Any = None
         self._known_users: set[int] = set()
+        self._locks: dict[int | None, asyncio.Lock] = {}
         self._tasks: set[asyncio.Task] = set()
 
     def install(self) -> None:
@@ -59,6 +60,21 @@ class MaxIngest:
         if cmd != normalize.SERVER_PUSH or opcode not in normalize.JOURNALED_OPCODES:
             return
         payload = payload or {}
+        # PyMax runs every inbound frame in its own task (connection.py), so frames
+        # of one chat would race: a delete processed before the insert of its
+        # message was lost (QA D-1). The chat lock is taken before the first await,
+        # and tasks start in arrival order, so asyncio.Lock's FIFO keeps the
+        # server's order per chat; different chats still run concurrently.
+        async with self._chat_lock(normalize.frame_chat_id(opcode, payload)):
+            await self._process_frame(opcode, payload)
+
+    def _chat_lock(self, chat_id: int | None) -> asyncio.Lock:
+        lock = self._locks.get(chat_id)
+        if lock is None:
+            lock = self._locks[chat_id] = asyncio.Lock()
+        return lock
+
+    async def _process_frame(self, opcode: int, payload: dict) -> None:
         received_at = datetime.now(timezone.utc)
         self.session.last_event_at = received_at
         try:

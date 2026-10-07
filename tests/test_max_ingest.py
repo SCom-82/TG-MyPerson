@@ -510,3 +510,60 @@ async def test_caught_up_set_resets_on_every_connect(env, clean_max):
     env.server.clients[-1].drop()  # network drop → reconnect
     await session.wait_until(lambda: len(env.server.factory_calls) == 2 and session.state == "authorized", 5)
     assert GROUP not in session.caught_up
+
+
+# ---------------------------------------------------------------------------
+# QA D-1: frames of one chat are processed in arrival order
+# ---------------------------------------------------------------------------
+
+def _frame(opcode: int, chat_id: int, **message) -> dict:
+    if opcode == normalize.OP_DELETE:
+        return {"opcode": opcode, "cmd": 0, "payload": {"chatId": chat_id, "messageIds": [message["id"]]}}
+    body = {"time": 1791398400000, "type": "USER", "sender": 200, "text": "t", "attaches": [], **message}
+    return {"opcode": opcode, "cmd": 0, "payload": {"chatId": chat_id, "message": body}}
+
+
+@pytest.mark.asyncio
+async def test_d1_concurrent_message_and_delete(env, clean_max):
+    """PyMax dispatches each frame in its own task. A delete arriving right after its
+    message must not be processed first: 20 of 20 keep deleted_at."""
+    client = await _authorized(env)
+    for i in range(1, 21):
+        await asyncio.gather(
+            client.push(_frame(normalize.OP_MESSAGE, GROUP, id=str(i))),
+            client.push(_frame(normalize.OP_DELETE, GROUP, id=str(i))),
+        )
+    assert _q("SELECT count(*), count(deleted_at) FROM max_messages") == [(20, 20)]
+    assert _q("SELECT count(*) FROM max_raw_events WHERE error = 'delete_unknown_message'") == [(0,)]
+
+
+@pytest.mark.asyncio
+async def test_d1_concurrent_message_and_edit(env, clean_max):
+    client = await _authorized(env)
+    for i in range(1, 21):
+        await asyncio.gather(
+            client.push(_frame(normalize.OP_MESSAGE, GROUP, id=str(i), text="old")),
+            client.push(_frame(normalize.OP_EDIT, GROUP, id=str(i), text="new", status="EDITED")),
+        )
+    assert _q("SELECT count(*) FROM max_messages WHERE text = 'new' AND is_edited") == [(20,)]
+
+
+@pytest.mark.asyncio
+async def test_frames_of_different_chats_run_concurrently(env, clean_max):
+    """Serialization is per chat: a slow chat does not hold another one."""
+    client = await _authorized(env)
+    ingest = (await env.session()).ingest
+    lock = ingest._chat_lock(GROUP)
+    await lock.acquire()  # GROUP is busy
+    try:
+        await asyncio.wait_for(client.push(_frame(normalize.OP_MESSAGE, DIALOG, id="1")), 5)
+        assert _q("SELECT chat_id FROM max_messages") == [(DIALOG,)]
+    finally:
+        lock.release()
+
+
+def test_frame_chat_id():
+    assert normalize.frame_chat_id(normalize.OP_MESSAGE, {"chatId": -5, "message": {}}) == -5
+    assert normalize.frame_chat_id(normalize.OP_DELETE, {"chatId": "7", "messageIds": []}) == 7
+    assert normalize.frame_chat_id(normalize.OP_CHAT, {"chat": {"id": -9}}) == -9
+    assert normalize.frame_chat_id(normalize.OP_MESSAGE, {"oops": 1}) is None
