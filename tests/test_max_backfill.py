@@ -229,7 +229,7 @@ async def test_catchup_fills_exactly_the_gap(env):
     # what we had before the downtime: everything up to T0
     _q("TRUNCATE max_media, max_messages, max_sync_state RESTART IDENTITY")
     for m in history[GROUP][:10]:
-        await session.ingest.store_message(Message.model_validate(m), chat_id=GROUP)
+        await session.ingest.store_message(Message.model_validate(m), chat_id=GROUP, advance_cursor=True)
     assert cursor(GROUP)[1] == t0
 
     env.server.chats = [chat(GROUP, history[GROUP][-1])]
@@ -311,6 +311,122 @@ async def test_catchup_stops_with_the_session(env, monkeypatch):
     await _wait(lambda: session.background_running("catchup"))
     await env.client.post("/api/v1/auth/logout", headers=env.h())
     assert not session.background_running("catchup")
+
+
+# ---------------------------------------------------------------------------
+# B-12 … B-14 — live events vs the cursor (ADR §2.J, fixed 07.10)
+# ---------------------------------------------------------------------------
+
+def _live(chat_id: int, m: dict) -> dict:
+    return {"opcode": 128, "cmd": 0, "payload": {"chatId": chat_id, "message": m}}
+
+
+@pytest.mark.asyncio
+async def test_b12_live_event_before_catchup_loses_nothing(env):
+    """Ours T0; 7 messages in the chat during the downtime; right after the reconnect
+    a live 8th arrives, then the catch-up runs → all 7 + the 8th, cursor = the 8th."""
+    t0 = now_ms() - 60 * MIN
+    before = [msg(i, t0 - (3 - i) * MIN) for i in range(1, 4)]          # 3 at T0
+    gap = [msg(i, t0 + (i - 3) * MIN) for i in range(4, 11)]            # 7 during the downtime
+    live = msg(11, t0 + 30 * MIN)
+    session = await _login(env, history={GROUP: before})
+    for m in before:
+        await session.ingest.store_message(Message.model_validate(m), chat_id=GROUP, advance_cursor=True)
+    assert cursor(GROUP)[1] == t0
+
+    env.server.history = {GROUP: before + gap + [live]}
+    env.server.chats = [chat(GROUP, live)]
+    env.server.fetch_chats_gate = asyncio.Event()  # hold the catch-up at its first step
+    await env.pool.restart(env.alias)
+    await env.wait_state("authorized")
+    session = await env.session()
+    await env.server.clients[-1].push(_live(GROUP, live))
+    assert stored_ids(GROUP) == [1, 2, 3, 11]
+    assert cursor(GROUP)[1] == t0  # the live 8th did NOT jump the cursor over the gap
+
+    env.server.fetch_chats_gate.set()
+    await _wait(lambda: session.last_catchup_at is not None and not session.background_running("catchup"))
+    assert stored_ids(GROUP) == list(range(1, 12))
+    assert cursor(GROUP)[1] == live["time"]
+
+
+@pytest.mark.asyncio
+async def test_b13_new_chat_live_first_then_seed(env):
+    """First live message in a chat we never saw: no max_sync_state until the
+    catch-up, which then does the seed."""
+    env.settings.catchup_seed = 5
+    t = now_ms()
+    history = {GROUP: [msg(i, t - (30 - i) * MIN) for i in range(1, 31)]}
+    env.server.history = history
+    env.server.chats = [chat(GROUP, history[GROUP][-1])]
+    env.server.fetch_chats_gate = asyncio.Event()
+    await _qr_login(env)
+    await env.wait_state("authorized")
+    session = await env.session()
+    await env.server.clients[-1].push(_live(GROUP, history[GROUP][-1]))
+    assert stored_ids(GROUP) == [30]
+    assert cursor(GROUP) is None  # no max_sync_state yet
+
+    env.server.fetch_chats_gate.set()
+    await _wait(lambda: session.last_catchup_at is not None and not session.background_running("catchup"))
+    assert stored_ids(GROUP) == [26, 27, 28, 29, 30]  # the seed ran
+    assert cursor(GROUP)[1] == history[GROUP][-1]["time"]
+
+
+@pytest.mark.asyncio
+async def test_b14_live_event_after_catchup_moves_cursor(env):
+    t = now_ms() - 10 * MIN
+    history = {GROUP: [msg(i, t + i * MIN) for i in range(1, 4)]}
+    session = await _login(env, chats=[chat(GROUP, history[GROUP][-1])], history=history)
+    assert GROUP in session.caught_up
+    newer = msg(4, t + 5 * MIN)
+    await env.server.clients[-1].push(_live(GROUP, newer))
+    assert cursor(GROUP)[1] == newer["time"]
+
+
+@pytest.mark.asyncio
+async def test_catchup_covers_unmonitored_chats(env):
+    """MAX keeps every chat: is_monitored does not gate the gap fill."""
+    env.settings.catchup_seed = 3
+    t = now_ms()
+    history = {GROUP: [msg(i, t - (5 - i) * MIN) for i in range(1, 6)]}
+    env.server.fetch_chats_gate = asyncio.Event()
+    env.server.chats = [chat(GROUP, history[GROUP][-1])]
+    env.server.history = history
+    await _qr_login(env)
+    await env.wait_state("authorized")
+    session = await env.session()
+    # the chat row exists (login snapshot) and is switched off before the gap fill
+    _q("UPDATE max_chats SET is_monitored = false WHERE id = %s", GROUP)
+    env.server.fetch_chats_gate.set()
+    await _wait(lambda: session.last_catchup_at is not None and not session.background_running("catchup"))
+    assert stored_ids(GROUP) == [3, 4, 5]
+
+
+@pytest.mark.asyncio
+async def test_backlog_chats_stay_out_of_caught_up(env, monkeypatch):
+    env.settings.catchup_max_chats = 1
+    env.settings.catchup_seed = 2
+    t = now_ms()
+    history = {cid: [msg(i, t - (5 - i) * MIN - k) for i in range(1, 6)]
+               for k, cid in enumerate((GROUP, OTHER_CHAT))}
+    gate = asyncio.Event()
+
+    async def tick(seconds):
+        if seconds == sync_module.CATCHUP_TICK_S:
+            await gate.wait()
+
+    monkeypatch.setattr(sync_module, "_sleep", tick)
+    env.server.chats = [chat(cid, history[cid][-1]) for cid in history]
+    env.server.history = history
+    await _qr_login(env)
+    await env.wait_state("authorized")
+    session = await env.session()
+    await _wait(lambda: session.runtime()["catchup_backlog_chats"] == 1)
+    assert GROUP in session.caught_up and OTHER_CHAT not in session.caught_up
+    gate.set()
+    await _wait(lambda: not session.background_running("catchup"))
+    assert {GROUP, OTHER_CHAT} <= session.caught_up
 
 
 # ---------------------------------------------------------------------------

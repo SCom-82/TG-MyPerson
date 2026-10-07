@@ -64,6 +64,7 @@ class FakeMaxServer:
         self.history_calls: list[dict] = []
         self.chat_page = 2
         self.fetch_chats_calls: list[int | None] = []
+        self.fetch_chats_gate: asyncio.Event | None = None  # set → fetch_chats waits for it
         self.file_url = ""
         self.video_url = ""
         self.video_not_ready = False
@@ -220,6 +221,8 @@ class FakePyMaxClient:
     async def fetch_chats(self, marker: int | None = None) -> list:
         self.calls.append("fetch_chats")
         self.server.fetch_chats_calls.append(marker)
+        if self.server.fetch_chats_gate is not None:
+            await self.server.fetch_chats_gate.wait()
         chats = sorted(self.server.chats, key=lambda c: c.get("lastEventTime", 0), reverse=True)
         if marker is not None:
             chats = [c for c in chats if c.get("lastEventTime", 0) < marker]

@@ -2,8 +2,9 @@
 
 History in MAX is paged by TIME (fetch_history(from_time=ms, forward=N,
 backward=N)), so cursors are max_sync_state.{oldest,newest}_time_ms.
-newest_time_ms is the single "we have everything up to here" point, moved by
-live events, catch-up and forward backfill alike.
+newest_time_ms means "everything up to here, without gaps": history (catch-up,
+backfill) moves it; a live event only in a chat caught up in the current
+connection (session.caught_up, filled here — ADR §2.J as fixed 07.10).
 
 Human pace over speed: PAGE_PAUSE_S between history requests, pages of 100,
 at most MAX_CATCHUP_MAX_CHATS chats per catch-up pass; the rest goes to the
@@ -76,7 +77,8 @@ class MaxSync:
     async def _store(self, msg: Any, chat_id: int) -> bool:
         """Upsert one history message; errors are isolated per message (eff5f41)."""
         try:
-            await self.session.ingest.store_message(msg, chat_id=chat_id)
+            # History is contiguous from the cursor: it may move newest_time_ms.
+            await self.session.ingest.store_message(msg, chat_id=chat_id, advance_cursor=True)
             return True
         except Exception:  # noqa: BLE001
             log.exception("max[%s]: failed to store message %s in chat %s", self.session.alias,
@@ -258,7 +260,8 @@ class MaxSync:
         except Exception:  # noqa: BLE001 — a failed chat list must not stop the gap fill
             log.warning("max[%s]: sync_chats during catch-up failed", self.session.alias, exc_info=True)
 
-        candidates = await self._catchup_candidates()
+        candidates, no_tail = await self._catchup_candidates()
+        self.session.caught_up.update(no_tail)
         todo, rest = candidates[: settings.catchup_max_chats], candidates[settings.catchup_max_chats:]
         client = self._client()
         first = True
@@ -278,6 +281,8 @@ class MaxSync:
                 else:
                     await self._forward(chat_id, limit=10_000)
                 await self._mark_catchup(chat_id)
+                # From now on live events in this chat may move its cursor (ADR §2.J).
+                self.session.caught_up.add(chat_id)
             except SessionUnavailable:
                 raise
             except Exception:  # noqa: BLE001
@@ -287,23 +292,30 @@ class MaxSync:
         self.session.catchup_backlog_chats = len(rest)
         return len(rest)
 
-    async def _catchup_candidates(self) -> list[tuple[int, MaxSyncState | None]]:
-        """Monitored chats whose last message is newer than our cursor (or never synced)."""
+    async def _catchup_candidates(self) -> tuple[list[tuple[int, MaxSyncState | None]], set[int]]:
+        """(chats with a tail or never synced — freshest first, chats with no tail).
+
+        All chats: MAX keeps every chat (brief requirement), is_monitored does not
+        gate the gap fill. A chat without messages has no tail either.
+        """
         async with database.async_session() as db:
             rows = (
                 await db.execute(
                     select(MaxChat, MaxSyncState)
                     .join(MaxSyncState, MaxSyncState.chat_id == MaxChat.id, isouter=True)
-                    .where(MaxChat.is_monitored.is_not(False), MaxChat.last_message_at.is_not(None))
-                    .order_by(MaxChat.last_message_at.desc())
+                    .order_by(MaxChat.last_message_at.desc().nullslast())
                 )
             ).all()
-        out = []
+        candidates, no_tail = [], set()
         for chat, state in rows:
             last_ms = normalize.dt_to_ms(chat.last_message_at)
-            if state is None or state.newest_time_ms is None or last_ms > state.newest_time_ms:
-                out.append((chat.id, state))
-        return out
+            if last_ms is None:
+                no_tail.add(chat.id)
+            elif state is None or state.newest_time_ms is None or last_ms > state.newest_time_ms:
+                candidates.append((chat.id, state))
+            else:
+                no_tail.add(chat.id)
+        return candidates, no_tail
 
     async def _mark_catchup(self, chat_id: int) -> None:
         async with database.async_session() as db:
