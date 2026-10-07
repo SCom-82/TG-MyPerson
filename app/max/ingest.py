@@ -38,7 +38,7 @@ class MaxIngest:
         self._client: Any = None
         self._known_users: set[int] = set()
         self._locks: dict[int | None, asyncio.Lock] = {}
-        self._tasks: set[asyncio.Task] = set()
+        self._fills = 0
 
     def install(self) -> None:
         self.session.client_hooks.append(self.attach)
@@ -202,9 +202,9 @@ class MaxIngest:
             log.warning("max[%s]: failed to fetch users %s", self.session.alias, sorted(user_ids), exc_info=True)
 
     def _spawn(self, coro) -> None:  # noqa: ANN001
-        task = asyncio.create_task(coro)
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        """Tied to the session: stop() cancels it, a stopped session writes nothing."""
+        self._fills += 1
+        self.session.spawn_background(f"fill-users-{self._fills}", coro)
 
     @staticmethod
     def _event_payload(event: str, row: dict) -> dict:

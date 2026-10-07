@@ -88,12 +88,15 @@ class AuditQueryParams(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _max_runtime_stopped() -> dict:
-    """runtime of a MAX account the pool does not hold (MAX disabled / never started)."""
+    """runtime of a MAX account the pool does not hold (MAX disabled / no login yet)."""
     from app.max.session import PYMAX_VERSION
 
+    max_pool = max_pool_module.get_max_pool()
     return {
         "state": "stopped", "connected": False, "authorized": False, "transport": None,
-        "proxy": False, "last_event_at": None, "last_catchup_at": None,
+        # proxy reflects the configuration, so it can be checked before the first login
+        "proxy": bool(max_pool is not None and max_pool.settings.proxy_url),
+        "last_event_at": None, "last_catchup_at": None,
         "catchup_backlog_chats": 0, "last_error": None, "pymax": PYMAX_VERSION,
     }
 

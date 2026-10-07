@@ -88,6 +88,9 @@ Migrations:
 | 004 | Drop legacy tg_session table (Phase 4 cleanup) |
 | 005 | Partition rotation SQL helpers for audit_logs |
 | 006 | Fix regex in drop_old_audit_partitions to handle timezone-aware bounds |
+| 007 | `tg_messages.sender_chat_id` (broadcast senders) |
+| 008 | `audit_logs` DEFAULT partition + drain helper |
+| 009 | MAX platform: `accounts.platform` (+ write guards), `max_*` tables |
 
 ## Environment variables
 
@@ -193,3 +196,163 @@ automatically in-process. It exists only as a manual escape hatch.
 - `POST /api/v1/auth/login` — send Telegram login code
 - `POST /api/v1/auth/code` — confirm login code
 - `POST /api/v1/auth/logout` — log out session
+
+## Платформа MAX
+
+Второй мессенджер в том же сервисе (ADR `_system/docs/architect/2026-10-07-tg-myperson-max-adr.md`
+в vault). Транспорт — [PyMax](https://github.com/MaxApiTeam/PyMax) (`maxapi-python`, точный пин).
+Фаза 1 — только чтение; запись (фаза 2) — по решению владельца.
+
+### Как устроено
+
+- **Платформа определяется алиасом.** `accounts.platform` = `telegram` | `max`. Те же URL, что у TG;
+  отличается только `X-Session-Alias` (например `max-work`). Middleware `platform_dispatch` переписывает
+  путь MAX-запроса на внутренний роутер `/api/v1/_max/…` с теми же именами роутов, поэтому каталог тулов,
+  ro-проверка и аудит работают как у TG. Снаружи `/api/v1/_max/…` → 404.
+- **Данные — отдельные таблицы `max_*`** той же формы, что `tg_*` (колонка в колонку). Telegram-таблицы,
+  TG-код и `readyz` MAX не трогает. У MAX-ответа по сообщению есть доп. поле `deleted_at`.
+- **Тул, не реализованный для MAX, → 501** `{"error","tool","platform":"max","alias"}`; запись на ro → 403
+  раньше 501. MAX-only тулы (`/auth/qr*`) для TG-алиаса → 501.
+- **Адаптер `app/max/`.** `import pymax` разрешён только в `session.py`, `store.py`, `auth.py`,
+  `normalize.py`, `media.py` (сторож `test_s16_pymax_import_boundary`).
+  - `session.py` — клиент PyMax с жёстко зашитыми `relogin=False`, `telemetry=False`, `interactive=False`,
+    без `RegistrationConfig`, с прокси и нашим хранилищем; машина состояний и supervisor
+    (backoff 5 с → 10 мин). Отозванный токен → `unauthorized`, признаки бана → `banned`: повторных входов нет.
+  - `store.py` — сессия PyMax в `account_sessions.session_plaintext` как JSON v1, файлов в контейнере нет.
+  - `ingest.py` — каждый кадр сообщений/правок/удалений/чатов сначала пишется в `max_raw_events`,
+    потом разбирается; кадр, который PyMax не смог разобрать, остаётся там с `normalized=false`.
+  - `sync.py` — backfill (страницы по 100, пауза 1,5 с) и добор пропусков после каждого (пере)подключения.
+  - `media.py` — файлы по запросу, через тот же прокси.
+- **Прокси обязателен** (`MAX_REQUIRE_PROXY=true`): без `MAX_PROXY_URL` MAX-сессия не стартует.
+- **Чтение не ставит «прочитано»**: история запрашивается с `interactive=False`, read/presence не вызываются.
+
+### Переменные окружения
+
+| Переменная | По умолчанию | Смысл |
+|---|---|---|
+| `MAX_ENABLED` | `false` | поднимать MAX-пул |
+| `MAX_PROXY_URL` | — | `socks5://…` или `http://…`; весь трафик MAX, включая медиа. Прод: `socks5://max-egress:1080` |
+| `MAX_REQUIRE_PROXY` | `true` | без прокси сессия не стартует |
+| `MAX_CATCHUP_SEED` | `50` | сколько последних сообщений брать у впервые увиденного чата |
+| `MAX_CATCHUP_MAX_CHATS` | `60` | чатов за проход добора; остаток — через 15 мин |
+| `MAX_RAW_EVENTS_RETENTION_DAYS` | `30` | хранение `max_raw_events` |
+| `MAX_WRITE_RATE_DEFAULT` | `20` | фаза 2: лимит отправок в час |
+
+### Вход: QR + пароль 2FA (runbook)
+
+Переменные для примеров: `U=https://tg-myperson.scom-it.ru/api/v1`, `$API_KEY`, `$TG_ADMIN_API_KEY`.
+QR сканируется телефоном с **другого экрана** (браузер на Mac): QR на экране того же телефона не отсканировать.
+
+**0. Аккаунт** (один раз):
+
+```bash
+curl -s -X POST "$U/accounts" -H "X-Admin-Key: $TG_ADMIN_API_KEY" -H "Content-Type: application/json" \
+  -d '{"alias":"max-work","phone":"+79XXXXXXXXX","mode":"ro","platform":"max"}'
+curl -s "$U/accounts" -H "X-Admin-Key: $TG_ADMIN_API_KEY" | jq '.[] | select(.alias=="max-work") | .runtime'
+# runtime.proxy должен быть true; state — stopped (сессии ещё нет)
+```
+
+**1. Если `runtime.state` = `error` или `banned` — сначала logout.** Пока в БД лежит сохранённая сессия,
+новый вход отвечает `409 {"error":"stored session exists; POST /auth/logout first"}`:
+
+```bash
+curl -s -X POST "$U/auth/logout" -H "X-API-Key: $API_KEY" -H "X-Session-Alias: max-work"
+```
+
+При `banned` сначала разобраться, почему (`runtime.last_error`), а не входить заново сразу.
+При `unauthorized` (токен отозван) сессия уже деактивирована — logout не нужен.
+
+**2. Запросить QR:**
+
+```bash
+curl -s -X POST "$U/auth/qr" -H "X-API-Key: $API_KEY" -H "X-Session-Alias: max-work"
+# 202 {"status":"awaiting_qr","qr_link":"https://max.ru/:auth/…","expires_at":"…","qr_png_url":"/api/v1/auth/qr.png?session=max-work"}
+```
+
+Открыть в браузере на Mac `https://tg-myperson.scom-it.ru/api/v1/auth/qr.png?session=max-work&api_key=<API_KEY>`
+и отсканировать телефоном: **MAX → Профиль → Устройства → Войти по QR**. QR живёт до `expires_at`;
+истёк — `GET /auth/qr` вернёт `"status":"expired"`, повторить шаг 2 (новый QR). Повторный `POST /auth/qr`,
+пока QR жив, возвращает тот же QR.
+
+**3. Дождаться запроса пароля** (на `max-work` включена 2FA):
+
+```bash
+curl -s "$U/auth/qr" -H "X-API-Key: $API_KEY" -H "X-Session-Alias: max-work"
+# {"status":"awaiting_password","password_hint":"…", …}
+```
+
+**4. Отправить пароль:**
+
+```bash
+curl -s -X POST "$U/auth/code" -H "X-API-Key: $API_KEY" -H "X-Session-Alias: max-work" \
+  -H "Content-Type: application/json" -d '{"code":"","password":"<пароль>"}'
+# 200 {"status":"authorized","alias":"max-work","user_id":…,"username":…}
+# 400 {"error":"invalid password","attempts_left":2} — неверный, можно повторить
+```
+
+Не больше **3 попыток** и **10 минут** с первого запроса пароля. Потом вход завершается: `state=error`,
+соединение закрыто, повторов нет — начать с шага 2 (сессия при неудачном входе не сохраняется,
+logout не нужен). Лимит держит наш провайдер: в PyMax 2.4.1 QR-вход переспрашивает пароль бесконечно.
+
+**5. Проверить:**
+
+```bash
+curl -s "$U/auth/status" -H "X-API-Key: $API_KEY" -H "X-Session-Alias: max-work"   # connected: true
+curl -s "$U/accounts" -H "X-Admin-Key: $TG_ADMIN_API_KEY" | jq '.[] | select(.alias=="max-work") | .runtime'
+# state=authorized, transport=web, last_event_at обновляется, catchup_backlog_chats → 0
+```
+
+Резервный путь — SMS (`POST /auth/login`, затем `POST /auth/code {"code":"…"}`, при 2FA ответ
+`2fa_required` и повтор с `password`); транспорт TCP. Неверный SMS-код завершает вход (PyMax не
+переспрашивает код) — заново `POST /auth/login`. Транспорт фиксируется при входе и не меняется до нового входа.
+
+### Бэкап и восстановление сессии
+
+Экспорта через API нет. Бэкап (infra-ops, только чтение):
+
+```sql
+SELECT s.session_plaintext FROM account_sessions s JOIN accounts a ON a.id = s.account_id
+WHERE a.alias = 'max-work' AND s.is_active;
+```
+
+JSON сохранить в `secrets.env.age`. Восстановление — `POST /auth/session {"session_string":"<JSON>"}`:
+сессия сначала логинится в MAX и только при успехе пишется в БД; при ошибке прежняя сессия не трогается.
+
+### Ограничения фазы 1
+
+- **Удаления за время простоя не видны** (протокол их не отдаёт); правки подтягиваются добором.
+- **Поиска на сервере MAX нет**: `search_global` ищет по нашей БД (`ILIKE` по тексту).
+- **Голосовые и кружки**: PyMax 2.4.1 иногда отвечает `video.not.ready` → `502`, не `500`.
+- `list_members`, запись и прочие тулы фазы 2/3 → `501` (запись на ro → `403`).
+- `text_html` = `NULL` (разметка — в `raw_data.elements`); у вложений MAX нет MIME-типа.
+- Коды бана MAX заранее неизвестны: `banned` — эвристика по словам `ban/blocked/suspended/restricted`
+  (`app/max/errors.py`), уточнить по живым ошибкам.
+- Границы `fetch_history` и маркер `fetch_chats` выведены из кода PyMax: на первом живом прогоне
+  сверить по логам, что backfill и добор не теряют сообщение на границе страницы.
+
+### Обновление PyMax
+
+PyMax ходит в недокументированный протокол MAX; модели и поведение меняются между релизами.
+Пин точный (`maxapi-python==…` в `pyproject.toml`), обновление — только так:
+
+1. Прочитать changelog и открытые issues PyMax между текущей и новой версией. Отдельно проверить места,
+   на которые опирается адаптер: цикл `BaseClient.start()` (мы его не используем — supervisor вызывает
+   `connect()`), порядок диспетчера и `App.on_event` (frame hook), `QrAuthFlow` (пароль), передачу
+   `interactive`/`telemetry`/`relogin` в `ClientConfig`, `fetch_history`/`fetch_chats`.
+2. Поднять пин в `pyproject.toml`.
+3. Прогнать `pytest`: нормализация на фикстурах (`tests/fixtures/max/`) ловит смену моделей,
+   `test_s13_pymax_config_guards` — защитные настройки, `test_frame_hook_sees_frames_pymax_cannot_parse` —
+   журнал сырых кадров, `test_s4_*` — лимит пароля.
+4. Деплой — только через infra-ops.
+5. После деплоя проверить: `runtime.state=authorized`, `last_event_at` свежий, число
+   `SELECT count(*) FROM max_raw_events WHERE NOT normalized` не растёт.
+6. Если пока PyMax был сломан, в базе осталась дыра — `POST /sync/backfill {"chat_id":…,"direction":"forward"}`
+   по затронутым чатам (добор пропусков сделает это сам при следующем подключении). Кадры с
+   `normalized=false` за этот период лежат в `max_raw_events` (30 дней).
+
+### FastAPI
+
+`fastapi<0.137` в `pyproject.toml`: начиная с 0.137 подключённые роутеры завёрнуты в приватный
+`_IncludedRouter`. Резолвер тулов уже от этого не зависит (плоская таблица `app/authz/route_table.py`,
+сервис не стартует, если ключевые роуты не резолвятся), но снимать ограничение — отдельным PR после
+прогона тестов на новой версии.
