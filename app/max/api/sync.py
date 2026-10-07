@@ -1,16 +1,46 @@
-"""MAX sync_status (API spec §3). trigger_backfill / sync_chats — PR-5."""
+"""MAX sync endpoints (API spec §3): sync_status, trigger_backfill, sync_chats."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.max import repo
+from app.max.api.common import authorized_or_error
+from app.max.schemas import MaxBackfillRequest
+from app.max.sync import SessionUnavailable, is_backfill_running
 
 router = APIRouter(prefix="/sync", tags=["max-sync"])
 
 
-def is_backfill_running(chat_id: int) -> bool:
-    return False  # MAX backfill arrives in PR-5
+@router.post("/backfill", name="trigger_backfill")
+async def trigger_backfill(req: MaxBackfillRequest, request: Request):
+    session = await authorized_or_error(request)
+    if isinstance(session, JSONResponse):
+        return session
+    try:
+        result = await session.sync.start_backfill(req.chat_id, req.limit, req.direction, req.days)
+    except SessionUnavailable as exc:
+        return JSONResponse(status_code=503, content={"detail": f"Session '{session.alias}' not available",
+                                                      "state": exc.state})
+    if result.get("status") == "error":
+        return JSONResponse(status_code=409, content=result)
+    return result
+
+
+@router.post("/chats", name="sync_chats")
+async def sync_chats(request: Request):
+    session = await authorized_or_error(request)
+    if isinstance(session, JSONResponse):
+        return session
+    try:
+        count = await session.sync.sync_chats()
+    except SessionUnavailable as exc:
+        return JSONResponse(status_code=503, content={"detail": f"Session '{session.alias}' not available",
+                                                      "state": exc.state})
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(status_code=502, content={"detail": f"{type(exc).__name__}: {exc}"})
+    return {"status": "ok", "chats_synced": count}
 
 
 @router.get("/status", name="sync_status")

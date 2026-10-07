@@ -25,6 +25,9 @@ dependencies = [
     "maxapi-python==2.4.1",
     # QR PNG for /auth/qr.png (pure-python PNG writer, no Pillow).
     "qrcode[png]>=8.0",
+    # MAX media download through MAX_PROXY_URL=socks5://… (aiohttp has no SOCKS
+    # support of its own; same author as python-socks, which PyMax uses).
+    "aiohttp-socks>=0.10",
 ]
 
 [project.optional-dependencies]

@@ -98,7 +98,13 @@ def aliases():
     yield make
     conn = _pg()
     try:
-        conn.cursor().execute("DELETE FROM accounts WHERE alias LIKE %s", (f"mx-%-{suffix}",))
+        cur = conn.cursor()
+        # max_raw_events.account_id references accounts (no cascade): journal first.
+        cur.execute(
+            "DELETE FROM max_raw_events WHERE account_id IN (SELECT id FROM accounts WHERE alias LIKE %s)",
+            (f"mx-%-{suffix}",),
+        )
+        cur.execute("DELETE FROM accounts WHERE alias LIKE %s", (f"mx-%-{suffix}",))
     finally:
         conn.close()
 

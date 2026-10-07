@@ -21,6 +21,9 @@ from pymax.types.domain.auth import (
     StartAuthResponse,
 )
 from pymax.types import Chat, User
+from pymax.types.domain import Message
+from pymax.types.domain.attachments.file import FileRequest
+from pymax.types.domain.attachments.video import VideoRequest
 from pymax.types.domain.profile import Profile
 from pymax.types.domain.sync import SyncState
 
@@ -55,6 +58,15 @@ class FakeMaxServer:
         self.contacts: list[dict] = []
         self.users: dict[int, dict] = {}
         self.get_users_calls: list[list[int]] = []
+
+        # History (chat_id → message dicts with "time"), chat list paging, media
+        self.history: dict[int, list[dict]] = {}
+        self.history_calls: list[dict] = []
+        self.chat_page = 2
+        self.fetch_chats_calls: list[int | None] = []
+        self.file_url = ""
+        self.video_url = ""
+        self.video_not_ready = False
 
         self.factory_calls: list[dict] = []
         self.clients: list["FakePyMaxClient"] = []
@@ -189,6 +201,46 @@ class FakePyMaxClient:
         """Deliver a server frame the way the adapter's frame hook sees it."""
         for hook in self._frame_hooks:
             await hook(frame["opcode"], frame.get("cmd", 0), frame.get("payload"))
+
+    async def fetch_history(self, chat_id: int, forward: int = 0, backward: int = 40, backward_time: int = 0,
+                            forward_time: int = 0, from_time: int | None = None, interactive: bool = False,
+                            **_: object) -> list:
+        self.calls.append("fetch_history")
+        self.server.history_calls.append(
+            {"chat_id": chat_id, "forward": forward, "backward": backward, "from_time": from_time,
+             "interactive": interactive}
+        )
+        msgs = sorted(self.server.history.get(chat_id, []), key=lambda m: m["time"])
+        point = from_time if from_time is not None else int(time.time() * 1000)
+        back = [m for m in msgs if m["time"] <= point][-backward:] if backward else []
+        fwd = [m for m in msgs if m["time"] >= point][:forward] if forward else []
+        picked = {m["id"]: m for m in back + fwd}
+        return [Message.model_validate(m) for m in sorted(picked.values(), key=lambda m: m["time"])]
+
+    async def fetch_chats(self, marker: int | None = None) -> list:
+        self.calls.append("fetch_chats")
+        self.server.fetch_chats_calls.append(marker)
+        chats = sorted(self.server.chats, key=lambda c: c.get("lastEventTime", 0), reverse=True)
+        if marker is not None:
+            chats = [c for c in chats if c.get("lastEventTime", 0) < marker]
+        return [Chat.model_validate(c) for c in chats[: self.server.chat_page]]
+
+    async def get_message(self, chat_id: int, message_id: int):
+        self.calls.append("get_message")
+        for m in self.server.history.get(chat_id, []):
+            if int(m["id"]) == int(message_id):
+                return Message.model_validate({**m, "chatId": chat_id})
+        return None
+
+    async def get_file_by_id(self, chat_id: int, message_id: int, file_id: int):
+        self.calls.append("get_file_by_id")
+        return FileRequest(url=self.server.file_url, unsafe=False)
+
+    async def get_video_by_id(self, chat_id: int, message_id: int, video_id: int):
+        self.calls.append("get_video_by_id")
+        if self.server.video_not_ready:
+            raise ApiError(opcode=83, error="video.not.ready", message="Video is not ready")
+        return VideoRequest(url=self.server.video_url)
 
     async def get_users(self, user_ids: list[int]) -> list:
         self.calls.append("get_users")

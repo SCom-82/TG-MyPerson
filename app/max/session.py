@@ -236,6 +236,7 @@ class MaxSession:
         self.client_hooks: list[Callable[[Any], None]] = []
         self.authorized_hooks: list[Callable[[Any], Awaitable[None]]] = []
         self.ingest: Any = None  # app.max.ingest.MaxIngest, set by MaxPool
+        self.sync: Any = None  # app.max.sync.MaxSync, set by MaxPool
         # Chats caught up IN THE CURRENT CONNECTION (ADR §2.J, fixed 07.10): only for
         # these a live event may move newest_time_ms. Reset before every connect().
         self.caught_up: set[int] = set()
@@ -243,6 +244,7 @@ class MaxSession:
         self._client: Any = None
         self._task: asyncio.Task | None = None
         self._changed = asyncio.Event()
+        self._background: dict[str, asyncio.Task] = {}
 
     # -- state helpers -----------------------------------------------------
 
@@ -303,7 +305,25 @@ class MaxSession:
             return
         self._spawn(transport, store=PgSessionStore(self.account_id, transport), auth_flow=None, one_shot=False)
 
+    def spawn_background(self, name: str, coro: Awaitable[None]) -> asyncio.Task:
+        """Named background job tied to this session; a new one with the same name
+        replaces the old one, all of them are cancelled by stop()."""
+        old = self._background.pop(name, None)
+        if old is not None and not old.done():
+            old.cancel()
+        task = asyncio.create_task(coro, name=f"max-{self.alias}-{name}")
+        self._background[name] = task
+        task.add_done_callback(lambda t: self._background.get(name) is t and self._background.pop(name))
+        return task
+
+    def background_running(self, name: str) -> bool:
+        task = self._background.get(name)
+        return task is not None and not task.done()
+
     async def stop(self) -> None:
+        for task in list(self._background.values()):
+            task.cancel()
+        self._background.clear()
         if self.login is not None:
             self.login.cancel()
         task, self._task = self._task, None

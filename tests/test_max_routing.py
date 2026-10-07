@@ -156,9 +156,7 @@ async def test_max_list_members_501_and_audit_error(client, accounts):
     [
         ("GET", "/api/v1/messages/scheduled?chat_id=1", "list_scheduled"),
         ("GET", "/api/v1/snapshots/chat/-100123", "list_chat_snapshots"),
-        ("POST", "/api/v1/sync/backfill", "trigger_backfill"),
-        ("POST", "/api/v1/sync/chats", "sync_chats"),
-        ("GET", "/api/v1/messages/-100123/5/media", "download_media"),
+        ("GET", "/api/v1/chats/-100123/my_rights", "get_my_rights"),
     ],
 )
 @pytest.mark.asyncio

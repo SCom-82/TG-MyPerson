@@ -13,6 +13,7 @@ from sqlalchemy import select
 from app import database
 from app.max.config import MaxSettings
 from app.max.ingest import MaxIngest
+from app.max.sync import MaxSync
 from app.max.session import ClientFactory, MaxSession
 from app.models import Account
 
@@ -40,6 +41,8 @@ class MaxPool:
         )
         session.ingest = MaxIngest(session)
         session.ingest.install()
+        session.sync = MaxSync(session)
+        session.sync.install()
         return session
 
     async def _load_accounts(self, alias: str | None = None) -> list[Account]:
