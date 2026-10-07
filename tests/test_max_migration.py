@@ -227,3 +227,26 @@ def test_orm_models_match_migrated_schema(pg):
     for model in (MaxUser, MaxChat, MaxMessage, MaxMedia, MaxSyncState, MaxRawEvent, Account):
         table = model.__table__.name
         assert {c.name for c in model.__table__.columns} == set(_columns(pg, table)), table
+
+
+def _indexes(cur, table: str) -> set[str]:
+    cur.execute("SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = %s", (table,))
+    return {r[0] for r in cur.fetchall()}
+
+
+@pytest.mark.parametrize(
+    "tg_table,max_table",
+    [
+        ("tg_users", "max_users"),
+        ("tg_chats", "max_chats"),
+        ("tg_messages", "max_messages"),
+    ],
+)
+def test_max_tables_mirror_tg_indexes(pg, tg_table, max_table):
+    """Every ix_tg_* index has its ix_max_* twin (e.g. sender_chat_id, review 07.10)."""
+    expected = {
+        name.replace("ix_tg_", "ix_max_", 1)
+        for name in _indexes(pg, tg_table)
+        if name.startswith("ix_tg_")
+    }
+    assert expected <= _indexes(pg, max_table)

@@ -114,6 +114,7 @@ def upgrade() -> None:
     op.create_index("ix_max_messages_chat_date", "max_messages", ["chat_id", "tg_date"])
     op.create_index("ix_max_messages_from_user", "max_messages", ["from_user_id"])
     op.create_index("ix_max_messages_type", "max_messages", ["message_type"])
+    op.create_index("ix_max_messages_sender_chat", "max_messages", ["sender_chat_id"])
 
     # ------------------------------------------------------------------
     # max_media — shape of tg_media + attach_index (several attachments per message)

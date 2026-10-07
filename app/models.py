@@ -464,6 +464,7 @@ class MaxMessage(Base):
         Index("ix_max_messages_chat_date", "chat_id", "tg_date"),
         Index("ix_max_messages_from_user", "from_user_id"),
         Index("ix_max_messages_type", "message_type"),
+        Index("ix_max_messages_sender_chat", "sender_chat_id"),
     )
 
 
