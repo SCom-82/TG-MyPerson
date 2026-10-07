@@ -44,6 +44,22 @@ _test_engine = create_async_engine(TEST_DB_URL, echo=False, poolclass=NullPool)
 _TestSessionFactory = async_sessionmaker(_test_engine, expire_on_commit=False)
 
 
+@pytest.fixture(autouse=True)
+def _reset_app_engine_pool():
+    """Drop pooled connections of the app engine after every test.
+
+    pytest-asyncio runs each test in a fresh event loop, while app.database.engine
+    is a module-level singleton. A connection pooled in test N is bound to N's
+    (closed) loop; reusing it in test N+1 fails with "another operation is in
+    progress" / "cannot rollback", and the failing test depends on suite order.
+    dispose(close=False) forgets those connections without touching the dead loop.
+    """
+    yield
+    from app.database import engine
+
+    engine.sync_engine.dispose(close=False)
+
+
 @pytest_asyncio.fixture
 async def db_session() -> AsyncGenerator[AsyncSession, None]:
     """Provide a transactional async session; rolls back after each test."""
