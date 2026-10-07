@@ -555,11 +555,13 @@ class MaxSession:
         return str(link) if link is not None else None
 
     async def auth_status(self) -> dict:
+        # Like TG get_auth_status: identity fields only once authorized.
+        authorized = self.state == "authorized"
         return {
             "connected": self.connected,
-            "phone_number": self.phone,
-            "user_id": self.user_id,
-            "username": self.username,
+            "phone_number": self.phone if authorized else None,
+            "user_id": self.user_id if authorized else None,
+            "username": self.username if authorized else None,
         }
 
     async def me(self) -> dict:

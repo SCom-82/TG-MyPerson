@@ -621,7 +621,7 @@ def test_s16_pymax_import_boundary():
 @pytest.mark.asyncio
 async def test_status_and_me(env):
     status = await env.client.get("/api/v1/auth/status", headers=env.h())
-    assert status.json() == {"connected": False, "phone_number": PHONE, "user_id": None, "username": None}
+    assert status.json() == {"connected": False, "phone_number": None, "user_id": None, "username": None}
     me = await env.client.get("/api/v1/auth/me", headers=env.h())
     assert me.status_code == 503
     assert me.json() == {"detail": f"Session '{env.alias}' not available", "state": "stopped"}
@@ -759,3 +759,25 @@ async def test_f_max_start_failure_does_not_affect_tg_or_readyz(lifespan_app, mo
         assert ready.status_code == 200
         assert set(ready.json()) == {"status", "database", "telegram_connected", "telegram_authorized"}
     assert max_pool_module.max_pool is None  # stopped and cleared on shutdown
+
+
+@pytest.mark.parametrize(
+    "error,message,banned",
+    [
+        ("account.blocked", "Account is blocked", True),
+        ("user.banned", None, True),
+        ("error", "Your account is suspended", True),
+        ("access.restricted", None, True),
+        ("unblock.failed", "Cannot unblock user", False),   # substring, not a word
+        ("blocklist.full", None, False),
+        ("banner.not.found", None, False),
+        ("FAIL_LOGIN_TOKEN", "account blocked", False),     # revoked token wins
+        ("too.many.requests", "Slow down", False),
+    ],
+)
+def test_ban_heuristic_whole_words(error, message, banned):
+    from pymax import ApiError
+
+    from app.max.errors import is_banned
+
+    assert is_banned(ApiError(opcode=19, error=error, message=message)) is banned
