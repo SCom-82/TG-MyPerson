@@ -65,6 +65,8 @@ class FakeMaxServer:
         self.chat_page = 2
         self.fetch_chats_calls: list[int | None] = []
         self.fetch_chats_gate: asyncio.Event | None = None  # set → fetch_chats waits for it
+        self.fetch_chats_errors: list[BaseException] = []  # raised one per call, in order
+        self.login_chats: list[dict] | None = None  # login snapshot if it differs from fetch_chats
         self.file_url = ""
         self.video_url = ""
         self.video_not_ready = False
@@ -189,7 +191,8 @@ class FakePyMaxClient:
             {"contact": {"id": self.server.user_id, "names": [{"firstName": "Сергей", "lastName": "С"}],
                          "link": "sergey", "phone": 79001112233}}
         )
-        self.chats = [Chat.model_validate(c) for c in self.server.chats]
+        login_chats = self.server.login_chats if self.server.login_chats is not None else self.server.chats
+        self.chats = [Chat.model_validate(c) for c in login_chats]
         self.contacts = [User.model_validate(u) for u in self.server.contacts]
         self.is_connected = True
 
@@ -223,6 +226,8 @@ class FakePyMaxClient:
         self.server.fetch_chats_calls.append(marker)
         if self.server.fetch_chats_gate is not None:
             await self.server.fetch_chats_gate.wait()
+        if self.server.fetch_chats_errors:
+            raise self.server.fetch_chats_errors.pop(0)
         chats = sorted(self.server.chats, key=lambda c: c.get("lastEventTime", 0), reverse=True)
         if marker is not None:
             chats = [c for c in chats if c.get("lastEventTime", 0) < marker]

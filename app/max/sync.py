@@ -253,15 +253,21 @@ class MaxSync:
     async def catch_up(self) -> int:
         """One pass. Returns how many chats are left for the next pass."""
         settings = self.session.settings
+        chats_fresh = True
         try:
             await self.sync_chats()
         except SessionUnavailable:
             raise
         except Exception:  # noqa: BLE001 — a failed chat list must not stop the gap fill
+            chats_fresh = False
             log.warning("max[%s]: sync_chats during catch-up failed", self.session.alias, exc_info=True)
 
         candidates, no_tail = await self._catchup_candidates()
-        self.session.caught_up.update(no_tail)
+        if chats_fresh:
+            self.session.caught_up.update(no_tail)
+        # else: "no tail" was judged by a possibly stale last_message_at — a chat with
+        # a gap would be marked caught up and live events would jump its cursor over
+        # the gap. Leave them out and force another pass on the next tick.
         todo, rest = candidates[: settings.catchup_max_chats], candidates[settings.catchup_max_chats:]
         client = self._client()
         first = True
@@ -288,9 +294,10 @@ class MaxSync:
             except Exception:  # noqa: BLE001
                 log.exception("max[%s]: catch-up of chat %s failed", self.session.alias, chat_id)
 
+        backlog = len(rest) if chats_fresh else max(len(rest), 1)
         self.session.last_catchup_at = datetime.now(timezone.utc)
-        self.session.catchup_backlog_chats = len(rest)
-        return len(rest)
+        self.session.catchup_backlog_chats = backlog
+        return backlog
 
     async def _catchup_candidates(self) -> tuple[list[tuple[int, MaxSyncState | None]], set[int]]:
         """(chats with a tail or never synced — freshest first, chats with no tail).

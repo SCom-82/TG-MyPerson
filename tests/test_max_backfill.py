@@ -429,6 +429,49 @@ async def test_backlog_chats_stay_out_of_caught_up(env, monkeypatch):
     assert {GROUP, OTHER_CHAT} <= session.caught_up
 
 
+@pytest.mark.asyncio
+async def test_b15_failed_chat_sync_does_not_mark_stale_chats_caught_up(env, monkeypatch):
+    """sync_chats fails in the catch-up pass; the chat has a tail but its
+    last_message_at in the DB is stale → not caught up, a live event does not move
+    the cursor, the next pass (tick) fills the tail."""
+    t0 = now_ms() - 60 * MIN
+    before = [msg(i, t0 - (3 - i) * MIN) for i in range(1, 4)]   # ours up to T0
+    tail = [msg(i, t0 + (i - 3) * MIN) for i in range(4, 8)]     # 4 we missed
+    live = msg(8, t0 + 30 * MIN)
+    session = await _login(env, chats=[chat(GROUP, before[-1])], history={GROUP: before})
+    assert GROUP in session.caught_up  # caught up as of this login: last_message_at == T0
+
+    gate = asyncio.Event()
+    ticks = []
+
+    async def tick(seconds):
+        if seconds == sync_module.CATCHUP_TICK_S:
+            ticks.append(seconds)
+            await gate.wait()
+
+    monkeypatch.setattr(sync_module, "_sleep", tick)
+    env.server.history = {GROUP: before + tail + [live]}
+    env.server.chats = [chat(GROUP, tail[-1])]
+    env.server.login_chats = [chat(GROUP, before[-1])]  # the login snapshot is stale too
+    env.server.fetch_chats_errors = [RuntimeError("chat list unavailable")]
+    await env.pool.restart(env.alias)  # reconnect: the first pass cannot refresh the chat list
+    await env.wait_state("authorized")
+    session = await env.session()
+    await _wait(lambda: ticks)  # pass 1 done, waiting for the tick
+
+    assert GROUP not in session.caught_up
+    assert session.runtime()["catchup_backlog_chats"] >= 1
+    await env.server.clients[-1].push({"opcode": 128, "cmd": 0, "payload": {"chatId": GROUP, "message": live}})
+    assert cursor(GROUP)[1] == t0  # the live event did not jump over the tail
+
+    gate.set()  # pass 2: chat list fresh → the tail is seen and filled
+    await _wait(lambda: not session.background_running("catchup"))
+    assert stored_ids(GROUP) == list(range(1, 9))
+    assert cursor(GROUP)[1] == live["time"]
+    assert GROUP in session.caught_up
+    assert session.runtime()["catchup_backlog_chats"] == 0
+
+
 # ---------------------------------------------------------------------------
 # S — chat list
 # ---------------------------------------------------------------------------
