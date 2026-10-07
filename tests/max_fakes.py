@@ -67,6 +67,7 @@ class FakeMaxServer:
         self.fetch_chats_gate: asyncio.Event | None = None  # set → fetch_chats waits for it
         self.fetch_chats_errors: list[BaseException] = []  # raised one per call, in order
         self.login_chats: list[dict] | None = None  # login snapshot if it differs from fetch_chats
+        self.history_errors: dict[int, list[BaseException]] = {}  # chat_id → raised one per call
         self.file_url = ""
         self.video_url = ""
         self.video_not_ready = False
@@ -214,6 +215,8 @@ class FakePyMaxClient:
             {"chat_id": chat_id, "forward": forward, "backward": backward, "from_time": from_time,
              "interactive": interactive}
         )
+        if self.server.history_errors.get(chat_id):
+            raise self.server.history_errors[chat_id].pop(0)
         msgs = sorted(self.server.history.get(chat_id, []), key=lambda m: m["time"])
         point = from_time if from_time is not None else int(time.time() * 1000)
         back = [m for m in msgs if m["time"] <= point][-backward:] if backward else []

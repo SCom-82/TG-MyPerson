@@ -472,6 +472,49 @@ async def test_b15_failed_chat_sync_does_not_mark_stale_chats_caught_up(env, mon
     assert session.runtime()["catchup_backlog_chats"] == 0
 
 
+@pytest.mark.asyncio
+async def test_failed_chat_catchup_retried_on_tick(env, monkeypatch):
+    """The gap fill of one chat fails: it is not caught up, the pass reports
+    backlog ≥ 1, the next tick retries it and fills the gap; other chats are done."""
+    t0 = now_ms() - 60 * MIN
+    before = {cid: [msg(i, t0 - (3 - i) * MIN - k) for i in range(1, 4)]
+              for k, cid in enumerate((GROUP, OTHER_CHAT))}
+    session = await _login(env, chats=[chat(cid, before[cid][-1]) for cid in before], history=before)
+    for cid in before:
+        for m in before[cid]:
+            await session.ingest.store_message(Message.model_validate(m), chat_id=cid, advance_cursor=True)
+
+    tails = {cid: [msg(i, t0 + (i - 3) * MIN - k) for i in range(4, 7)] for k, cid in enumerate(before)}
+    gate = asyncio.Event()
+    ticks = []
+
+    async def tick(seconds):
+        if seconds == sync_module.CATCHUP_TICK_S:
+            ticks.append(seconds)
+            await gate.wait()
+
+    monkeypatch.setattr(sync_module, "_sleep", tick)
+    env.server.history = {cid: before[cid] + tails[cid] for cid in before}
+    env.server.chats = [chat(cid, tails[cid][-1]) for cid in before]
+    env.server.history_errors = {GROUP: [RuntimeError("history unavailable")]}
+    await env.pool.restart(env.alias)
+    await env.wait_state("authorized")
+    session = await env.session()
+    await _wait(lambda: ticks)  # pass 1 done
+
+    assert GROUP not in session.caught_up and OTHER_CHAT in session.caught_up
+    assert session.runtime()["catchup_backlog_chats"] == 1
+    assert stored_ids(GROUP) == [1, 2, 3] and stored_ids(OTHER_CHAT) == list(range(1, 7))
+
+    gate.set()  # pass 2 retries the failed chat
+    await _wait(lambda: not session.background_running("catchup"))
+    assert stored_ids(GROUP) == list(range(1, 7))
+    assert cursor(GROUP)[1] == tails[GROUP][-1]["time"]
+    assert GROUP in session.caught_up
+    assert session.runtime()["catchup_backlog_chats"] == 0
+    assert ticks == [sync_module.CATCHUP_TICK_S]
+
+
 # ---------------------------------------------------------------------------
 # S — chat list
 # ---------------------------------------------------------------------------

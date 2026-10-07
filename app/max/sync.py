@@ -270,6 +270,7 @@ class MaxSync:
         # the gap. Leave them out and force another pass on the next tick.
         todo, rest = candidates[: settings.catchup_max_chats], candidates[settings.catchup_max_chats:]
         client = self._client()
+        failed = 0
         first = True
         for chat_id, state in todo:
             if not first:
@@ -292,9 +293,14 @@ class MaxSync:
             except SessionUnavailable:
                 raise
             except Exception:  # noqa: BLE001
+                # Not caught up: it stays a candidate (cursor not past its tail) and
+                # counts as backlog, so the next tick retries it.
+                failed += 1
                 log.exception("max[%s]: catch-up of chat %s failed", self.session.alias, chat_id)
 
-        backlog = len(rest) if chats_fresh else max(len(rest), 1)
+        backlog = len(rest) + failed
+        if not chats_fresh:
+            backlog = max(backlog, 1)
         self.session.last_catchup_at = datetime.now(timezone.utc)
         self.session.catchup_backlog_chats = backlog
         return backlog
