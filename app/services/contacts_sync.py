@@ -28,6 +28,11 @@ async def contacts_sync_once() -> dict[str, int]:
         try:
             if not await client.is_user_authorized():
                 continue
+            from app.telegram.pool import confirm_identity
+
+            if not await confirm_identity(session):
+                log.warning("contacts_sync: alias '%s' skipped: %s", alias, session.identity_error)
+                continue
             result = await client(GetContactsRequest(hash=0))
             synced[alias] = await tg_store.store_contacts(
                 account_id, list(getattr(result, "users", []) or []), full=True

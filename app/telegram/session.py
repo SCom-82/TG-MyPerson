@@ -28,6 +28,10 @@ class TelegramSession:
         self.alias = alias
         self.account_id = account_id
         self.me_id: int | None = None  # set on start / login: the session's own user
+        # STORAGE_MODE=new: the session's user matched accounts.external_user_id
+        # (True), did not (False, identity_error set) or was not checked (None).
+        self.identity_ok: bool | None = None
+        self.identity_error: str | None = None
         self.phone = phone
         self._api_id = api_id
         self._api_hash = api_hash

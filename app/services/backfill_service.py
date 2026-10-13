@@ -47,6 +47,10 @@ async def start_backfill(
     if tg_store.new_mode():
         if not isinstance(account, int):
             return {"status": "error", "detail": f"Session '{alias}' has no account"}
+        from app.telegram.pool import confirm_identity
+
+        if not await confirm_identity(tg_session):
+            return {"status": "error", "detail": f"Session '{alias}' belongs to another Telegram user"}
         task = asyncio.create_task(_run_backfill_new(account, chat_id, limit, alias, direction))
     else:
         task = asyncio.create_task(_run_backfill(chat_id, limit, alias, direction))

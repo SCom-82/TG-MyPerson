@@ -20,7 +20,7 @@ from app.schemas import (
 from app.services.user_service import get_users, upsert_user
 from app.config import settings
 from app.services import registry_service, tg_store
-from app.telegram.pool import require_authorized_client, pool
+from app.telegram.pool import require_identity, require_authorized_client, pool
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/users", tags=["users"])
@@ -136,6 +136,8 @@ async def bulk_resolve_by_id(
             status_code=503,
             detail=f"Session '{alias}' not authorized — use /auth/login?session={alias}",
         )
+    # STORAGE_MODE=new: never with a session of another user (review R3-2)
+    await require_identity(alias, tg_session)
 
     client = tg_session.client
     resolved: list[ResolvedUserItem] = []

@@ -23,7 +23,7 @@ from app.models import (
     TgChat,
 )
 from app.services import registry_service, tg_store
-from app.telegram.pool import pool
+from app.telegram.pool import require_identity, pool
 
 router = APIRouter(prefix="/snapshots", tags=["snapshots"])
 
@@ -135,6 +135,8 @@ async def snapshot_chat(
             status_code=503,
             detail=f"Session '{alias}' not authorized — use /auth/login?session={alias}",
         )
+    # STORAGE_MODE=new: never with a session of another user (review R3-2)
+    await require_identity(alias, session)
 
     # Collect participants from Telegram.
     # Strategy: first do an un-filtered pass (works for small chats / when admin),

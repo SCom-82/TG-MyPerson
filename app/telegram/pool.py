@@ -288,7 +288,47 @@ async def require_authorized_client(request: Request) -> "TelegramClient":
             status_code=503,
             detail=f"Session '{alias}' not authorized — use /auth/login?session={alias}",
         )
+    await require_identity(alias, session)
     return session.client
+
+
+async def confirm_identity(session: TelegramSession) -> bool:
+    """STORAGE_MODE=new: is the session's user the account's own one? (review R2-1, R3-2)
+
+    Checked once per session (fills an empty accounts.external_user_id); a
+    mismatch is remembered in identity_error. legacy: always True.
+    """
+    from app.services import tg_store
+
+    if not tg_store.new_mode():
+        return True
+    if getattr(session, "identity_ok", None) is not None:
+        return session.identity_ok
+    from app.services.account_identity import IdentityMismatch, ensure_account_user
+
+    try:
+        if session.account_id is None:
+            raise IdentityMismatch(f"session '{getattr(session, 'alias', '?')}' has no account id")
+        me_id = getattr(session, "me_id", None) or (await session.client.get_me()).id
+        session.me_id = me_id
+        await ensure_account_user(session.account_id, me_id)
+    except IdentityMismatch as exc:
+        session.identity_ok = False
+        session.identity_error = str(exc)
+        session.last_error = f"identity mismatch: {exc}"
+        log.error("Pool: session '%s' is not usable: %s", getattr(session, 'alias', '?'), exc)
+        return False
+    session.identity_ok = True
+    return True
+
+
+async def require_identity(alias: str, session: TelegramSession) -> None:
+    """409 for a session whose user is not the account's (nothing may be written with it)."""
+    if not await confirm_identity(session):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Session '{alias}' belongs to another Telegram user: {session.identity_error}",
+        )
 
 
 async def _maybe_register_handlers(alias: str, session: TelegramSession) -> None:
@@ -323,15 +363,9 @@ async def attach_handlers(alias: str, session: TelegramSession) -> None:
         return
     if session.account_id is None:
         raise RuntimeError(f"Pool: session '{alias}' has no account id")
-    from app.services.account_identity import IdentityMismatch, ensure_account_user
-
-    try:
-        me_id = getattr(session, "me_id", None) or (await session.client.get_me()).id
-        await ensure_account_user(session.account_id, me_id)
-    except IdentityMismatch as exc:
+    if not await confirm_identity(session):
         # Never write another user's messages into this account (review R2-1).
-        session.last_error = f"identity mismatch: {exc}"
-        log.error("Pool: handlers NOT registered for '%s': %s", alias, exc)
+        log.error("Pool: handlers NOT registered for '%s': %s", alias, session.identity_error)
         return
     try:
         loaded = await tg_store.preload(session.account_id, session.client)
@@ -339,6 +373,19 @@ async def attach_handlers(alias: str, session: TelegramSession) -> None:
     except Exception as exc:  # a failed preload must not leave the account without handlers
         log.error("Pool: entity preload failed for '%s': %s", alias, exc)
     register_handlers(session.client, account_id=session.account_id)
+
+
+async def attach_all_handlers(pool_: "TelegramClientPool") -> None:
+    """Handlers for every authorized session at startup; one failing account
+    must not take the service down (review R3-3)."""
+    for alias, session in list(pool_._pool.items()):
+        try:
+            if session.client and await session.client.is_user_authorized():
+                await attach_handlers(alias, session)
+                log.info("Lifespan: registered handlers for alias '%s'", alias)
+        except Exception as exc:
+            session.last_error = f"handlers not registered: {exc}"
+            log.error("Lifespan: handlers for '%s' failed: %s", alias, exc)
 
 
 # Singleton pool instance

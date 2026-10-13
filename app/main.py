@@ -25,7 +25,7 @@ from app.max.maintenance import raw_events_loop
 from app.max.api import MAX_API_ROUTERS, max_api_router
 from app.services.contacts_sync import contacts_sync_loop
 from app.services.partition_maintenance import ensure_partitions, partition_loop
-from app.telegram.pool import attach_handlers, pool
+from app.telegram.pool import attach_all_handlers, pool
 
 logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
@@ -40,11 +40,9 @@ async def lifespan(app: FastAPI):
     # Start all enabled Telegram sessions (supervisor pattern)
     await pool.start_all()
 
-    # Register event handlers for ALL authorized sessions (PR #4: was 'work'-only)
-    for alias, session in pool._pool.items():
-        if session.client and await session.client.is_user_authorized():
-            await attach_handlers(alias, session)
-            log.info("Lifespan: registered handlers for alias '%s'", alias)
+    # Register event handlers for ALL authorized sessions (PR #4: was 'work'-only);
+    # every account on its own: one failure does not stop startup.
+    await attach_all_handlers(pool)
 
     # Self-sufficient audit_logs partition maintenance (ADR 2026-06-16):
     # ensure on startup (Layer 1), then a daily background tick (Layer 2).

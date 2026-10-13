@@ -323,7 +323,8 @@ def _pool_with(sessions: dict):
 
 def _tg_session(account_id, client):
     client.is_user_authorized = AsyncMock(return_value=True)
-    return SimpleNamespace(account_id=account_id, client=client)
+    # identity already confirmed (R3-2 is covered in test_account_identity.py)
+    return SimpleNamespace(account_id=account_id, client=client, identity_ok=True)
 
 
 async def test_t10_backfill_of_a_does_not_block_b(accounts, monkeypatch):
