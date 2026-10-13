@@ -5,7 +5,8 @@
 - upload: create_upload → PUT /api/v1/uploads/{token} (≤ 50 MB, TTL 15 min,
   /tmp/uploads/<account_id>/), then send_* with upload_id;
 - or send_* with an https file_url the server downloads (≤ 50 MB, no
-  redirects, no private/loopback addresses).
+  redirects, no private/loopback addresses; the connection goes only to the
+  addresses checked — no second DNS lookup, so no DNS rebinding).
 """
 
 import base64
@@ -18,6 +19,8 @@ import socket
 import time
 from pathlib import Path
 from urllib.parse import urlparse
+
+from aiohttp.abc import AbstractResolver
 
 from app.config import settings
 
@@ -108,12 +111,45 @@ def purge_expired(now: float | None = None) -> int:
     return removed
 
 
-def _public_ip(host: str) -> None:
-    for info in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP):
-        ip = ipaddress.ip_address(info[4][0])
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast \
-                or ip.is_unspecified:
-            raise LinkError(f"file_url host {host} resolves to a non-public address")
+def _check_public(ip: str, host: str) -> None:
+    addr = ipaddress.ip_address(ip)
+    if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved or addr.is_multicast \
+            or addr.is_unspecified:
+        raise LinkError(f"file_url host {host} resolves to a non-public address")
+
+
+async def _resolve(host: str, port: int) -> list[tuple[int, str]]:
+    """(family, ip) of the host — the ONLY resolution for a download."""
+    import asyncio
+
+    infos = await asyncio.get_running_loop().getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    return [(family, sockaddr[0]) for family, _, _, _, sockaddr in infos]
+
+
+class PinnedResolver(AbstractResolver):
+    """aiohttp resolver that only hands out the addresses checked before connecting.
+
+    The connection goes to an IP that passed the public-address check; nothing
+    resolves the name a second time, so a short-TTL DNS answer cannot turn into
+    an internal address between check and connect (DNS rebinding, review R5-1).
+    TLS still verifies the certificate against the host name of the URL.
+    """
+
+    def __init__(self, host: str, addresses: list[tuple[int, str]]) -> None:
+        self.host = host
+        self.addresses = addresses
+
+    async def resolve(self, host: str, port: int = 0, family: int = socket.AF_INET) -> list[dict]:
+        if host != self.host:
+            raise OSError(f"unexpected host {host}")
+        return [
+            {"hostname": host, "host": ip, "port": port, "family": fam, "proto": 0,
+             "flags": socket.AI_NUMERICHOST}
+            for fam, ip in self.addresses
+        ]
+
+    async def close(self) -> None:
+        return None
 
 
 async def fetch_url(url: str) -> tuple[str, bytes]:
@@ -123,8 +159,16 @@ async def fetch_url(url: str) -> tuple[str, bytes]:
     parsed = urlparse(url)
     if parsed.scheme != "https" or not parsed.hostname:
         raise LinkError("file_url must be an https URL")
-    _public_ip(parsed.hostname)
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as http:
+    try:
+        addresses = await _resolve(parsed.hostname, parsed.port or 443)
+    except OSError as exc:
+        raise LinkError(f"file_url host {parsed.hostname} does not resolve: {exc}")
+    if not addresses:
+        raise LinkError(f"file_url host {parsed.hostname} does not resolve")
+    for _, ip in addresses:
+        _check_public(ip, parsed.hostname)
+    connector = aiohttp.TCPConnector(resolver=PinnedResolver(parsed.hostname, addresses), use_dns_cache=False)
+    async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=300)) as http:
         async with http.get(url, allow_redirects=False) as resp:
             if resp.status != 200:
                 raise LinkError(f"file_url answered HTTP {resp.status}")

@@ -306,3 +306,54 @@ def test_every_tool_reaches_its_rest_route(platform):
         expected = {"download_media": "get_single_message", "person_accounts": "get_person"}.get(name, tool.route)
         assert route_name == expected, (name, route_name)
     assert not missing, missing
+
+
+# ---------------------------------------------------------------------------
+# R5-1: file_url connects only to the addresses that passed the check
+# ---------------------------------------------------------------------------
+
+async def test_file_url_dns_rebinding_is_not_possible(monkeypatch):
+    import socket as _socket
+
+    answers = [[(_socket.AF_INET, "93.184.216.34")], [(_socket.AF_INET, "127.0.0.1")]]
+    calls = []
+
+    async def resolve(host, port):
+        calls.append(host)
+        return answers[min(len(calls) - 1, 1)]  # 1st: public, any later lookup: loopback
+
+    captured = {}
+
+    class Stop(Exception):
+        pass
+
+    class FakeConnector:
+        def __init__(self, *, resolver, use_dns_cache):
+            captured["resolver"] = resolver
+            captured["dns_cache"] = use_dns_cache
+            raise Stop()
+
+    monkeypatch.setattr(files, "_resolve", resolve)
+    monkeypatch.setattr("aiohttp.TCPConnector", FakeConnector)
+    with pytest.raises(Stop):
+        await files.fetch_url("https://rebind.example/x.pdf")
+
+    resolver = captured["resolver"]
+    got = await resolver.resolve("rebind.example", 443)
+    got_again = await resolver.resolve("rebind.example", 443)
+    assert [g["host"] for g in got + got_again] == ["93.184.216.34", "93.184.216.34"]
+    assert calls == ["rebind.example"]  # resolved exactly once, the connection never re-resolves
+    assert captured["dns_cache"] is False
+    with pytest.raises(OSError):
+        await resolver.resolve("other.example", 443)
+
+
+async def test_file_url_any_non_public_address_refuses(monkeypatch):
+    import socket as _socket
+
+    async def resolve(host, port):
+        return [(_socket.AF_INET, "93.184.216.34"), (_socket.AF_INET, "10.0.0.5")]
+
+    monkeypatch.setattr(files, "_resolve", resolve)
+    with pytest.raises(files.LinkError, match="non-public"):
+        await files.fetch_url("https://mixed.example/x.pdf")
