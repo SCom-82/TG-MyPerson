@@ -69,6 +69,14 @@ class PreconditionFailed(Exception):
     """§8.2.D: the attribution rule does not hold — stop, escalate (ТЗ §13)."""
 
 
+class CutoverDone(Exception):
+    """The service already runs on the new tables: copy/delta would overwrite them
+    with legacy versions (review 13.10, R4-1). --force-after-cutover to override."""
+
+
+CUTOVER = "cutover"  # mig_watermark row written after the start-up delta
+
+
 @dataclass
 class Options:
     split_date: date = date(2025, 11, 1)
@@ -78,6 +86,7 @@ class Options:
     max_account: str = "max-work"
     selves: dict[str, int] = field(default_factory=dict)  # alias → own user id
     probe_report: Path | None = None
+    force_after_cutover: bool = False
 
 
 @dataclass
@@ -447,9 +456,28 @@ def step_f_users(ctx: Ctx) -> dict:
         LEFT JOIN tg_users u ON a.platform = 'telegram' AND u.id = x.ext
         LEFT JOIN max_users mu ON a.platform = 'max' AND mu.id = x.ext
         ORDER BY x.account_id, x.ext, x.prio
-        ON CONFLICT (account_id, external_id) DO NOTHING
-    """)
-    return {"users": inserted}
+        {conflict}
+    """.replace("{conflict}", _user_conflict(ctx.delta_wm is not None)))
+    registry_without_source = ctx.one("""
+        SELECT count(DISTINCT reg.tg_user_id) FROM users_registry reg
+        WHERE reg.tg_user_id IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM users_registry_sources src WHERE src.registry_id = reg.id)""")
+    return {"users": inserted, "registry_without_source_to_high_account": registry_without_source}
+
+
+def _user_conflict(delta: bool) -> str:
+    if not delta:
+        return "ON CONFLICT (account_id, external_id) DO NOTHING"
+    # delta: names and username follow the legacy row changed after the watermark
+    return """ON CONFLICT (account_id, external_id) DO UPDATE SET
+        username = coalesce(excluded.username, users.username),
+        first_name = coalesce(excluded.first_name, users.first_name),
+        last_name = coalesce(excluded.last_name, users.last_name),
+        phone = coalesce(excluded.phone, users.phone)
+        WHERE (excluded.username IS NOT NULL AND excluded.username IS DISTINCT FROM users.username)
+           OR (excluded.first_name IS NOT NULL AND excluded.first_name IS DISTINCT FROM users.first_name)
+           OR (excluded.last_name IS NOT NULL AND excluded.last_name IS DISTINCT FROM users.last_name)
+           OR (excluded.phone IS NOT NULL AND excluded.phone IS DISTINCT FROM users.phone)"""
 
 
 def _message_conflict(delta: bool) -> str:
@@ -499,7 +527,16 @@ def step_g_messages(ctx: Ctx) -> dict:
                               raw, created_at)
         SELECT o.account_id, ch.id, m.message_id, us.id, m.sender_chat_id, m.reply_to_message_id,
                m.forward_from_chat_id, m.forward_from_message_id, coalesce(m.message_type, 'text'), m.text,
-               m.text_html, m.tg_date, coalesce(m.from_user_id = a.external_user_id, false),
+               m.text_html, m.tg_date,
+               -- own user wrote it; a post without a user sender (channel) is 'out' only
+               -- where the chat has one owner: the legacy raw 'out' is that account's
+               -- (review 13.10, item 3); with several owners nobody knows whose it was.
+               CASE WHEN m.from_user_id IS NOT NULL THEN m.from_user_id = a.external_user_id
+                    WHEN c.chat_type NOT IN {PRIVATE}
+                         AND (SELECT count(*) FROM mig_chat_owner x WHERE x.platform = 'telegram'
+                              AND x.legacy_chat_id = m.chat_id) = 1
+                    THEN coalesce((m.raw_data->>'out')::boolean, false)
+                    ELSE false END,
                coalesce(m.is_edited, false), m.edit_date, m.views, m.raw_data, coalesce(m.created_at, now())
         FROM tg_messages m
         JOIN tg_chats c ON c.id = m.chat_id
@@ -709,9 +746,29 @@ COPY_STEPS = [
 ]
 
 
+def cutover_at(ctx: Ctx):
+    return ctx.one("SELECT at FROM mig_watermark WHERE tbl = %(t)s", {"t": CUTOVER})
+
+
+def _check_cutover(ctx: Ctx, command: str) -> None:
+    at = cutover_at(ctx)
+    if at is not None and not ctx.opts.force_after_cutover:
+        raise CutoverDone(
+            f"{command} refused: the service switched to the new tables at {at.isoformat()}; "
+            "legacy rows would overwrite newer ones (--force-after-cutover to override)"
+        )
+
+
+def mark_cutover(ctx: Ctx) -> None:
+    ctx.q("INSERT INTO mig_watermark (tbl, max_id, at) VALUES (%(t)s, NULL, now())"
+          " ON CONFLICT (tbl) DO NOTHING", {"t": CUTOVER})
+    ctx.conn.commit()
+
+
 def copy(opts: Options) -> dict:
     ctx = open_ctx(opts)
     try:
+        _check_cutover(ctx, "copy")
         check_partitions(ctx)
         before = _counts(ctx)
         step_watermark(ctx)
@@ -725,9 +782,11 @@ def copy(opts: Options) -> dict:
         ctx.conn.close()
 
 
-def delta(opts: Options) -> dict:
+def delta(opts: Options, *, cutover: bool = False) -> dict:
+    """cutover=True: the start-up delta of the switch — marks the cutover on success."""
     ctx = open_ctx(opts)
     try:
+        _check_cutover(ctx, "delta")
         check_partitions(ctx)
         wm = {r[0]: (r[1], r[2]) for r in ctx.rows("SELECT tbl, max_id, at FROM mig_watermark")}
         if set(WATERMARK_TABLES) - set(wm):
@@ -738,8 +797,11 @@ def delta(opts: Options) -> dict:
         step_watermark(ctx)
         ctx.conn.commit()
         after = _counts(ctx)
-        report.update(command="delta", ok=True, since={t: wm[t][1].isoformat() for t in wm},
+        report.update(command="delta", ok=True, since={t: wm[t][1].isoformat() for t in wm if t != CUTOVER},
                       changes={t: after[t] - before[t] for t in after})
+        if cutover:
+            mark_cutover(ctx)
+            report["cutover_at"] = cutover_at(ctx).isoformat()
         return report
     finally:
         ctx.conn.close()
@@ -883,4 +945,4 @@ def _v7(ctx: Ctx) -> dict:
             "people_without_identities": orphans}
 
 
-__all__ = ["Options", "PreconditionFailed", "copy", "delta", "verify"]
+__all__ = ["CutoverDone", "Options", "PreconditionFailed", "copy", "delta", "verify"]

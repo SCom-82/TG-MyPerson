@@ -242,3 +242,85 @@ def test_cli_reports_failed_precondition(legacy_db, tmp_path):
     assert mi.main(["copy", "--self", f"work={WORK_SELF}", "--probe-report", "/nonexistent",
                     "--out-dir", str(tmp_path)]) == 0
     assert mi.main(["verify", "--out-dir", str(tmp_path)]) == 0
+
+
+# ---------------------------------------------------------------------------
+# R4-1: start-up delta of the switch, cutover mark, no copy/delta after it
+# ---------------------------------------------------------------------------
+
+async def test_startup_delta_marks_cutover_and_blocks_reruns(legacy_db, monkeypatch):
+    from app.config import settings
+    from app.services.startup_delta import run_startup_delta
+
+    ic.copy(_opts())
+    _exec(legacy_db, f"INSERT INTO tg_messages (message_id, chat_id, from_user_id, text, tg_date, message_type)"
+                     f" VALUES (5, {SHARED}, {BOB}, 'tail of the old container', '2026-01-05', 'text')")
+    monkeypatch.setattr(settings, "storage_mode", "new")
+    monkeypatch.setattr(settings, "run_delta_on_start", True)
+
+    report = await run_startup_delta()
+    assert report["ok"] and report["cutover_at"]
+    assert ("work", SHARED, 5, "tail of the old container", False) in _messages(legacy_db)
+
+    with pytest.raises(ic.CutoverDone, match="refused"):
+        ic.delta(_opts())
+    with pytest.raises(ic.CutoverDone):
+        ic.copy(_opts())
+    assert (await run_startup_delta())["skipped"] == "cutover already marked"  # restart with the flag on
+    assert ic.verify(_opts())["ok"]  # verify is always allowed
+    forced = ic.delta(ic.Options(selves={"work": WORK_SELF}, probe_report=Path("/nonexistent"),
+                                 force_after_cutover=True))
+    assert forced["ok"]
+
+
+async def test_startup_delta_failure_stops_the_start(legacy_db, monkeypatch):
+    from app.config import settings
+    from app.services.startup_delta import StartupDeltaFailed, run_startup_delta
+
+    monkeypatch.setattr(settings, "storage_mode", "new")
+    monkeypatch.setattr(settings, "run_delta_on_start", True)
+    with pytest.raises(StartupDeltaFailed, match="no watermark"):  # copy never ran
+        await run_startup_delta()
+    assert _exec(legacy_db, "SELECT count(*) FROM mig_watermark WHERE tbl = 'cutover'", fetch=True) == [(0,)]
+
+
+async def test_startup_delta_is_off_by_default(legacy_db):
+    from app.services.startup_delta import run_startup_delta
+
+    assert await run_startup_delta() is None
+
+
+def test_cli_refuses_after_cutover(legacy_db, tmp_path):
+    from app.scripts import migrate_isolation as mi
+
+    ic.copy(_opts())
+    _exec(legacy_db, "INSERT INTO mig_watermark (tbl, at) VALUES ('cutover', now())")
+    assert mi.main(["delta", "--self", f"work={WORK_SELF}", "--probe-report", "/nonexistent",
+                    "--out-dir", str(tmp_path)]) == 1
+    assert "refused" in next(tmp_path.glob("migrate_isolation-delta-*.json")).read_text()
+    assert mi.main(["delta", "--self", f"work={WORK_SELF}", "--probe-report", "/nonexistent",
+                    "--force-after-cutover", "--out-dir", str(tmp_path)]) == 0
+
+
+# ---------------------------------------------------------------------------
+# Review 4, optional items
+# ---------------------------------------------------------------------------
+
+def test_channel_post_outgoing_only_with_one_owner(legacy_db):
+    _exec(legacy_db, f"""
+        INSERT INTO tg_messages (message_id, chat_id, from_user_id, text, tg_date, raw_data, message_type) VALUES
+          (20, {SIGNAL}, NULL, 'own post, one owner', '2026-01-06', '{{"out": true}}', 'text'),
+          (21, {SHARED}, NULL, 'post, two owners', '2026-01-06', '{{"out": true}}', 'text')""")
+    report = ic.copy(_opts())
+    msgs = {(m[0], m[2]): m[4] for m in _messages(legacy_db)}
+    assert msgs[("personal-ro", 20)] is True
+    assert msgs[("work", 21)] is False and msgs[("personal-ro", 21)] is False
+    assert report["steps"]["F_users"]["registry_without_source_to_high_account"] == 0
+
+
+def test_delta_refreshes_account_users(legacy_db):
+    ic.copy(_opts())
+    _exec(legacy_db, f"UPDATE tg_users SET username = 'alice_new', updated_at = now() WHERE id = {ALICE}")
+    ic.delta(_opts())
+    names = {r[0] for r in _exec(legacy_db, f"SELECT username FROM users WHERE external_id = {ALICE}", fetch=True)}
+    assert names == {"alice_new"}

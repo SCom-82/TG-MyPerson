@@ -346,7 +346,7 @@ def _copy_options(args: argparse.Namespace):
     return Options(
         split_date=date.fromisoformat(args.split_date), split_id=args.split_id,
         low_account=args.low_account, high_account=args.high_account, max_account=args.max_account,
-        selves=selves, probe_report=args.probe_report,
+        selves=selves, probe_report=args.probe_report, force_after_cutover=args.force_after_cutover,
     )
 
 
@@ -356,6 +356,8 @@ def _isolation(command: str) -> Callable[[argparse.Namespace], dict]:
 
         try:
             return getattr(isolation_copy, command)(_copy_options(args))
+        except isolation_copy.CutoverDone as exc:
+            return {"command": command, "ok": False, "cutover": str(exc)}
         except isolation_copy.PreconditionFailed as exc:
             # ТЗ §13: the attribution rule does not hold — stop and escalate.
             return {"command": command, "ok": False, "precondition_failed": str(exc)}
@@ -393,6 +395,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--low-account", default="work")
     parser.add_argument("--high-account", default="personal-ro")
     parser.add_argument("--max-account", default="max-work")
+    parser.add_argument("--force-after-cutover", action="store_true",
+                        help="copy/delta after the switch to the new tables (overwrites them with legacy rows)")
     args = parser.parse_args(argv)
 
     logging.basicConfig(

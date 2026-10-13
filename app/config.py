@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # §6.1 / D6, D10: the shared API_KEY keeps working while this is true;
     # without X-Session-Alias it means 'work' unless REQUIRE_ACCOUNT=true (→ 400).
     legacy_api_key_enabled: bool = True
+    # Switch to STORAGE_MODE=new (§11.2 step 5): migrate_isolation delta before
+    # sessions connect, then the cutover mark. Remove after the switch.
+    run_delta_on_start: bool = False
     require_account: bool = False
 
     model_config = {

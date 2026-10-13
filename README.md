@@ -225,6 +225,9 @@ automatically in-process. It exists only as a manual escape hatch.
   отчёт в stdout и `/tmp/migrate_isolation-<cmd>-<ts>.json`. Правило атрибуции лички/групп
   (`--split-date/--split-id/--low-account/--high-account`) проверяется до записи; при нарушении —
   стоп (`precondition_failed`), эскалация архитектору. Чаты без владельца — `mig_unassigned`.
+  Переключение: деплой с `STORAGE_MODE=new` и `RUN_DELTA_ON_START=true` — до подключения сессий
+  выполняется `delta` (ошибка → сервис не стартует), затем отметка `cutover`; после неё `copy`/`delta`
+  отказывают (`--force-after-cutover` — только осознанно), `verify` можно всегда.
 - Аккаунт целиком (infra-ops, под владельцем):
   `python -m app.scripts.account_partitions list|grants|dump|restore|drop --account N`
   (`drop` — только выключенный аккаунт и дамп моложе часа, `--confirm <alias>`).

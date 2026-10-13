@@ -24,6 +24,7 @@ from app.max.config import max_settings
 from app.max.maintenance import raw_events_loop
 from app.max.api import MAX_API_ROUTERS, max_api_router
 from app.services.contacts_sync import contacts_sync_loop
+from app.services.startup_delta import run_startup_delta
 from app.services.partition_maintenance import ensure_partitions, partition_loop
 from app.telegram.pool import attach_all_handlers, pool
 
@@ -36,6 +37,10 @@ logging.basicConfig(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log = logging.getLogger(__name__)
+
+    # Switch to the per-account tables: copy the legacy tail first, before any
+    # session can write (RUN_DELTA_ON_START; raises → the service does not start).
+    await run_startup_delta()
 
     # Start all enabled Telegram sessions (supervisor pattern)
     await pool.start_all()
