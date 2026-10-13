@@ -346,7 +346,7 @@ PyMax ходит в недокументированный протокол MAX;
    на которые опирается адаптер: цикл `BaseClient.start()` (мы его не используем — supervisor вызывает
    `connect()`), порядок диспетчера и `App.on_event` (frame hook), `QrAuthFlow` (пароль), передачу
    `interactive`/`telemetry`/`relogin` в `ClientConfig`, `fetch_history`/`fetch_chats`.
-2. Поднять пин в `pyproject.toml`.
+2. Поднять пин в `pyproject.toml` и обновить lock (раздел «Зависимости»).
 3. Прогнать `pytest`: нормализация на фикстурах (`tests/fixtures/max/`) ловит смену моделей,
    `test_s13_pymax_config_guards` — защитные настройки, `test_frame_hook_sees_frames_pymax_cannot_parse` —
    журнал сырых кадров, `test_s4_*` — лимит пароля.
@@ -356,6 +356,28 @@ PyMax ходит в недокументированный протокол MAX;
 6. Если пока PyMax был сломан, в базе осталась дыра — `POST /sync/backfill {"chat_id":…,"direction":"forward"}`
    по затронутым чатам (добор пропусков сделает это сам при следующем подключении). Кадры с
    `normalized=false` за этот период лежат в `max_raw_events` (30 дней).
+
+### Зависимости
+
+Образ собирается строго по `requirements.lock`: точные версии с хешами, `pip install
+--require-hashes`, сам проект — `--no-deps`. Во время сборки ничего не резолвится, поэтому
+redeploy без изменения кода не может подтянуть новые версии (так в прод попал FastAPI 0.141.1,
+инцидент 07–08.10). Базовый образ запинен до патч-версии Python.
+
+- `pyproject.toml` — допустимые диапазоны (и пояснения к верхним границам).
+- `uv.lock` — резолв, источник правды для lock.
+- `requirements.lock` — экспорт из `uv.lock`, его ставит `Dockerfile`.
+
+Обновление — только отдельным PR:
+
+```bash
+uv lock --upgrade-package <пакет>       # или правка pyproject.toml + uv lock
+uv export --frozen --no-dev --no-emit-project --format requirements-txt -o requirements.lock
+pytest                                   # полный прогон; на обеих версиях FastAPI, если трогали её
+```
+
+`tests/test_dependency_lock.py` падает, если `pyproject.toml`, `uv.lock` и `requirements.lock`
+разошлись или `Dockerfile` ставит что-то мимо lock.
 
 ### FastAPI
 
