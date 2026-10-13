@@ -47,8 +47,14 @@ _SKIP_PATHS = {
     "/redoc",
 }
 
-# Admin path prefix — authenticated via X-Admin-Key, not X-API-Key + alias
-_ADMIN_PREFIX = "/api/v1/accounts"
+# Admin path prefixes — authenticated via X-Admin-Key, not X-API-Key + alias.
+# /api/v1/admin: service operations of infra-ops (migrate_isolation probe), not tools.
+ADMIN_PREFIXES = ("/api/v1/accounts", "/api/v1/admin")
+_ADMIN_PREFIX = ADMIN_PREFIXES[0]  # kept for importers of the old name
+
+
+def is_admin_path(path: str) -> bool:
+    return any(path == p or path.startswith(p + "/") for p in ADMIN_PREFIXES)
 
 # Paths that must be excluded from audit_log and tool_authz warnings.
 # Health/readiness probes are infra-level — not user-facing tools.
@@ -94,7 +100,7 @@ async def admin_auth_middleware(request: Request, call_next):
     """
     from app.config import settings as cfg
 
-    if not request.url.path.startswith(_ADMIN_PREFIX):
+    if not is_admin_path(request.url.path):
         return await call_next(request)
 
     # Mark as admin path so downstream middleware skips alias/tool checks

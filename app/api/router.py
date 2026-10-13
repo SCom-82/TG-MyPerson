@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.accounts import router as accounts_router
+from app.api.admin_isolation import router as admin_isolation_router
 from app.api.auth import router as auth_router
 from app.api.chats import router as chats_router
 from app.api.contacts import router as contacts_router
@@ -17,6 +18,7 @@ from app.api.sync import router as sync_router
 API_ROUTERS = (
     # Admin endpoints (X-Admin-Key auth, separate from user API)
     accounts_router,
+    admin_isolation_router,
     # User endpoints (X-API-Key + X-Session-Alias)
     auth_router,
     chats_router,

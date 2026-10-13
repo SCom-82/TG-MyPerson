@@ -2,35 +2,43 @@
 
 Run by infra-ops inside the container, as the table owner:
 
-    python -m app.scripts.migrate_isolation probe [--out-dir /tmp]
+    python -m app.scripts.migrate_isolation probe [--out-dir /tmp] [--url http://127.0.0.1:8000]
+    python -m app.scripts.migrate_isolation probe --service-stopped   # only with the service down
 
 Commands are idempotent; each prints a JSON report to stdout and writes it to
 <out-dir>/migrate_isolation-<cmd>-<ts>.json.
 
 probe (§8.1) — which chats each enabled Telegram account is a member of.
-  For every enabled TG account with an active session: get_me() and
-  iter_dialogs(), nothing else (the client is wrapped so any other Telegram
-  call raises). Result goes to mig_membership — created by this command, not
-  by a migration, dropped in PR-6. Per account the rows are replaced in one
-  transaction after the dialog walk succeeded, so a rerun reflects current
-  membership and a failed walk leaves the previous rows intact. No other
-  table is written (accounts.tg_user_id included: get_me goes to the report,
-  external_user_id is filled by `copy`, step A).
+  Runs INSIDE the service process on the pool's own clients
+  (POST /api/v1/admin/isolation/probe, X-Admin-Key): a second MTProto
+  connection on the same auth key while the service holds it risks
+  AUTH_KEY_DUPLICATED and the loss of the session (review 13.10, P0-1). The
+  CLI only calls that endpoint. --service-stopped opens its own connections
+  and is refused while a uvicorn process of the service runs.
 
-  The probe opens a second connection on the account's auth key while the
-  service is running (same IP, separate MTProto session). It does not
-  subscribe to updates (receive_updates=False) and disconnects at the end.
+  Per account: get_me() and iter_dialogs(), nothing else — the client is
+  wrapped, any other Telegram call raises, and the shared client cannot be
+  connected or disconnected through the wrapper. Result goes to
+  mig_membership — created by this command, not by a migration, dropped in
+  PR-6. Per account the rows are replaced in one transaction after the dialog
+  walk succeeded, so a rerun reflects current membership and a failed walk
+  leaves the previous rows intact. No other table is written
+  (accounts.external_user_id is filled by `copy`, step A).
 """
 
 import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
+import urllib.error
+import urllib.request
 from collections import Counter
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from sqlalchemy import select, text
 
@@ -55,6 +63,8 @@ CREATE TABLE IF NOT EXISTS mig_membership (
 
 # Report lists are capped; counts are always exact.
 REPORT_LIST_LIMIT = 200
+DEFAULT_URL = "http://127.0.0.1:8000"
+PROBE_PATH = "/api/v1/admin/isolation/probe"
 
 
 # ---------------------------------------------------------------------------
@@ -62,28 +72,33 @@ REPORT_LIST_LIMIT = 200
 # ---------------------------------------------------------------------------
 
 class ReadOnlyClient:
-    """Exposes only the Telegram calls probe is allowed to make."""
+    """Exposes only the Telegram calls probe is allowed to make.
 
-    _ALLOWED = frozenset(
-        {"connect", "disconnect", "is_user_authorized", "get_me", "iter_dialogs"}
-    )
+    No connect/disconnect: the wrapped client is the service's shared one,
+    and disconnecting it would take the account offline.
+    """
+
+    _ALLOWED = frozenset({"is_user_authorized", "get_me", "iter_dialogs"})
 
     def __init__(self, client: Any) -> None:
         object.__setattr__(self, "_client", client)
 
     def __getattr__(self, name: str) -> Any:
         if name not in self._ALLOWED:
-            raise PermissionError(f"migrate_isolation probe: Telegram call '{name}' is not allowed")
+            raise PermissionError(f"migrate_isolation: Telegram call '{name}' is not allowed")
         return getattr(self._client, name)
 
     def __setattr__(self, name: str, value: Any) -> None:
-        raise PermissionError("migrate_isolation probe: client is read-only")
+        raise PermissionError("migrate_isolation: client is read-only")
 
     async def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        raise PermissionError("migrate_isolation probe: raw Telegram requests are not allowed")
+        raise PermissionError("migrate_isolation: raw Telegram requests are not allowed")
 
 
-ClientFactory = Callable[[Account, str], Any]
+class OwnedReadOnlyClient(ReadOnlyClient):
+    """--service-stopped only: our own connection, so we connect and disconnect it."""
+
+    _ALLOWED = ReadOnlyClient._ALLOWED | {"connect", "disconnect"}
 
 
 def telethon_client(account: Account, session_string: str) -> Any:
@@ -134,19 +149,15 @@ def membership_row(account_id: int, entity: Any) -> dict:
     }
 
 
-async def _probe_account(account: Account, session_string: str, factory: ClientFactory) -> dict:
-    client = ReadOnlyClient(factory(account, session_string))
-    await client.connect()
-    try:
-        if not await client.is_user_authorized():
-            return {"status": "not_authorized"}
-        me = await client.get_me()
-        rows: dict[int, dict] = {}
-        async for dialog in client.iter_dialogs():
-            row = membership_row(account.id, dialog.entity)
-            rows[row["external_chat_id"]] = row
-    finally:
-        await client.disconnect()
+async def _probe_account(account: Account, client: ReadOnlyClient) -> dict:
+    """Walk the dialogs of one account on an already connected client."""
+    if not await client.is_user_authorized():
+        return {"status": "not_authorized"}
+    me = await client.get_me()
+    rows: dict[int, dict] = {}
+    async for dialog in client.iter_dialogs():
+        row = membership_row(account.id, dialog.entity)
+        rows[row["external_chat_id"]] = row
 
     async with async_session() as db:
         await db.execute(text(MEMBERSHIP_DDL))
@@ -212,7 +223,12 @@ async def _membership_summary() -> dict:
     }
 
 
-async def probe(factory: ClientFactory = telethon_client) -> dict:
+# (account, session string) → a read-only client to probe with, or None if the
+# account has no usable session. Owns the connection lifecycle of what it returns.
+ClientSource = Callable[[Account, str | None], Awaitable[Any]]
+
+
+async def probe(source: ClientSource) -> dict:
     async with async_session() as db:
         accounts = (await db.execute(
             select(Account, AccountSession.session_plaintext)
@@ -226,14 +242,15 @@ async def probe(factory: ClientFactory = telethon_client) -> dict:
 
     report: dict[str, Any] = {"command": "probe", "accounts": {}}
     for account, session_string in accounts:
-        if not session_string:
-            result: dict = {"status": "no_session"}
-        else:
-            try:
-                result = await _probe_account(account, session_string, factory)
-            except Exception as exc:  # one account must not stop the others
-                log.exception("probe: account %s failed", account.alias)
-                result = {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+        try:
+            client = await source(account, session_string)
+            if client is None:
+                result: dict = {"status": "no_session"}
+            else:
+                result = await _probe_account(account, client)
+        except Exception as exc:  # one account must not stop the others
+            log.exception("probe: account %s failed", account.alias)
+            result = {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
         report["accounts"][account.alias] = {"account_id": account.id, **result}
 
     report.update(await _membership_summary())
@@ -241,11 +258,81 @@ async def probe(factory: ClientFactory = telethon_client) -> dict:
     return report
 
 
+async def probe_in_service() -> dict:
+    """On the running service's pool (admin endpoint): no new connections."""
+    from app.telegram.pool import pool
+
+    async def source(account: Account, _session_string: str | None):
+        session = await pool.get(account.alias)
+        if session.client is None:
+            return None
+        return ReadOnlyClient(session.client)
+
+    return await probe(source)
+
+
+async def probe_service_stopped() -> dict:
+    """Own connections — only while the service is down."""
+    opened: list[OwnedReadOnlyClient] = []
+
+    async def source(account: Account, session_string: str | None):
+        if not session_string:
+            return None
+        client = OwnedReadOnlyClient(telethon_client(account, session_string))
+        await client.connect()
+        opened.append(client)
+        return client
+
+    try:
+        return await probe(source)
+    finally:
+        for client in opened:
+            await client.disconnect()
+
+
+def service_running(proc: Path = Path("/proc")) -> bool:
+    """A uvicorn process of the service in this container."""
+    for cmdline in proc.glob("[0-9]*/cmdline"):
+        try:
+            argv = cmdline.read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if any(a.endswith(b"uvicorn") for a in argv) and b"app.main:app" in argv:
+            return True
+    return False
+
+
+def call_service(url: str, path: str, payload: dict | None = None, timeout: float = 900) -> dict:
+    """POST to an admin endpoint of the running service (X-Admin-Key from the env)."""
+    key = settings.admin_api_key
+    if not key:
+        raise SystemExit("TG_ADMIN_API_KEY is not set")
+    req = urllib.request.Request(
+        url.rstrip("/") + path,
+        data=json.dumps(payload or {}).encode(),
+        headers={"X-Admin-Key": key, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        raise SystemExit(f"{path}: HTTP {exc.code}: {exc.read().decode(errors='replace')}")
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
-COMMANDS: dict[str, Callable[[], Awaitable[dict]]] = {"probe": probe}
+def run_probe(args: argparse.Namespace) -> dict:
+    if args.service_stopped:
+        if service_running():
+            raise SystemExit("--service-stopped: the service (uvicorn app.main:app) is running; refusing")
+        return asyncio.run(probe_service_stopped())
+    return call_service(args.url, PROBE_PATH)
+
+
+COMMANDS: dict[str, Callable[[argparse.Namespace], dict]] = {"probe": run_probe}
 
 
 def write_report(report: dict, cmd: str, out_dir: Path) -> Path:
@@ -259,6 +346,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.scripts.migrate_isolation")
     parser.add_argument("command", choices=sorted(COMMANDS))
     parser.add_argument("--out-dir", type=Path, default=Path("/tmp"))
+    parser.add_argument("--url", default=os.environ.get("TG_MYPERSON_URL_LOCAL", DEFAULT_URL))
+    parser.add_argument("--service-stopped", action="store_true",
+                        help="own Telegram connections; only while the service is down")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -266,7 +356,7 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
         stream=sys.stderr,
     )
-    report = asyncio.run(COMMANDS[args.command]())
+    report = COMMANDS[args.command](args)
     path = write_report(report, args.command, args.out_dir)
     print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
     log.info("report: %s", path)

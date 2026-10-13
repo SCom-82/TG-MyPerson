@@ -1,7 +1,9 @@
 """migrate_isolation probe (ТЗ 2026-10-13 §8.1, PR-0).
 
 AC: on the test DB with a fake client it fills mig_membership; it writes
-nothing but mig_membership; Telegram — only get_me / iter_dialogs.
+nothing but mig_membership; Telegram — only get_me / iter_dialogs. Review
+13.10 (P0-1): in the service, on the pool's clients, never connect/disconnect
+them; own connections only with --service-stopped.
 
 Live DB. probe() commits through app.database.async_session, so the accounts
 created here are committed and removed by the fixture; assertions look only at
@@ -138,10 +140,12 @@ async def accounts():
 
 
 def _factory(clients: dict):
-    """client per session string; probe accounts outside this test get a no-op client."""
-    def make(account, session_string):
-        return clients.get(session_string) or FakeClient(1, [], authorized=False)
-    return make
+    """Source like probe_in_service: an existing client, wrapped read-only."""
+    async def source(account, session_string):
+        if not session_string:
+            return None
+        return mi.ReadOnlyClient(clients.get(session_string) or FakeClient(1, [], authorized=False))
+    return source
 
 
 async def _rows(account_id):
@@ -191,14 +195,14 @@ async def test_probe_uses_only_read_calls(accounts):
     await mi.probe(_factory({"S1": work, "S2": ro}))
 
     for client in (work, ro):
-        assert set(client.calls) <= {"connect", "is_user_authorized", "get_me", "iter_dialogs", "disconnect"}
-        assert client.calls[-1] == "disconnect"
+        assert set(client.calls) <= {"is_user_authorized", "get_me", "iter_dialogs"}
 
 
 async def test_read_only_client_blocks_everything_else():
     client = mi.ReadOnlyClient(FakeClient(1, []))
-    with pytest.raises(PermissionError):
-        client.send_message
+    for name in ("send_message", "connect", "disconnect"):
+        with pytest.raises(PermissionError):
+            getattr(client, name)
     with pytest.raises(PermissionError):
         await client(object())
     with pytest.raises(PermissionError):
@@ -250,7 +254,6 @@ async def test_failed_account_keeps_previous_rows_and_does_not_stop_others(accou
 
     assert report["accounts"]["probe-work"]["status"] == "error"
     assert "network down" in report["accounts"]["probe-work"]["error"]
-    assert failing.calls[-1] == "disconnect"
     assert await _rows(accounts["probe-work"]) == before
     assert len(await _rows(accounts["probe-ro"])) == 1
     assert report["ok"] is False
@@ -266,20 +269,95 @@ async def test_not_authorized_account(accounts):
     assert await _rows(accounts["probe-work"]) == []
 
 
-def test_cli_writes_report(tmp_path, monkeypatch):
-    async def fake_probe():
-        return {"command": "probe", "ok": True, "accounts": {}}
+async def test_probe_in_service_uses_pool_clients(accounts, monkeypatch):
+    work, ro = FakeClient(7, _dialogs_work()), FakeClient(8, _dialogs_ro())
+    by_alias = {"probe-work": work, "probe-ro": ro}
 
-    monkeypatch.setitem(mi.COMMANDS, "probe", fake_probe)
+    async def get(alias):
+        return SimpleNamespace(client=by_alias.get(alias))
 
-    assert mi.main(["probe", "--out-dir", str(tmp_path)]) == 0
+    monkeypatch.setattr("app.telegram.pool.pool", SimpleNamespace(get=get))
+    report = await mi.probe_in_service()
+
+    assert report["accounts"]["probe-work"]["dialogs"] == 4
+    assert report["accounts"]["probe-nosession"]["status"] == "no_session"
+    for client in (work, ro):
+        assert "connect" not in client.calls and "disconnect" not in client.calls
+
+
+async def test_service_stopped_owns_its_connections(accounts, monkeypatch):
+    made = {}
+
+    def factory(account, session_string):
+        made[session_string] = FakeClient(account.id, _dialogs_ro())
+        return made[session_string]
+
+    monkeypatch.setattr(mi, "telethon_client", factory)
+    report = await mi.probe_service_stopped()
+
+    assert report["accounts"]["probe-ro"]["status"] == "ok"
+    for client in (made["S1"], made["S2"]):
+        assert client.calls[0] == "connect" and client.calls[-1] == "disconnect"
+
+
+def test_service_running_detection(tmp_path):
+    (tmp_path / "17").mkdir()
+    (tmp_path / "17" / "cmdline").write_bytes(b"/usr/local/bin/uvicorn\0app.main:app\0--host\0")
+    (tmp_path / "18").mkdir()
+    (tmp_path / "18" / "cmdline").write_bytes(b"python\0-m\0app.scripts.migrate_isolation\0")
+    assert mi.service_running(tmp_path)
+    (tmp_path / "17" / "cmdline").write_bytes(b"sleep\0")
+    assert not mi.service_running(tmp_path)
+
+
+def test_cli_service_stopped_refused_while_service_runs(monkeypatch, tmp_path):
+    monkeypatch.setattr(mi, "service_running", lambda: True)
+    with pytest.raises(SystemExit, match="refusing"):
+        mi.main(["probe", "--service-stopped", "--out-dir", str(tmp_path)])
+
+
+def test_cli_calls_the_service_endpoint(tmp_path, monkeypatch):
+    seen = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"command": "probe", "ok": True, "accounts": {}}).encode()
+
+    def urlopen(req, timeout):
+        seen["url"], seen["key"], seen["method"] = req.full_url, req.get_header("X-admin-key"), req.method
+        return _Resp()
+
+    monkeypatch.setattr(mi.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(mi.settings, "admin_api_key", "adm")
+
+    assert mi.main(["probe", "--out-dir", str(tmp_path), "--url", "http://svc:8000"]) == 0
+    assert seen == {"url": "http://svc:8000/api/v1/admin/isolation/probe", "key": "adm", "method": "POST"}
     [report_file] = tmp_path.glob("migrate_isolation-probe-*.json")
     assert json.loads(report_file.read_text())["command"] == "probe"
 
 
 def test_cli_exit_code_on_failure(tmp_path, monkeypatch):
-    async def fake_probe():
-        return {"command": "probe", "ok": False}
-
-    monkeypatch.setitem(mi.COMMANDS, "probe", fake_probe)
+    monkeypatch.setitem(mi.COMMANDS, "probe", lambda args: {"command": "probe", "ok": False})
     assert mi.main(["probe", "--out-dir", str(tmp_path)]) == 1
+
+
+async def test_probe_endpoint_requires_admin_key(test_client, monkeypatch):
+    import app.config
+
+    async def fake():
+        return {"command": "probe", "ok": True}
+
+    monkeypatch.setattr(mi, "probe_in_service", fake)
+    # other suites reload the settings with an empty admin key
+    monkeypatch.setattr(app.config.settings, "admin_api_key", "test-admin-key")
+    assert (await test_client.post("/api/v1/admin/isolation/probe")).status_code == 401
+    assert (await test_client.post("/api/v1/admin/isolation/probe",
+                                   headers={"x-api-key": "test-api-key"})).status_code == 401
+    resp = await test_client.post("/api/v1/admin/isolation/probe", headers={"x-admin-key": "test-admin-key"})
+    assert resp.status_code == 200 and resp.json()["command"] == "probe"

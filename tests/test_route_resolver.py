@@ -26,6 +26,7 @@ from starlette.requests import Request
 
 import app.api
 from app.api.router import API_ROUTERS
+from app.authz.middleware import is_admin_path
 from app.authz.route_table import RouteTable
 from app.authz.tool_catalog import ALL_TOOLS
 
@@ -141,7 +142,7 @@ def test_every_served_api_route_resolves_to_its_name(fastapi_app):
 def test_every_route_name_is_a_cataloged_tool(fastapi_app):
     """A route outside the catalog passes authz with a warning — catch it in CI instead."""
     for entry in fastapi_app.state.route_table.entries:
-        if entry.path.startswith(_ADMIN_PREFIX):
+        if is_admin_path(entry.path):
             continue  # admin API: X-Admin-Key, no tool authz
         if entry.name == "max_unsupported":
             continue  # internal MAX catch-all; the real tool comes from forced_tool_name

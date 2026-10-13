@@ -10,6 +10,7 @@ from starlette.responses import JSONResponse
 from app.api.router import API_ROUTERS, api_router
 from app.authz.middleware import (
     MAX_INTERNAL_PREFIX,
+    is_admin_path,
     admin_auth_middleware,
     audit_log_middleware,
     platform_dispatch_middleware,
@@ -137,7 +138,7 @@ async def auth_and_https_middleware(request, call_next):
 
     # API key check — skip for public paths and admin paths (admin uses X-Admin-Key)
     if settings.api_key and request.url.path not in PUBLIC_PATHS:
-        if not request.url.path.startswith("/api/v1/accounts"):
+        if not is_admin_path(request.url.path):
             api_key = request.headers.get("x-api-key") or request.query_params.get("api_key")
             if not api_key or not secrets.compare_digest(api_key.encode(), settings.api_key.encode()):
                 return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
