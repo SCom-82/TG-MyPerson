@@ -25,6 +25,9 @@ the rest of the old schema stay untouched until PR-6.
 DDL is written by hand; do not autogenerate for these tables.
 """
 
+import os
+
+import sqlalchemy as sa
 from alembic import op
 
 revision = "010"
@@ -415,7 +418,30 @@ $func$
     op.execute(GRANTS_SQL)
 
 
+# Tables whose rows make a downgrade destructive (review 13.10, P1-2).
+GUARDED_TABLES = ("messages", "chats", "users", "people", "api_keys")
+
+
+def _refuse_destructive_downgrade() -> None:
+    """After the switch the new tables hold the only copy of new history: the
+    rollback is STORAGE_MODE=legacy (runbook §11.3), not a downgrade."""
+    if os.environ.get("ALLOW_DESTRUCTIVE_DOWNGRADE") == "1":
+        return
+    bind = op.get_bind()
+    filled = [
+        t for t in GUARDED_TABLES
+        if bind.execute(sa.text(f"SELECT EXISTS (SELECT 1 FROM {t})")).scalar()
+    ]
+    if filled:
+        raise RuntimeError(
+            f"downgrade 010 refused: {', '.join(filled)} contain rows and would be dropped. "
+            "Roll back with STORAGE_MODE=legacy (ТЗ runbook §11.3). To drop the data anyway "
+            "set ALLOW_DESTRUCTIVE_DOWNGRADE=1."
+        )
+
+
 def downgrade() -> None:
+    _refuse_destructive_downgrade()
     for fn in AUDIT_FUNCTIONS:
         op.execute(f"ALTER FUNCTION {fn} SECURITY INVOKER RESET search_path")
         op.execute(f"GRANT EXECUTE ON FUNCTION {fn} TO PUBLIC")

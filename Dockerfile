@@ -1,7 +1,19 @@
 # Patch-level tag: python:3.12-slim moves between builds.
 FROM python:3.12.15-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl postgresql-client && rm -rf /var/lib/apt/lists/*
+# pg_dump/pg_restore for app.scripts.account_partitions: client 16 from PGDG,
+# the prod server is PostgreSQL 16 (Debian's client 17 writes dumps that
+# pg_restore cannot apply to 16: "transaction_timeout"). Key checked by sha256.
+ARG PG_CLIENT_VERSION=16.15-1.pgdg13+2
+ARG PGDG_KEY_SHA256=0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+ && install -d /usr/share/postgresql-common/pgdg \
+ && curl -fsSo /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+ && echo "${PGDG_KEY_SHA256}  /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc" | sha256sum -c - \
+ && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main" \
+      > /etc/apt/sources.list.d/pgdg.list \
+ && apt-get update && apt-get install -y --no-install-recommends "postgresql-client-16=${PG_CLIENT_VERSION}" \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

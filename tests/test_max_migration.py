@@ -66,7 +66,8 @@ def _connect():
 
 
 def _alembic(*args: str) -> None:
-    env = {**os.environ, "DATABASE_URL": TEST_DB_URL}
+    # Passing 010 on the way down: its guard refuses when the new tables hold rows.
+    env = {**os.environ, "DATABASE_URL": TEST_DB_URL, "ALLOW_DESTRUCTIVE_DOWNGRADE": "1"}
     proc = subprocess.run(
         [sys.executable, "-m", "alembic", *args],
         cwd=REPO_ROOT,

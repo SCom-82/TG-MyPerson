@@ -22,7 +22,8 @@ drop: only a disabled account with a dump younger than 1 hour in --out-dir.
   (is_enabled=false, audit_logs refer to it). People/identities stay.
 
 Every action belongs in _system/infra/changelog.md.
-pg_dump/pg_restore are taken from PATH (override: PG_DUMP / PG_RESTORE).
+pg_dump/pg_restore are taken from PATH (override: PG_DUMP / PG_RESTORE); their
+major version must equal the server's, else dump/restore are refused.
 """
 
 import argparse
@@ -122,6 +123,37 @@ def _partition(table: str, account_id: int) -> str:
     return f"{table}_a{int(account_id)}"
 
 
+def _tool(name: str) -> str:
+    """pg_dump / pg_restore from PATH, or PG_DUMP / PG_RESTORE."""
+    return os.environ.get(name.upper(), name)
+
+
+def tool_major(tool: str) -> int:
+    """Major version of pg_dump / pg_restore ('pg_restore (PostgreSQL) 16.15 …' → 16)."""
+    out = subprocess.run([_tool(tool), "--version"], capture_output=True, text=True, check=True).stdout
+    match = re.search(r"\(PostgreSQL\)\s+(\d+)", out)
+    if not match:
+        raise Refused(f"cannot parse {tool} --version: {out.strip()!r}")
+    return int(match.group(1))
+
+
+def server_major(conn) -> int:
+    with conn.cursor() as cur:
+        cur.execute("SHOW server_version_num")
+        return int(cur.fetchone()[0]) // 10000
+
+
+def check_client_version(conn, tool: str) -> None:
+    """The client major must equal the server's: a newer pg_restore writes
+    settings an older server rejects (17 → 16: transaction_timeout)."""
+    client, server = tool_major(tool), server_major(conn)
+    if client != server:
+        raise Refused(
+            f"{tool} is PostgreSQL {client}, the server is {server}: "
+            f"use postgresql-client-{server} (Dockerfile)"
+        )
+
+
 def _run(cmd: list[str]) -> None:
     print("+ " + " ".join(cmd), flush=True)
     proc = subprocess.run(cmd, env={**os.environ, **libpq_env()}, capture_output=True, text=True)
@@ -154,10 +186,11 @@ def cmd_dump(conn, account_id: int, out_dir: Path) -> Path:
     missing = [t for t, n in counts.items() if n is None]
     if missing:
         raise Refused(f"account {account_id} has no partitions for {missing}")
+    check_client_version(conn, "pg_dump")
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = out_dir / f"acc{account_id}_{ts}.dump"
-    cmd = [os.environ.get("PG_DUMP", "pg_dump"), "-Fc", "--data-only", "-f", str(path)]
+    cmd = [_tool("pg_dump"), "-Fc", "--data-only", "-f", str(path)]
     for t in DATA_TABLES:
         cmd += ["-t", f"public.{_partition(t, account_id)}"]
     _run(cmd)
@@ -170,6 +203,7 @@ def cmd_restore(conn, account_id: int, dump: Path) -> dict:
     manifest = json.loads(Path(f"{dump}.json").read_text())
     if manifest["account_id"] != account_id:
         raise Refused(f"dump is of account {manifest['account_id']}, not {account_id}")
+    check_client_version(conn, "pg_restore")
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM create_account_partitions(%s)", (account_id,))
     conn.commit()
@@ -179,7 +213,7 @@ def cmd_restore(conn, account_id: int, dump: Path) -> dict:
 
     for t in DATA_TABLES:  # parent before child: FKs are checked row by row
         _run([
-            os.environ.get("PG_RESTORE", "pg_restore"), "--data-only", "--exit-on-error",
+            _tool("pg_restore"), "--data-only", "--exit-on-error",
             "-d", libpq_env()["PGDATABASE"], "-t", _partition(t, account_id), str(dump),
         ])
 

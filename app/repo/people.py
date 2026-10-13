@@ -58,6 +58,11 @@ async def upsert_identity(db: AsyncSession, platform: str, row: UserRow) -> int:
             identity_id = await _update_identity(db, platform, row.external_id, values)
 
     if phone:
+        # A phone that appears later also fills the person's primary phone.
+        await db.execute(text(
+            "UPDATE people SET primary_phone = :phone WHERE primary_phone IS NULL"
+            " AND id = (SELECT person_id FROM identities WHERE id = :i)"
+        ), {"phone": phone, "i": identity_id})
         await _auto_merge(db, identity_id)
     return identity_id
 

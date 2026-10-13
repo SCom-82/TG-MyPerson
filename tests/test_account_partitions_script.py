@@ -113,3 +113,29 @@ def test_grants_command(app_role):
         conn.close()
     [(ok,)] = sql("SELECT has_table_privilege('tg_myperson_app', 'messages', 'INSERT')", fetch=True)
     assert ok
+
+
+def _fake_tool(tmp_path, name: str, version: str) -> str:
+    path = tmp_path / name
+    path.write_text(f"#!/bin/sh\necho '{name} (PostgreSQL) {version}'\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+async def test_client_major_must_match_server(account, tmp_path, monkeypatch):
+    await _fill(account)
+    conn = ap.connect()
+    try:
+        server = ap.server_major(conn)
+        dump = ap.cmd_dump(conn, account, tmp_path)  # matching client from PATH
+
+        monkeypatch.setenv("PG_RESTORE", _fake_tool(tmp_path, "pg_restore", f"{server + 1}.0"))
+        with pytest.raises(ap.Refused, match=f"pg_restore is PostgreSQL {server + 1}, the server is {server}"):
+            ap.cmd_restore(conn, account, dump)
+        conn.rollback()
+
+        monkeypatch.setenv("PG_DUMP", _fake_tool(tmp_path, "pg_dump", f"{server + 1}.2 (Debian)"))
+        with pytest.raises(ap.Refused, match="postgresql-client-"):
+            ap.cmd_dump(conn, account, tmp_path)
+    finally:
+        conn.close()

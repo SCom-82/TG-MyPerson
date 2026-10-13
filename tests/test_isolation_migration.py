@@ -38,14 +38,19 @@ LEGACY_FINGERPRINTS["accounts"] = (
 )
 
 
-def _alembic(url: str, *args: str) -> None:
+def _alembic(url: str, *args: str, destructive: bool = True, expect_ok: bool = True) -> str:
     env = {**os.environ, "DATABASE_URL": url}
     env.pop("MIGRATIONS_DATABASE_URL", None)
+    env.pop("ALLOW_DESTRUCTIVE_DOWNGRADE", None)
+    if destructive:
+        env["ALLOW_DESTRUCTIVE_DOWNGRADE"] = "1"
     proc = subprocess.run(
         [sys.executable, "-m", "alembic", *args], cwd=REPO_ROOT, env=env,
         capture_output=True, text=True, timeout=300,
     )
-    assert proc.returncode == 0, f"alembic {' '.join(args)}:\n{proc.stdout}\n{proc.stderr}"
+    if expect_ok:
+        assert proc.returncode == 0, f"alembic {' '.join(args)}:\n{proc.stdout}\n{proc.stderr}"
+    return proc.stdout + proc.stderr
 
 
 def _q(dsn: str, statement: str, params=None):
@@ -127,3 +132,26 @@ def test_upgrade_downgrade_filled_db():
         _alembic(TEST_DB_URL, "upgrade", "head")
     _assert_head(dsn)
     assert {t: _q(dsn, q)[0] for t, q in LEGACY_FINGERPRINTS.items()} == before
+
+
+def test_downgrade_refuses_when_new_tables_have_rows(clean_db):
+    dsn = _dsn(clean_db)
+    _alembic(clean_db, "upgrade", "003")
+    _q(dsn, "INSERT INTO accounts (alias, phone, mode) VALUES ('work', '+7', 'rw')")
+    _alembic(clean_db, "upgrade", "head")
+    _q(dsn, "INSERT INTO people (display_name) VALUES ('keep me')")
+
+    out = _alembic(clean_db, "downgrade", "009", destructive=False, expect_ok=False)
+    assert "downgrade 010 refused: people" in out and "STORAGE_MODE=legacy" in out
+    _assert_head(dsn)  # nothing was dropped
+
+    _alembic(clean_db, "downgrade", "009", destructive=True)
+    _assert_009(dsn)
+
+
+def test_downgrade_of_empty_new_tables_needs_no_flag(clean_db):
+    _alembic(clean_db, "upgrade", "003")
+    _q(_dsn(clean_db), "INSERT INTO accounts (alias, phone, mode) VALUES ('work', '+7', 'rw')")
+    _alembic(clean_db, "upgrade", "head")
+    _alembic(clean_db, "downgrade", "009", destructive=False)
+    _assert_009(_dsn(clean_db))
