@@ -4,6 +4,8 @@ Run by infra-ops inside the container, as the table owner:
 
     python -m app.scripts.migrate_isolation probe [--out-dir /tmp] [--url http://127.0.0.1:8000]
     python -m app.scripts.migrate_isolation probe --service-stopped   # only with the service down
+    python -m app.scripts.migrate_isolation copy|delta|verify [--self work=…] [split options]
+      (app/scripts/isolation_copy.py; exit 1 on a failed check or a failed precondition)
 
 Commands are idempotent; each prints a JSON report to stdout and writes it to
 <out-dir>/migrate_isolation-<cmd>-<ts>.json.
@@ -332,7 +334,40 @@ def run_probe(args: argparse.Namespace) -> dict:
     return call_service(args.url, PROBE_PATH)
 
 
-COMMANDS: dict[str, Callable[[argparse.Namespace], dict]] = {"probe": run_probe}
+def _copy_options(args: argparse.Namespace):
+    from datetime import date
+
+    from app.scripts.isolation_copy import Options
+
+    selves = {}
+    for item in args.self or []:
+        alias, _, uid = item.partition("=")
+        selves[alias] = int(uid)
+    return Options(
+        split_date=date.fromisoformat(args.split_date), split_id=args.split_id,
+        low_account=args.low_account, high_account=args.high_account, max_account=args.max_account,
+        selves=selves, probe_report=args.probe_report,
+    )
+
+
+def _isolation(command: str) -> Callable[[argparse.Namespace], dict]:
+    def run(args: argparse.Namespace) -> dict:
+        from app.scripts import isolation_copy
+
+        try:
+            return getattr(isolation_copy, command)(_copy_options(args))
+        except isolation_copy.PreconditionFailed as exc:
+            # ТЗ §13: the attribution rule does not hold — stop and escalate.
+            return {"command": command, "ok": False, "precondition_failed": str(exc)}
+    return run
+
+
+COMMANDS: dict[str, Callable[[argparse.Namespace], dict]] = {
+    "probe": run_probe,
+    "copy": _isolation("copy"),
+    "delta": _isolation("delta"),
+    "verify": _isolation("verify"),
+}
 
 
 def write_report(report: dict, cmd: str, out_dir: Path) -> Path:
@@ -348,7 +383,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-dir", type=Path, default=Path("/tmp"))
     parser.add_argument("--url", default=os.environ.get("TG_MYPERSON_URL_LOCAL", DEFAULT_URL))
     parser.add_argument("--service-stopped", action="store_true",
-                        help="own Telegram connections; only while the service is down")
+                        help="probe: own Telegram connections; only while the service is down")
+    # copy / delta / verify (§8.2–8.4)
+    parser.add_argument("--self", action="append", metavar="ALIAS=USER_ID",
+                        help="an account's own user id when accounts has none (repeatable)")
+    parser.add_argument("--probe-report", type=Path, help="probe report with get_me ids (default: newest in /tmp)")
+    parser.add_argument("--split-date", default="2025-11-01")
+    parser.add_argument("--split-id", type=int, default=20000)
+    parser.add_argument("--low-account", default="work")
+    parser.add_argument("--high-account", default="personal-ro")
+    parser.add_argument("--max-account", default="max-work")
     args = parser.parse_args(argv)
 
     logging.basicConfig(

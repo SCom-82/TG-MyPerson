@@ -219,6 +219,12 @@ automatically in-process. It exists only as a manual escape hatch.
   Кросс-аккаунтные запросы — только `app/repo/people_queries.py`.
 - Замер полного `raw` на живых сообщениях (только чтение):
   `python -m app.scripts.measure_raw --alias personal-ro --chat <id> --limit 1000`.
+- Перенос старых данных (PR-4, infra-ops, под владельцем, `app/scripts/isolation_copy.py`):
+  `python -m app.scripts.migrate_isolation probe` (в сервисе, на его клиентах) →
+  `copy --self work=<id>` → `verify` (выход ≠ 0 при провале) → в окне `delta`. Идемпотентно,
+  отчёт в stdout и `/tmp/migrate_isolation-<cmd>-<ts>.json`. Правило атрибуции лички/групп
+  (`--split-date/--split-id/--low-account/--high-account`) проверяется до записи; при нарушении —
+  стоп (`precondition_failed`), эскалация архитектору. Чаты без владельца — `mig_unassigned`.
 - Аккаунт целиком (infra-ops, под владельцем):
   `python -m app.scripts.account_partitions list|grants|dump|restore|drop --account N`
   (`drop` — только выключенный аккаунт и дамп моложе часа, `--confirm <alias>`).
