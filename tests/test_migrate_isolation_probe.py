@@ -1,0 +1,285 @@
+"""migrate_isolation probe (ТЗ 2026-10-13 §8.1, PR-0).
+
+AC: on the test DB with a fake client it fills mig_membership; it writes
+nothing but mig_membership; Telegram — only get_me / iter_dialogs.
+
+Live DB. probe() commits through app.database.async_session, so the accounts
+created here are committed and removed by the fixture; assertions look only at
+these accounts (the test DB may hold others).
+"""
+
+import json
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import text
+from telethon.tl.types import (
+    Channel,
+    ChatAdminRights,
+    ChatPhotoEmpty,
+    User,
+)
+from telethon.tl.types import Chat as BasicGroup
+
+from app.scripts import migrate_isolation as mi
+from tests.conftest import _TestSessionFactory
+
+DATE = datetime(2026, 10, 1, tzinfo=timezone.utc)
+ALIASES = ("probe-work", "probe-ro", "probe-nosession", "probe-max")
+ORPHAN_CHAT = -1_009_300_000_001
+SHARED_CHANNEL = 9_300_000_010
+
+
+def _channel(cid, title, *, broadcast=False, creator=False, admin=False, min_=False, access_hash=111):
+    return Channel(
+        id=cid, title=title, photo=ChatPhotoEmpty(), date=DATE,
+        broadcast=broadcast, megagroup=not broadcast, creator=creator, min=min_,
+        admin_rights=ChatAdminRights(post_messages=True) if admin else None,
+        access_hash=access_hash,
+    )
+
+
+def _dialogs_work():
+    return [
+        User(id=9_300_000_100, first_name="Peer", access_hash=555),
+        _channel(SHARED_CHANNEL, "Shared supergroup", creator=True, access_hash=777),
+        _channel(9_300_000_011, "Own channel", broadcast=True, admin=True, access_hash=888),
+        BasicGroup(id=9_300_000_012, title="Basic group", photo=ChatPhotoEmpty(),
+                   participants_count=3, date=DATE, version=1),
+    ]
+
+
+def _dialogs_ro():
+    return [
+        _channel(SHARED_CHANNEL, "Shared supergroup", access_hash=999),
+        _channel(9_300_000_013, "Seen as min", min_=True, access_hash=123),
+    ]
+
+
+class FakeClient:
+    """Records every attribute access; offers write methods that must stay unused."""
+
+    def __init__(self, me_id, dialogs, *, authorized=True, fail=False):
+        self.me_id, self.dialogs, self.authorized, self.fail = me_id, dialogs, authorized, fail
+        self.calls: list[str] = []
+
+    async def connect(self):
+        self.calls.append("connect")
+
+    async def disconnect(self):
+        self.calls.append("disconnect")
+
+    async def is_user_authorized(self):
+        self.calls.append("is_user_authorized")
+        return self.authorized
+
+    async def get_me(self):
+        self.calls.append("get_me")
+        return SimpleNamespace(id=self.me_id)
+
+    async def iter_dialogs(self):
+        self.calls.append("iter_dialogs")
+        for i, entity in enumerate(self.dialogs):
+            if self.fail and i == 1:
+                raise ConnectionError("network down")
+            yield SimpleNamespace(entity=entity)
+
+    async def send_message(self, *a, **kw):  # pragma: no cover - must not be reached
+        self.calls.append("send_message")
+
+    async def __call__(self, request):  # pragma: no cover - must not be reached
+        self.calls.append(f"raw:{type(request).__name__}")
+
+
+async def _exec(sql, **params):
+    async with _TestSessionFactory() as s:
+        result = await s.execute(text(sql), params)
+        await s.commit()
+        return result
+
+
+async def _cleanup():
+    await _exec(mi.MEMBERSHIP_DDL)  # first run on a fresh DB
+    ids = "SELECT id FROM accounts WHERE alias = ANY(:a)"
+    await _exec(f"DELETE FROM mig_membership WHERE account_id IN ({ids})", a=list(ALIASES))
+    await _exec(f"DELETE FROM account_sessions WHERE account_id IN ({ids})", a=list(ALIASES))
+    await _exec("DELETE FROM accounts WHERE alias = ANY(:a)", a=list(ALIASES))
+    await _exec("DELETE FROM tg_chats WHERE id = :c", c=ORPHAN_CHAT)
+
+
+@pytest_asyncio.fixture
+async def accounts():
+    await _cleanup()
+    ids = {}
+    for alias, platform, session in (
+        ("probe-work", "telegram", "S1"),
+        ("probe-ro", "telegram", "S2"),
+        ("probe-nosession", "telegram", None),
+        ("probe-max", "max", "S4"),
+    ):
+        acc_id = (await _exec(
+            "INSERT INTO accounts (alias, phone, mode, platform) VALUES (:a, '+7', 'ro', :p) RETURNING id",
+            a=alias, p=platform,
+        )).scalar_one()
+        ids[alias] = acc_id
+        if session:
+            await _exec(
+                "INSERT INTO account_sessions (account_id, session_plaintext) VALUES (:i, :s)",
+                i=acc_id, s=session,
+            )
+    await _exec(
+        "INSERT INTO tg_chats (id, chat_type, title) VALUES (:c, 'supergroup', 'Nobody here')",
+        c=ORPHAN_CHAT,
+    )
+    yield ids
+    await _cleanup()
+
+
+def _factory(clients: dict):
+    """client per session string; probe accounts outside this test get a no-op client."""
+    def make(account, session_string):
+        return clients.get(session_string) or FakeClient(1, [], authorized=False)
+    return make
+
+
+async def _rows(account_id):
+    result = await _exec(
+        "SELECT external_chat_id, chat_type, title, role, access_hash FROM mig_membership"
+        " WHERE account_id = :a ORDER BY external_chat_id", a=account_id,
+    )
+    return [tuple(r) for r in result.all()]
+
+
+async def test_probe_fills_membership(accounts):
+    work = FakeClient(7353998268, _dialogs_work())
+    ro = FakeClient(219309009, _dialogs_ro())
+
+    report = await mi.probe(_factory({"S1": work, "S2": ro}))
+
+    shared = -1_000_000_000_000 - SHARED_CHANNEL
+    assert await _rows(accounts["probe-work"]) == sorted([
+        (shared, "supergroup", "Shared supergroup", "creator", 777),
+        (-1_009_300_000_011, "channel", "Own channel", "admin", 888),
+        (-9_300_000_012, "group", "Basic group", "member", None),
+        (9_300_000_100, "private", "Peer", None, 555),
+    ])
+    assert await _rows(accounts["probe-ro"]) == sorted([
+        (shared, "supergroup", "Shared supergroup", "member", 999),
+        (-1_009_300_000_013, "supergroup", "Seen as min", "member", None),  # min → no hash
+    ])
+
+    acc = report["accounts"]
+    assert acc["probe-work"]["status"] == "ok"
+    assert acc["probe-work"]["external_user_id"] == 7353998268
+    assert acc["probe-work"]["dialogs"] == 4
+    assert acc["probe-work"]["by_type"] == {"private": 1, "supergroup": 1, "channel": 1, "group": 1}
+    assert acc["probe-ro"]["with_access_hash"] == 1
+    assert acc["probe-nosession"]["status"] == "no_session"
+    assert "probe-max" not in acc  # TG only
+    assert report["shared_chats"].get("supergroup", 0) >= 1
+    orphans = report["tg_chats_without_member"]
+    assert ORPHAN_CHAT in [o["chat_id"] for o in orphans["top_by_messages"]]
+    assert orphans["total"] >= 1
+
+
+async def test_probe_uses_only_read_calls(accounts):
+    work = FakeClient(1, _dialogs_work())
+    ro = FakeClient(2, _dialogs_ro())
+
+    await mi.probe(_factory({"S1": work, "S2": ro}))
+
+    for client in (work, ro):
+        assert set(client.calls) <= {"connect", "is_user_authorized", "get_me", "iter_dialogs", "disconnect"}
+        assert client.calls[-1] == "disconnect"
+
+
+async def test_read_only_client_blocks_everything_else():
+    client = mi.ReadOnlyClient(FakeClient(1, []))
+    with pytest.raises(PermissionError):
+        client.send_message
+    with pytest.raises(PermissionError):
+        await client(object())
+    with pytest.raises(PermissionError):
+        client.session = None
+
+
+async def test_probe_writes_nothing_but_membership(accounts):
+    tables = [
+        r[0] for r in (await _exec(
+            "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+            " WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND NOT c.relispartition"
+            " AND c.relname <> 'mig_membership'"
+        )).all()
+    ]
+
+    async def snapshot():
+        counts = {}
+        for t in tables:
+            counts[t] = (await _exec(f'SELECT count(*), md5(string_agg(x::text, \'\' ORDER BY x::text)) FROM "{t}" x')).one()
+        return counts
+
+    before = await snapshot()
+    await mi.probe(_factory({"S1": FakeClient(7353998268, _dialogs_work()),
+                             "S2": FakeClient(2, _dialogs_ro())}))
+    after = await snapshot()
+
+    assert before == after
+    assert (await _exec(
+        "SELECT tg_user_id FROM accounts WHERE id = :i", i=accounts["probe-work"]
+    )).scalar() is None
+
+
+async def test_probe_is_idempotent_and_reflects_left_chats(accounts):
+    await mi.probe(_factory({"S1": FakeClient(1, _dialogs_work()), "S2": FakeClient(2, _dialogs_ro())}))
+    first = await _rows(accounts["probe-work"])
+    await mi.probe(_factory({"S1": FakeClient(1, _dialogs_work()), "S2": FakeClient(2, _dialogs_ro())}))
+    assert await _rows(accounts["probe-work"]) == first
+
+    await mi.probe(_factory({"S1": FakeClient(1, _dialogs_work()[:2]), "S2": FakeClient(2, _dialogs_ro())}))
+    assert len(await _rows(accounts["probe-work"])) == 2
+
+
+async def test_failed_account_keeps_previous_rows_and_does_not_stop_others(accounts):
+    await mi.probe(_factory({"S1": FakeClient(1, _dialogs_work()), "S2": FakeClient(2, _dialogs_ro())}))
+    before = await _rows(accounts["probe-work"])
+
+    failing = FakeClient(1, _dialogs_work(), fail=True)
+    report = await mi.probe(_factory({"S1": failing, "S2": FakeClient(2, _dialogs_ro()[:1])}))
+
+    assert report["accounts"]["probe-work"]["status"] == "error"
+    assert "network down" in report["accounts"]["probe-work"]["error"]
+    assert failing.calls[-1] == "disconnect"
+    assert await _rows(accounts["probe-work"]) == before
+    assert len(await _rows(accounts["probe-ro"])) == 1
+    assert report["ok"] is False
+
+
+async def test_not_authorized_account(accounts):
+    report = await mi.probe(_factory({
+        "S1": FakeClient(1, _dialogs_work(), authorized=False),
+        "S2": FakeClient(2, _dialogs_ro()),
+    }))
+
+    assert report["accounts"]["probe-work"]["status"] == "not_authorized"
+    assert await _rows(accounts["probe-work"]) == []
+
+
+def test_cli_writes_report(tmp_path, monkeypatch):
+    async def fake_probe():
+        return {"command": "probe", "ok": True, "accounts": {}}
+
+    monkeypatch.setitem(mi.COMMANDS, "probe", fake_probe)
+
+    assert mi.main(["probe", "--out-dir", str(tmp_path)]) == 0
+    [report_file] = tmp_path.glob("migrate_isolation-probe-*.json")
+    assert json.loads(report_file.read_text())["command"] == "probe"
+
+
+def test_cli_exit_code_on_failure(tmp_path, monkeypatch):
+    async def fake_probe():
+        return {"command": "probe", "ok": False}
+
+    monkeypatch.setitem(mi.COMMANDS, "probe", fake_probe)
+    assert mi.main(["probe", "--out-dir", str(tmp_path)]) == 1
