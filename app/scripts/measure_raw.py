@@ -2,32 +2,31 @@
 
     python -m app.scripts.measure_raw --alias personal-ro --chat -1002175364727 [--limit 1000]
 
-Reads up to --limit messages of one chat with a second, read-only connection
-(same wrapper as migrate_isolation probe; iter_messages only) and compares the
-legacy raw_data (7 fields) with tl_to_json(message.to_dict()). Writes nothing.
+Runs inside the service on the pool's own client of the alias
+(POST /api/v1/admin/isolation/measure_raw, X-Admin-Key): no second connection
+on the account's auth key (review 13.10, P0-1). Reads up to --limit messages
+of one chat (iter_messages only) and compares the legacy raw_data (7 fields)
+with tl_to_json(message.to_dict()). Writes nothing.
 Escalate before merging PR-2 if the full raw adds more than +100 % to a
 messages row (avg tg_messages row on the prod copy: 632 B, raw_data 155 B).
 """
 
 import argparse
-import asyncio
 import json
+import os
 import statistics
 import sys
 
-from sqlalchemy import select
-
-from app.database import async_session
-from app.models import Account, AccountSession
-from app.scripts.migrate_isolation import ReadOnlyClient, telethon_client
+from app.scripts.migrate_isolation import DEFAULT_URL, ReadOnlyClient, call_service
 from app.services.message_service import _message_to_raw
 from app.telegram.normalize import raw_of
 
 ROW_BYTES = 632  # avg tg_messages row on the prod copy, 13.10
+MEASURE_PATH = "/api/v1/admin/isolation/measure_raw"
 
 
 class _Reader(ReadOnlyClient):
-    _ALLOWED = ReadOnlyClient._ALLOWED | {"iter_messages"}
+    _ALLOWED = frozenset({"iter_messages"})
 
 
 def sizes(messages) -> dict:
@@ -45,19 +44,15 @@ def sizes(messages) -> dict:
     }
 
 
-async def measure(alias: str, chat: int, limit: int) -> dict:
-    async with async_session() as db:
-        row = (await db.execute(
-            select(Account, AccountSession.session_plaintext)
-            .join(AccountSession, (AccountSession.account_id == Account.id) & AccountSession.is_active)
-            .where(Account.alias == alias)
-        )).one()
-    client = _Reader(telethon_client(row[0], row[1]))
-    await client.connect()
-    try:
-        messages = [m async for m in client.iter_messages(chat, limit=limit)]
-    finally:
-        await client.disconnect()
+async def measure_in_service(alias: str, chat: int, limit: int) -> dict:
+    """On the running pool's client of the alias (admin endpoint)."""
+    from app.telegram.pool import pool
+
+    session = await pool.get(alias)
+    if session.client is None:
+        return {"alias": alias, "chat": chat, "error": "session not available"}
+    client = _Reader(session.client)
+    messages = [m async for m in client.iter_messages(chat, limit=limit)]
     return {"alias": alias, "chat": chat, **sizes(messages)}
 
 
@@ -66,8 +61,10 @@ def main(argv=None) -> int:
     p.add_argument("--alias", required=True)
     p.add_argument("--chat", type=int, required=True)
     p.add_argument("--limit", type=int, default=1000)
+    p.add_argument("--url", default=os.environ.get("TG_MYPERSON_URL_LOCAL", DEFAULT_URL))
     a = p.parse_args(argv)
-    print(json.dumps(asyncio.run(measure(a.alias, a.chat, a.limit)), indent=2))
+    report = call_service(a.url, MEASURE_PATH, {"alias": a.alias, "chat": a.chat, "limit": a.limit})
+    print(json.dumps(report, indent=2))
     return 0
 
 
