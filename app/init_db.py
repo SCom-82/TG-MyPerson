@@ -14,7 +14,8 @@ from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
 
 def main() -> None:
-    db_url = os.environ.get("DATABASE_URL", "")
+    # Table owner when set: the app role (DATABASE_URL) cannot create databases.
+    db_url = os.environ.get("MIGRATIONS_DATABASE_URL") or os.environ.get("DATABASE_URL", "")
     match = re.match(r"postgresql\+asyncpg://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)", db_url)
     if not match:
         print(f"Cannot parse DATABASE_URL, skipping DB creation: {db_url[:50]}...")

@@ -8,7 +8,7 @@ Covers alembic/versions/009_max_platform.py against the real test Postgres:
   4. downgrade really removes max_* and the four accounts columns
   5. ORM models match the migrated schema (column names of max_* == tg_*)
 
-Requires real Postgres on :5433 with migrations applied through head (009).
+Requires real Postgres on :5433 with migrations applied through head.
 Leaves the DB at head even if an assertion fails.
 """
 
@@ -27,6 +27,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # Seed ids far away from anything other tests insert.
 _CHAT_ID = -990_000_000_009
 _USER_ID = 990_000_000_009
+
+# Alembic head of the repo; 009 is no longer the last revision (010 account isolation).
+_HEAD = "010"
 
 _MAX_TABLES = (
     "max_users",
@@ -106,7 +109,7 @@ def _columns(cur, table: str) -> list[str]:
 def pg():
     conn = _connect()
     cur = conn.cursor()
-    assert _current_revision(cur) == "009", "test DB must be migrated to head (009) before the suite"
+    assert _current_revision(cur) == _HEAD, f"test DB must be migrated to head ({_HEAD}) before the suite"
     # Seed TG data so the round-trip has something to (not) change.
     cur.execute(
         "INSERT INTO tg_users (id, username, first_name) VALUES (%s, 'mig009', 'Mig') "
@@ -128,7 +131,7 @@ def pg():
         yield cur
     finally:
         try:
-            if _current_revision(cur) != "009":
+            if _current_revision(cur) != _HEAD:
                 _alembic("upgrade", "head")
         finally:
             cur.execute("DELETE FROM tg_messages WHERE chat_id = %s", (_CHAT_ID,))
@@ -148,7 +151,7 @@ def test_roundtrip_keeps_tg_data_and_accounts(pg):
     assert _fingerprint(pg) == before, "downgrade 009 must not touch tg_* / accounts rows"
 
     _alembic("upgrade", "head")
-    assert _current_revision(pg) == "009"
+    assert _current_revision(pg) == _HEAD
     assert _fingerprint(pg) == before, "upgrade 009 must not touch tg_* / accounts rows"
 
 

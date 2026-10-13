@@ -6,8 +6,11 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
+    Identity as GeneratedIdentity,
     Index,
     Integer,
+    Sequence,
     SmallInteger,
     String,
     Text,
@@ -165,6 +168,8 @@ class Account(Base):
     platform_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     write_chat_ids: Mapped[list[int] | None] = mapped_column(ARRAY(BigInteger), nullable=True)
     write_rate_per_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Migration 010 (account isolation): the account's own user id on its platform.
+    external_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     sessions: Mapped[list["AccountSession"]] = relationship(
         "AccountSession", back_populates="account", lazy="noload"
@@ -538,3 +543,286 @@ class MaxRawEvent(Base):
             postgresql_where=text("normalized = false"),
         ),
     )
+
+
+# ===========================================================================
+# Account isolation (migration 010, ТЗ 2026-10-13 §2–3)
+#
+# Data tables are PARTITION BY LIST (account_id), one partition per account
+# (<table>_a<id>, created by create_account_partitions()). Partitions are not
+# mapped. PK (account_id, id); ids come from one sequence per parent. The DDL
+# lives in migration 010 — do not autogenerate these tables.
+# Relationships are view-only: writes go through app/repo (Core upserts), and
+# account_id is shared by several composite FKs of one row.
+# ===========================================================================
+
+_PARTITIONED = {"postgresql_partition_by": "LIST (account_id)"}
+
+
+def _seq_id(table: str):
+    seq = Sequence(f"{table}_id_seq")
+    return mapped_column(
+        BigInteger, seq, primary_key=True, server_default=text(f"nextval('{table}_id_seq')")
+    )
+
+
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+
+    id: Mapped[int] = mapped_column(Integer, GeneratedIdentity(always=True), primary_key=True)
+    scope: Mapped[str] = mapped_column(Text, nullable=False)  # 'account' | 'owner'
+    account_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True
+    )
+    key_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    label: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Person(Base):
+    """Owner-level contact: one human across accounts and platforms (no RLS)."""
+
+    __tablename__ = "people"
+
+    id: Mapped[int] = mapped_column(BigInteger, GeneratedIdentity(always=True), primary_key=True)
+    display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    primary_phone: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tags: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default="{}", nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    identities: Mapped[list["Identity"]] = relationship(
+        "Identity", back_populates="person", lazy="raise", viewonly=True
+    )
+
+
+class Identity(Base):
+    """A user id on a platform, linked to a person (no RLS)."""
+
+    __tablename__ = "identities"
+
+    id: Mapped[int] = mapped_column(BigInteger, GeneratedIdentity(always=True), primary_key=True)
+    person_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("people.id"), nullable=False)
+    person_pinned: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)  # 'telegram' | 'max'
+    external_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    username: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    phone: Mapped[str | None] = mapped_column(Text, nullable=True)  # E.164
+    is_bot: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    person: Mapped["Person"] = relationship(
+        "Person", back_populates="identities", lazy="raise", viewonly=True
+    )
+
+    __table_args__ = (UniqueConstraint("platform", "external_user_id"),)
+
+
+class PeopleMergeLog(Base):
+    __tablename__ = "people_merge_log"
+
+    id: Mapped[int] = mapped_column(BigInteger, GeneratedIdentity(always=True), primary_key=True)
+    action: Mapped[str] = mapped_column(Text, nullable=False)  # auto_merge | merge | split
+    from_person_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    to_person_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    identity_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class User(Base):
+    """A person as one account sees it."""
+
+    __tablename__ = "users"
+
+    account_id: Mapped[int] = mapped_column(Integer, ForeignKey("accounts.id"), primary_key=True)
+    id: Mapped[int] = _seq_id("users")
+    external_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    identity_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("identities.id"), nullable=False)
+    username: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    phone: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_bot: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
+    is_self: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
+    access_hash: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    is_contact: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
+    last_seen_via: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (UniqueConstraint("account_id", "external_id"), _PARTITIONED)
+
+
+class Chat(Base):
+    __tablename__ = "chats"
+
+    account_id: Mapped[int] = mapped_column(Integer, ForeignKey("accounts.id"), primary_key=True)
+    id: Mapped[int] = _seq_id("chats")
+    external_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chat_type: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    username: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    members_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    access_hash: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    my_role: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_monitored: Mapped[bool] = mapped_column(Boolean, server_default="true", nullable=False)
+    last_message_external_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    raw: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (UniqueConstraint("account_id", "external_id"), _PARTITIONED)
+
+
+class Message(Base):
+    __tablename__ = "messages"
+
+    account_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = _seq_id("messages")
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    external_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sender_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    sender_chat_external_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    reply_to_external_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    forward_from_chat_external_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    forward_from_message_external_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    message_type: Mapped[str] = mapped_column(Text, server_default="text", nullable=False)
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    text_html: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    is_outgoing: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
+    is_edited: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
+    edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    views: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    raw: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    chat: Mapped["Chat"] = relationship("Chat", lazy="raise", viewonly=True)
+    sender: Mapped["User | None"] = relationship("User", lazy="selectin", viewonly=True)
+    media: Mapped[list["Media"]] = relationship(
+        "Media", lazy="selectin", viewonly=True, order_by="Media.attach_index"
+    )
+
+    __table_args__ = (
+        UniqueConstraint("account_id", "chat_id", "external_id"),
+        ForeignKeyConstraint(["account_id", "chat_id"], ["chats.account_id", "chats.id"]),
+        ForeignKeyConstraint(["account_id", "sender_user_id"], ["users.account_id", "users.id"]),
+        _PARTITIONED,
+    )
+
+
+class Media(Base):
+    __tablename__ = "media"
+
+    account_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = _seq_id("media")
+    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    attach_index: Mapped[int] = mapped_column(SmallInteger, server_default="0", nullable=False)
+    file_external_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    file_unique_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    file_type: Mapped[str] = mapped_column(Text, nullable=False)
+    file_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    storage_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("account_id", "message_id", "attach_index"),
+        ForeignKeyConstraint(
+            ["account_id", "message_id"], ["messages.account_id", "messages.id"], ondelete="CASCADE"
+        ),
+        _PARTITIONED,
+    )
+
+
+class SyncState(Base):
+    __tablename__ = "sync_state"
+
+    account_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    oldest_external_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    newest_external_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    oldest_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    newest_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_fully_synced: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
+    total_synced: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    last_backfill_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_catchup_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        ForeignKeyConstraint(["account_id", "chat_id"], ["chats.account_id", "chats.id"]),
+        _PARTITIONED,
+    )
+
+
+class MemberSnapshot(Base):
+    __tablename__ = "member_snapshots"
+
+    account_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = _seq_id("member_snapshots")
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    taken_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    members_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        ForeignKeyConstraint(["account_id", "chat_id"], ["chats.account_id", "chats.id"]),
+        _PARTITIONED,
+    )
+
+
+class SnapshotMember(Base):
+    __tablename__ = "snapshot_members"
+
+    account_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = _seq_id("snapshot_members")
+    snapshot_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    external_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    username: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    phone: Mapped[str | None] = mapped_column(Text, nullable=True)
+    role: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["account_id", "snapshot_id"],
+            ["member_snapshots.account_id", "member_snapshots.id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(["account_id", "user_id"], ["users.account_id", "users.id"]),
+        _PARTITIONED,
+    )
+
+
+class RawEvent(Base):
+    __tablename__ = "raw_events"
+
+    account_id: Mapped[int] = mapped_column(Integer, ForeignKey("accounts.id"), primary_key=True)
+    id: Mapped[int] = _seq_id("raw_events")
+    kind: Mapped[str] = mapped_column(Text, nullable=False)  # 'max:<opcode>' | 'tg:<type>'
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    normalized: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (_PARTITIONED,)

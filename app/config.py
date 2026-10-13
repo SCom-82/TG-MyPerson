@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
@@ -17,6 +19,12 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     api_prefix: str = "/api/v1"
     user_timezone: str = "Europe/Samara"
+
+    # Account isolation (ТЗ 2026-10-13 §4.3). legacy: tg_*/max_* only, the new
+    # per-account tables are neither written nor read. new: write + read the
+    # new tables, shadow-write the old ones while SHADOW_LEGACY_WRITE is on.
+    storage_mode: Literal["legacy", "new"] = "legacy"
+    shadow_legacy_write: bool = True
 
     model_config = {
         "env_file": ".env",

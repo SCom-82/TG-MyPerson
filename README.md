@@ -184,6 +184,24 @@ automatically in-process. It exists only as a manual escape hatch.
 > all rejected — the service now owns its own partition lifecycle end-to-end.
 > The DB image is `postgres:16-alpine`.
 
+## Изоляция аккаунтов (миграция 010)
+
+ТЗ и ADR: `_system/docs/architect/2026-10-13-tg-myperson-account-isolation-{plan,adr}.md`.
+Пока `STORAGE_MODE=legacy` (по умолчанию), сервис работает по старым таблицам; новые только созданы.
+
+- Таблицы данных `users`, `chats`, `messages`, `media`, `sync_state`, `member_snapshots`,
+  `snapshot_members`, `raw_events` — `PARTITION BY LIST (account_id)`, партиция на аккаунт
+  `<таблица>_a<id>`, DEFAULT-партиции нет. Партиции создаёт `create_account_partitions(id)`:
+  миграция — для всех аккаунтов, `POST /api/v1/accounts` — в одной транзакции с аккаунтом.
+- RLS `acc_isolation` по `app.account_id` / `app.scope`. Доступ к данным — только через
+  `app/storage.py` (`account_db(id)`, `owner_db()`) и `app/repo/*`; сессия без аккаунта падает.
+- Контакты: `people` → `identities` → `users` аккаунта; склейка TG↔MAX по телефону (E.164).
+- Роль приложения `tg_myperson_app` (без superuser) получает права на родителей и служебные таблицы,
+  на партиции — нет. Миграции — под владельцем: `MIGRATIONS_DATABASE_URL`.
+- Аккаунт целиком (infra-ops, под владельцем):
+  `python -m app.scripts.account_partitions list|grants|dump|restore|drop --account N`
+  (`drop` — только выключенный аккаунт и дамп моложе часа, `--confirm <alias>`).
+
 ## API overview
 
 - `GET /api/v1/healthz` — health check (no auth)

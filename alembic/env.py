@@ -15,8 +15,14 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
-# Allow DATABASE_URL env var to override alembic.ini
-db_url = os.environ.get("DATABASE_URL", config.get_main_option("sqlalchemy.url"))
+# MIGRATIONS_DATABASE_URL (table owner) wins over DATABASE_URL: the app itself
+# runs as the non-superuser tg_myperson_app, which cannot run DDL. Both
+# override alembic.ini.
+db_url = (
+    os.environ.get("MIGRATIONS_DATABASE_URL")
+    or os.environ.get("DATABASE_URL")
+    or config.get_main_option("sqlalchemy.url")
+)
 
 
 def run_migrations_offline() -> None:

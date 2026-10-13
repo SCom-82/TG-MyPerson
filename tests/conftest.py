@@ -145,3 +145,7 @@ async def create_tool_policy(
         """),
         {"account_id": account_id, "tool_name": tool_name, "effect": effect},
     )
+
+
+# Account isolation fixtures (app role, accounts with partitions): tests/isolation_env.py
+pytest_plugins = ["tests.isolation_env"]

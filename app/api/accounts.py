@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
 from app.database import async_session
@@ -159,6 +159,12 @@ def _max_account_to_dict(account: Account) -> dict:
     }
 
 
+async def create_partitions(db, account_id: int) -> list[str]:
+    """create_account_partitions(account_id): 8 data partitions, idempotent."""
+    result = await db.execute(text("SELECT create_account_partitions(:id)"), {"id": account_id})
+    return list(result.scalars().all())
+
+
 def _build_pool_map() -> dict[str, dict]:
     """Build alias→pool_entry dict from pool.pool_status()."""
     return {entry["alias"]: entry for entry in pool.pool_status()}
@@ -185,14 +191,18 @@ async def create_account(body: AccountCreate) -> dict:
         )
         db.add(account)
         try:
-            await db.commit()
-            await db.refresh(account)
+            await db.flush()
         except IntegrityError:
             await db.rollback()
             raise HTTPException(
                 status_code=409,
                 detail=f"Account with alias '{body.alias}' already exists",
             )
+        # Data partitions of the account (migration 010) in the same
+        # transaction: if they cannot be created, the account is not created.
+        await create_partitions(db, account.id)
+        await db.commit()
+        await db.refresh(account)
 
     data = _account_to_dict(account)
     if body.platform == "max" and body.mode != "ro":
