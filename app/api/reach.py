@@ -34,11 +34,12 @@ async def reachable_contacts(
     request: Request,
     q: str | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
 ):
     account = await _rw_account(request)
     async with account_db(account.id) as db:
-        items = await people_queries.reachable(db, account, q=q, limit=limit)
-    return {"items": items, "total": len(items)}
+        items = await people_queries.reachable(db, account, q=q, limit=limit, offset=offset)
+    return {"items": items, "limit": limit, "offset": offset}
 
 
 class ToPersonRequest(BaseModel):

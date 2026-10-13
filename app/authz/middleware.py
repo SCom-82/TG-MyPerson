@@ -132,11 +132,15 @@ async def admin_auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
-def _presented_key(request: Request) -> str | None:
+def _presented_key(request: Request) -> tuple[str | None, bool]:
+    """(key, came from the query string). ?api_key= ends up in access logs."""
     auth = request.headers.get("authorization", "")
     if auth.lower().startswith("bearer "):
-        return auth[7:].strip() or None
-    return request.headers.get("x-api-key") or request.query_params.get("api_key")
+        return auth[7:].strip() or None, False
+    header = request.headers.get("x-api-key")
+    if header:
+        return header, False
+    return request.query_params.get("api_key"), True
 
 
 async def authenticate(request: Request) -> JSONResponse | None:
@@ -149,8 +153,9 @@ async def authenticate(request: Request) -> JSONResponse | None:
     if path in PUBLIC_PATHS or is_admin_path(path):
         return None
     request.state.api_key = None
-    presented = _presented_key(request)
-    info = await keys.lookup(presented)
+    presented, from_query = _presented_key(request)
+    # Per-account and owner keys only in a header: a query string lands in logs.
+    info = None if from_query else await keys.lookup(presented)
     owner_path = path == OWNER_PREFIX or path.startswith(OWNER_PREFIX + "/")
     if info is not None:
         request.state.api_key = info

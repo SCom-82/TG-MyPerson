@@ -271,3 +271,30 @@ async def test_authorize_write_limits(accounts):
     no_list = await authorize(max_ctx, "send_message", chat_external_id=5, is_write=True)
     assert (no_list.allowed, no_list.status) == (False, 403)
     sql("UPDATE accounts SET write_chat_ids = NULL, write_rate_per_hour = NULL WHERE id = %s", (accounts.a,))
+
+
+async def test_r3_1_reachable_one_row_per_person_and_pages(accounts, test_client):
+    """Review R3-1: reachability, DISTINCT per person and the page in SQL."""
+    await _contacts(accounts)
+    # Second TG identity of the direct person, reachable only by username: still one row, 'direct'.
+    second = 9_400_000_605
+    async with account_db(accounts.b) as db:
+        await users.upsert_user(db, accounts.b, "telegram", UserRow(second, username="alt"), "message")
+        await db.commit()
+    person = sql("SELECT person_id FROM identities WHERE external_user_id = %s", (P_DIRECT,), fetch=True)[0][0]
+    sql("UPDATE identities SET person_id = %s WHERE external_user_id = %s", (person, second))
+
+    full = (await test_client.get("/api/v1/reachable", headers=h("iso-a"))).json()["items"]
+    assert [i["person_id"] for i in full] == sorted({i["person_id"] for i in full})  # one row per person
+    assert next(i for i in full if i["person_id"] == person)["method"] == "direct"
+    assert len(full) == 3
+
+    page1 = (await test_client.get("/api/v1/reachable?limit=2", headers=h("iso-a"))).json()["items"]
+    page2 = (await test_client.get("/api/v1/reachable?limit=2&offset=2", headers=h("iso-a"))).json()["items"]
+    assert [i["person_id"] for i in page1 + page2] == [i["person_id"] for i in full]
+
+
+async def test_account_key_in_query_string_is_not_accepted(accounts, test_client):
+    _, key_a = await keys.create_key(scope="account", account_id=accounts.a, label="iso-test-q")
+    assert (await test_client.get(f"/api/v1/chats?api_key={key_a}")).status_code == 401
+    assert (await test_client.get("/api/v1/chats", headers=h(key=key_a))).status_code == 200

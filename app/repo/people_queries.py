@@ -9,7 +9,8 @@ other accounts' messages or chats.
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import Text, and_, cast, func, or_, select, update
+from sqlalchemy import Text, and_, case, cast, func, literal, null, or_, select, update
+from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Account, Chat, Identity, Message, Person, User
@@ -19,6 +20,9 @@ from app.repo import ensure_owner, ensure_scope
 # ---------------------------------------------------------------------------
 # Reachability (§7.3) — computed, never stored
 # ---------------------------------------------------------------------------
+
+_PHONE_NOTE = "ImportContacts adds the person to the account's address book"
+
 
 @dataclass(frozen=True)
 class Reach:
@@ -38,7 +42,7 @@ def reach_of(platform: str, identity: Identity, user: User | None) -> Reach | No
     if identity.username:
         return Reach("username")
     if identity.phone:
-        return Reach("phone", "ImportContacts adds the person to the account's address book")
+        return Reach("phone", _PHONE_NOTE)
     return None
 
 
@@ -221,9 +225,28 @@ async def update_person(db: AsyncSession, person_id: int, **fields) -> Person | 
 # Reachable people for one rw account (§6.4, §7.3)
 # ---------------------------------------------------------------------------
 
-async def reachable(db: AsyncSession, account: Account, *, q: str | None = None, limit: int = 50) -> list[dict]:
-    """People of the shared base this account can write to. Contact fields only."""
+def _reach_method(platform: str):
+    """SQL twin of reach_of(): direct | username | phone | NULL (identities i, users u)."""
+    if platform == "max":
+        return literal("direct")
+    return case(
+        (User.access_hash.is_not(None), literal("direct")),
+        (func.coalesce(Identity.username, "") != "", literal("username")),
+        (Identity.phone.is_not(None), literal("phone")),
+        else_=null(),
+    )
+
+
+async def reachable(
+    db: AsyncSession, account: Account, *, q: str | None = None, limit: int = 50, offset: int = 0
+) -> list[dict]:
+    """People of the shared base this account can write to (best way per person). Contact fields only.
+
+    Reachability, one row per person (DISTINCT ON, best method first) and the
+    page are all computed in SQL (review R3-1).
+    """
     ensure_scope(db, account.id)
+    method = _reach_method(account.platform).label("method")
     flt = [Identity.platform == account.platform]
     if q:
         pattern = f"%{q}%"
@@ -232,34 +255,42 @@ async def reachable(db: AsyncSession, account: Account, *, q: str | None = None,
             Identity.last_name.ilike(pattern), Identity.phone.ilike(pattern),
             Person.display_name.ilike(pattern),
         ))
-    rows = (await db.execute(
-        select(Identity, Person, User)
+    candidates = (
+        select(
+            Person.id.label("person_id"), Person.display_name.label("name"),
+            Identity.id.label("identity_id"), Identity.username, Identity.phone,
+            Identity.external_user_id, method,
+        )
         .join(Person, Person.id == Identity.person_id)
         .outerjoin(User, and_(User.account_id == account.id, User.identity_id == Identity.id))
         .where(*flt)
-        .order_by(Person.id, Identity.id)
-        .limit(limit * 4)
-    )).all()
-    out, seen = [], set()
-    for ident, person, user in rows:
-        if person.id in seen:
-            continue
-        reach = reach_of(account.platform, ident, user)
-        if reach is None:
-            continue
-        seen.add(person.id)
-        out.append({
-            "person_id": person.id,
-            "name": person.display_name,
-            "username": ident.username,
-            "phone": ident.phone,
-            "external_user_id": ident.external_user_id,
-            "method": reach.method,
-            "note": reach.note,
-        })
-        if len(out) >= limit:
-            break
-    return out
+        .subquery()
+    )
+    rank = case(
+        (candidates.c.method == "direct", 0), (candidates.c.method == "username", 1), else_=2
+    )
+    best = (
+        select(candidates)
+        .where(candidates.c.method.is_not(None))
+        .ext(distinct_on(candidates.c.person_id))
+        .order_by(candidates.c.person_id, rank, candidates.c.identity_id)
+        .subquery()
+    )
+    rows = (await db.execute(
+        select(best).order_by(best.c.person_id).limit(limit).offset(offset)
+    )).mappings().all()
+    return [
+        {
+            "person_id": r["person_id"],
+            "name": r["name"],
+            "username": r["username"],
+            "phone": r["phone"],
+            "external_user_id": r["external_user_id"],
+            "method": r["method"],
+            "note": _PHONE_NOTE if r["method"] == "phone" else None,
+        }
+        for r in rows
+    ]
 
 
 async def reach_person(db: AsyncSession, account: Account, person_id: int) -> tuple[Identity, User | None, Reach] | None:
