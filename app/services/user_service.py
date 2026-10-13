@@ -1,6 +1,7 @@
 import logging
 
 from sqlalchemy import select, func
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from telethon.tl.types import User
 
@@ -10,32 +11,42 @@ log = logging.getLogger(__name__)
 
 
 async def upsert_user(session: AsyncSession, user: User) -> TgUser | None:
-    """Create or update a TgUser from a Telethon User object."""
+    """Create or update a TgUser from a Telethon User object.
+
+    Single INSERT … ON CONFLICT (id) DO UPDATE: a select-then-insert lost
+    messages when two sessions (accounts, catch-up after reconnect) saw the
+    same new user at once — the loser hit tg_users_pkey and rolled back the
+    whole message.
+    """
     if user is None:
         return None
 
-    user_id = user.id
-    db_user = await session.get(TgUser, user_id)
-
-    if db_user is None:
-        db_user = TgUser(
-            id=user_id,
-            username=user.username,
-            first_name=user.first_name,
-            last_name=user.last_name,
-            phone=user.phone,
-            is_bot=user.bot or False,
-            is_self=user.is_self or False,
-            raw_data=_user_to_dict(user),
-        )
-        session.add(db_user)
-    else:
-        db_user.username = user.username
-        db_user.first_name = user.first_name
-        db_user.last_name = user.last_name
-        db_user.phone = user.phone or db_user.phone
-        db_user.is_bot = user.bot or False
-        db_user.raw_data = _user_to_dict(user)
+    stmt = pg_insert(TgUser).values(
+        id=user.id,
+        username=user.username,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        phone=user.phone,
+        is_bot=user.bot or False,
+        is_self=user.is_self or False,
+        raw_data=_user_to_dict(user),
+    )
+    ex = stmt.excluded
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[TgUser.id],
+        set_={
+            "username": ex.username,
+            "first_name": ex.first_name,
+            "last_name": ex.last_name,
+            "phone": func.coalesce(ex.phone, TgUser.phone),
+            "is_bot": ex.is_bot,
+            "raw_data": ex.raw_data,
+            "updated_at": func.now(),
+        },
+    ).returning(TgUser)
+    db_user = (
+        await session.scalars(stmt, execution_options={"populate_existing": True})
+    ).one()
 
     await session.commit()
     return db_user

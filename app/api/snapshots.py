@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Query, Request
 from telethon.errors import FloodWaitError
 from sqlalchemy import select, func, desc
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import async_session
@@ -61,16 +62,11 @@ async def _require_account_id(alias: str) -> int:
 
 async def _ensure_tg_chat(db, chat_id: int) -> None:
     """Ensure chat exists in tg_chats; insert stub if not."""
-    result = await db.execute(select(TgChat.id).where(TgChat.id == chat_id))
-    if result.scalar_one_or_none() is None:
-        stub = TgChat(
-            id=chat_id,
-            chat_type="unknown",
-            title=None,
-            is_monitored=False,
-        )
-        db.add(stub)
-        await db.flush()
+    await db.execute(
+        pg_insert(TgChat)
+        .values(id=chat_id, chat_type="unknown", title=None, is_monitored=False)
+        .on_conflict_do_nothing(index_elements=[TgChat.id])
+    )
 
 
 def _participant_to_dict(participant) -> dict:

@@ -63,6 +63,33 @@ def _make_db_chat(chat_id: int) -> MagicMock:
     return chat
 
 
+def _ingest_execute(capture_add, results=None):
+    """AsyncMock for session.execute that understands the message upsert.
+
+    upsert_message writes tg_messages with one INSERT … ON CONFLICT statement
+    instead of session.add(); the INSERT values are rebuilt into a TgMessage
+    and handed to capture_add, so the tests below keep asserting on the row
+    that would be written. Other statements get the next item of results.
+    """
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.sql.dml import Insert
+    from app.models import TgMessage
+
+    results = list(results or [])
+    columns = set(TgMessage.__table__.c.keys())
+
+    async def _execute(stmt, *args, **kwargs):
+        if isinstance(stmt, Insert) and stmt.table.name == "tg_messages":
+            params = stmt.compile(dialect=postgresql.dialect()).params
+            capture_add(TgMessage(**{k: v for k, v in params.items() if k in columns}))
+            return MagicMock(scalar_one_or_none=lambda: 1)
+        if results:
+            return results.pop(0)
+        return MagicMock(scalar_one_or_none=lambda: None)
+
+    return AsyncMock(side_effect=_execute)
+
+
 # ---------------------------------------------------------------------------
 # Test 5: broadcast post → from_user_id NULL, sender_chat_id set
 # ---------------------------------------------------------------------------
@@ -82,9 +109,7 @@ async def test_upsert_message_broadcast_no_fk_error():
         captured_obj["obj"] = obj
 
     mock_session = AsyncMock()
-    mock_session.execute = AsyncMock(
-        return_value=MagicMock(scalar_one_or_none=lambda: None)
-    )
+    mock_session.execute = _ingest_execute(_capture_add)
     mock_session.add = MagicMock(side_effect=_capture_add)
     mock_session.flush = AsyncMock()
     mock_session.commit = AsyncMock()
@@ -131,19 +156,15 @@ async def test_upsert_message_broadcast_with_media():
         added_objects.append(obj)
 
     mock_session = AsyncMock()
-    mock_session.execute = AsyncMock(
-        return_value=MagicMock(scalar_one_or_none=lambda: None)
-    )
+    mock_session.execute = _ingest_execute(_capture_add)
     mock_session.add = MagicMock(side_effect=_capture_add)
     mock_session.flush = AsyncMock()
     mock_session.commit = AsyncMock()
 
     # _upsert_media does a second execute for TgMedia existence check
-    execute_results = [
-        MagicMock(scalar_one_or_none=lambda: None),  # for TgMessage check
-        MagicMock(scalar_one_or_none=lambda: None),  # for TgMedia check
-    ]
-    mock_session.execute = AsyncMock(side_effect=execute_results)
+    mock_session.execute = _ingest_execute(
+        _capture_add, [MagicMock(scalar_one_or_none=lambda: None)]
+    )
 
     await upsert_message(mock_session, msg, db_chat)
 
@@ -177,9 +198,7 @@ async def test_upsert_message_user_post_regression():
         captured_obj["obj"] = obj
 
     mock_session = AsyncMock()
-    mock_session.execute = AsyncMock(
-        return_value=MagicMock(scalar_one_or_none=lambda: None)
-    )
+    mock_session.execute = _ingest_execute(_capture_add)
     mock_session.add = MagicMock(side_effect=_capture_add)
     mock_session.flush = AsyncMock()
     mock_session.commit = AsyncMock()
@@ -510,9 +529,7 @@ async def test_anon_admin_sender_chat_id_equals_chat_id():
         captured_obj["obj"] = obj
 
     mock_session = AsyncMock()
-    mock_session.execute = AsyncMock(
-        return_value=MagicMock(scalar_one_or_none=lambda: None)
-    )
+    mock_session.execute = _ingest_execute(_capture_add)
     mock_session.add = MagicMock(side_effect=_capture_add)
     mock_session.flush = AsyncMock()
     mock_session.commit = AsyncMock()
@@ -548,9 +565,7 @@ async def test_linked_channel_sender_chat_id_differs_from_chat_id():
         captured_obj["obj"] = obj
 
     mock_session = AsyncMock()
-    mock_session.execute = AsyncMock(
-        return_value=MagicMock(scalar_one_or_none=lambda: None)
-    )
+    mock_session.execute = _ingest_execute(_capture_add)
     mock_session.add = MagicMock(side_effect=_capture_add)
     mock_session.flush = AsyncMock()
     mock_session.commit = AsyncMock()

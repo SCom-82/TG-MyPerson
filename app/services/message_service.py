@@ -1,7 +1,8 @@
 import logging
 from datetime import datetime
 
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, or_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from telethon.tl.types import (
     MessageMediaDocument,
@@ -57,13 +58,6 @@ async def upsert_message(session: AsyncSession, message, db_chat: TgChat) -> dic
     # Determine message type
     msg_type = _detect_message_type(message)
 
-    # Check existing
-    stmt = select(TgMessage).where(
-        and_(TgMessage.message_id == msg_id, TgMessage.chat_id == chat_id)
-    )
-    result = await session.execute(stmt)
-    db_msg = result.scalar_one_or_none()
-
     text_content = message.text or message.message or None
     text_html = None
     if message.entities and text_content:
@@ -76,34 +70,52 @@ async def upsert_message(session: AsyncSession, message, db_chat: TgChat) -> dic
     is_outgoing = message.out or False
     edit_date = message.edit_date
 
-    if db_msg is None:
-        db_msg = TgMessage(
-            message_id=msg_id,
-            chat_id=chat_id,
-            from_user_id=from_user_id,
-            sender_chat_id=sender_chat_id,
-            reply_to_message_id=_get_reply_to(message),
-            forward_from_chat_id=_get_forward_chat_id(message),
-            forward_from_message_id=_get_forward_msg_id(message),
-            message_type=msg_type,
-            text=text_content,
-            text_html=text_html,
-            tg_date=message.date,
-            is_outgoing=is_outgoing,
-            is_edited=edit_date is not None,
-            edit_date=edit_date,
-            views=message.views,
-            raw_data=_message_to_raw(message),
-        )
-        session.add(db_msg)
-        await session.flush()
-    else:
-        db_msg.text = text_content
-        db_msg.text_html = text_html
-        db_msg.is_edited = True
-        db_msg.edit_date = edit_date
-        db_msg.views = message.views or db_msg.views
-        db_msg.raw_data = _message_to_raw(message)
+    # One INSERT … ON CONFLICT instead of select-then-add: Telethon replays
+    # already stored messages after a reconnect, and two accounts in the same
+    # chat receive the same message — both used to fail on
+    # uq_tg_messages_msg_chat. A non-edited copy never overwrites an edited
+    # one; views are kept when the update carries none.
+    stmt = pg_insert(TgMessage).values(
+        message_id=msg_id,
+        chat_id=chat_id,
+        from_user_id=from_user_id,
+        sender_chat_id=sender_chat_id,
+        reply_to_message_id=_get_reply_to(message),
+        forward_from_chat_id=_get_forward_chat_id(message),
+        forward_from_message_id=_get_forward_msg_id(message),
+        message_type=msg_type,
+        text=text_content,
+        text_html=text_html,
+        tg_date=message.date,
+        is_outgoing=is_outgoing,
+        is_edited=edit_date is not None,
+        edit_date=edit_date,
+        views=message.views,
+        raw_data=_message_to_raw(message),
+    )
+    ex = stmt.excluded
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_tg_messages_msg_chat",
+        set_={
+            "text": ex.text,
+            "text_html": ex.text_html,
+            "is_edited": ex.is_edited,
+            "edit_date": ex.edit_date,
+            "views": func.coalesce(ex.views, TgMessage.views),
+            "raw_data": ex.raw_data,
+        },
+        where=or_(TgMessage.is_edited.is_(False), ex.is_edited),
+    ).returning(TgMessage.id)
+    message_pk = (await session.execute(stmt)).scalar_one_or_none()
+    if message_pk is None:
+        # Conflict skipped by the WHERE above: the stored row is a newer edit.
+        message_pk = (
+            await session.execute(
+                select(TgMessage.id).where(
+                    and_(TgMessage.message_id == msg_id, TgMessage.chat_id == chat_id)
+                )
+            )
+        ).scalar_one()
 
     # Update chat last_message
     if db_chat.last_message_id is None or msg_id >= db_chat.last_message_id:
@@ -112,7 +124,7 @@ async def upsert_message(session: AsyncSession, message, db_chat: TgChat) -> dic
 
     # Handle media metadata
     if message.media:
-        await _upsert_media(session, db_msg, message.media)
+        await _upsert_media(session, message_pk, message.media)
 
     await session.commit()
 
@@ -254,7 +266,7 @@ def _message_to_raw(message) -> dict:
     }
 
 
-async def _upsert_media(session: AsyncSession, db_msg: TgMessage, media) -> None:
+async def _upsert_media(session: AsyncSession, message_pk: int, media) -> None:
     """Store media metadata (no file download)."""
     file_type = _detect_message_type_from_media(media)
     file_id = None
@@ -281,13 +293,13 @@ async def _upsert_media(session: AsyncSession, db_msg: TgMessage, media) -> None
 
     # Check if already exists
     existing = await session.execute(
-        select(TgMedia).where(TgMedia.message_pk == db_msg.id)
+        select(TgMedia.id).where(TgMedia.message_pk == message_pk)
     )
     if existing.scalar_one_or_none():
         return
 
     db_media = TgMedia(
-        message_pk=db_msg.id,
+        message_pk=message_pk,
         file_id=file_id,
         file_unique_id=file_unique_id,
         file_type=file_type,

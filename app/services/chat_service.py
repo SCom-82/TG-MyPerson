@@ -2,6 +2,7 @@ import logging
 import re
 
 from sqlalchemy import select, func
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from telethon.tl.types import Chat, Channel, User
 from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
@@ -12,33 +13,43 @@ from app.models import TgChat
 log = logging.getLogger(__name__)
 
 
+async def _upsert_chat_row(session: AsyncSession, entity) -> TgChat:
+    """INSERT … ON CONFLICT (id) DO UPDATE for a Telethon entity, no commit.
+
+    One statement instead of get-then-add: concurrent writers of the same chat
+    (two accounts, handler vs sync_chats) used to hit tg_chats_pkey and lose
+    the incoming message together with the rolled-back transaction.
+    description and is_monitored are set on insert only, as before.
+    """
+    stmt = pg_insert(TgChat).values(
+        id=_get_chat_id(entity),
+        chat_type=_get_chat_type(entity),
+        title=_get_title(entity),
+        username=getattr(entity, "username", None),
+        description=getattr(entity, "about", None),
+        members_count=getattr(entity, "participants_count", None),
+        raw_data=_entity_to_dict(entity),
+    )
+    ex = stmt.excluded
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[TgChat.id],
+        set_={
+            "chat_type": ex.chat_type,
+            "title": ex.title,
+            "username": func.coalesce(ex.username, TgChat.username),
+            "members_count": func.coalesce(ex.members_count, TgChat.members_count),
+            "raw_data": ex.raw_data,
+            "updated_at": func.now(),
+        },
+    ).returning(TgChat)
+    return (
+        await session.scalars(stmt, execution_options={"populate_existing": True})
+    ).one()
+
+
 async def upsert_chat(session: AsyncSession, entity) -> TgChat:
     """Create or update a TgChat from a Telethon entity."""
-    chat_id = _get_chat_id(entity)
-    chat_type = _get_chat_type(entity)
-    title = _get_title(entity)
-    username = getattr(entity, "username", None)
-
-    db_chat = await session.get(TgChat, chat_id)
-
-    if db_chat is None:
-        db_chat = TgChat(
-            id=chat_id,
-            chat_type=chat_type,
-            title=title,
-            username=username,
-            description=getattr(entity, "about", None),
-            members_count=getattr(entity, "participants_count", None),
-            raw_data=_entity_to_dict(entity),
-        )
-        session.add(db_chat)
-    else:
-        db_chat.chat_type = chat_type
-        db_chat.title = title
-        db_chat.username = username or db_chat.username
-        db_chat.members_count = getattr(entity, "participants_count", None) or db_chat.members_count
-        db_chat.raw_data = _entity_to_dict(entity)
-
+    db_chat = await _upsert_chat_row(session, entity)
     await session.commit()
     return db_chat
 
@@ -91,35 +102,17 @@ async def sync_chat_list(session: AsyncSession, client) -> int:
     count = 0
     async for dialog in client.iter_dialogs():
         entity = dialog.entity
-        chat_id = _get_chat_id(entity)
-        chat_type = _get_chat_type(entity)
-        title = _get_title(entity)
-
-        db_chat = await session.get(TgChat, chat_id)
-        if db_chat is None:
-            db_chat = TgChat(
-                id=chat_id,
-                chat_type=chat_type,
-                title=title,
-                username=getattr(entity, "username", None),
-                members_count=getattr(entity, "participants_count", None),
-                raw_data=_entity_to_dict(entity),
-            )
-            session.add(db_chat)
-        else:
-            db_chat.chat_type = chat_type
-            db_chat.title = title
-            db_chat.username = getattr(entity, "username", None) or db_chat.username
-            db_chat.members_count = getattr(entity, "participants_count", None) or db_chat.members_count
-            db_chat.raw_data = _entity_to_dict(entity)
+        db_chat = await _upsert_chat_row(session, entity)
 
         if dialog.message:
             db_chat.last_message_id = dialog.message.id
             db_chat.last_message_at = dialog.message.date
 
+        # Commit per dialog: the upsert row-locks the chat, and holding those
+        # locks for the whole iter_dialogs walk would stall live handlers.
+        await session.commit()
         count += 1
 
-    await session.commit()
     log.info("Synced %d chats from Telegram", count)
     return count
 
