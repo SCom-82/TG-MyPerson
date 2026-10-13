@@ -58,6 +58,8 @@ from app.max.store import (
 )
 from app.models import Account
 
+from app.services.account_identity import IdentityMismatch, ensure_account_user
+
 log = logging.getLogger(__name__)
 
 PYMAX_VERSION = pymax.__version__
@@ -240,6 +242,9 @@ class MaxSession:
         # Chats caught up IN THE CURRENT CONNECTION (ADR §2.J, fixed 07.10): only for
         # these a live event may move newest_time_ms. Reset before every connect().
         self.caught_up: set[int] = set()
+        # STORAGE_MODE=new: frames are stored only after the profile id matched the
+        # account (review R2-1); reset on every connect.
+        self.identity_ok = False
 
         self._client: Any = None
         self._task: asyncio.Task | None = None
@@ -370,6 +375,7 @@ class MaxSession:
                     hook(client)
                 # A new connection: nothing is caught up until the gap fill says so.
                 self.caught_up = set()
+                self.identity_ok = False
                 await client.connect()
                 if not client.is_connected:
                     raise ConnectionError("client did not start")
@@ -392,6 +398,10 @@ class MaxSession:
                 return
             except (MaxAuthError, PasswordAttemptsExceededError) as exc:
                 self._set_state("error", str(exc) or type(exc).__name__)
+                return
+            except IdentityMismatch as exc:
+                log.error("max[%s]: %s — session stopped, nothing stored", self.alias, exc)
+                self._set_state("error", f"identity mismatch: {exc}")
                 return
             except ApiError as exc:
                 if is_unauthorized(exc):
@@ -433,7 +443,19 @@ class MaxSession:
         # Record the profile id before announcing "authorized", so whoever waits
         # for the state sees a consistent account row.
         user_id = self.user_id
-        if user_id is not None:
+        from app.services.tg_store import new_mode
+
+        if new_mode():
+            # The isolated tables trust accounts.external_user_id: another MAX user
+            # under this account must not reach them (review R2-1).
+            if user_id is None:
+                raise IdentityMismatch("MAX profile has no user id")
+            await ensure_account_user(self.account_id, user_id)
+            async with database.async_session() as db:
+                await db.execute(update(Account).where(Account.id == self.account_id).values(platform_user_id=user_id))
+                await db.commit()
+            self.identity_ok = True
+        elif user_id is not None:
             try:
                 async with database.async_session() as db:
                     await db.execute(

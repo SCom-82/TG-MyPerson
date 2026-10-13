@@ -323,6 +323,16 @@ async def attach_handlers(alias: str, session: TelegramSession) -> None:
         return
     if session.account_id is None:
         raise RuntimeError(f"Pool: session '{alias}' has no account id")
+    from app.services.account_identity import IdentityMismatch, ensure_account_user
+
+    try:
+        me_id = getattr(session, "me_id", None) or (await session.client.get_me()).id
+        await ensure_account_user(session.account_id, me_id)
+    except IdentityMismatch as exc:
+        # Never write another user's messages into this account (review R2-1).
+        session.last_error = f"identity mismatch: {exc}"
+        log.error("Pool: handlers NOT registered for '%s': %s", alias, exc)
+        return
     try:
         loaded = await tg_store.preload(session.account_id, session.client)
         log.info("Pool: preloaded %d entities for alias '%s'", loaded, alias)

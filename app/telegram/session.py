@@ -27,6 +27,7 @@ class TelegramSession:
     ) -> None:
         self.alias = alias
         self.account_id = account_id
+        self.me_id: int | None = None  # set on start / login: the session's own user
         self.phone = phone
         self._api_id = api_id
         self._api_hash = api_hash
@@ -80,6 +81,7 @@ class TelegramSession:
 
         if await self._client.is_user_authorized():
             me = await self._client.get_me()
+            self.me_id = me.id
             log.info(
                 "[%s] Authorized as %s (id=%s)",
                 self.alias,

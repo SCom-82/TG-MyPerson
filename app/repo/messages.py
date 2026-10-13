@@ -16,7 +16,8 @@ from app.repo.rows import MessageRow
 async def upsert_message(db: AsyncSession, account_id: int, chat_id: int, row: MessageRow) -> int:
     """ON CONFLICT (account_id, chat_id, external_id). Returns the internal message id.
 
-    Merge rules (TG + MAX): a non-edited copy never overwrites an edited one;
+    Merge rules (TG + MAX): a non-edited copy never overwrites an edited one,
+    an older edit never overwrites a newer one (edited_at);
     deleted_at once set stays; views = coalesce(new, old); is_outgoing is
     recomputed every time as sender == accounts.external_user_id (the
     platform hint only without a user sender or while the account's own id
@@ -80,7 +81,11 @@ async def upsert_message(db: AsyncSession, account_id: int, chat_id: int, row: M
             "views": func.coalesce(ex.views, t.views),
             "raw": ex.raw,
         },
-        where=or_(t.is_edited.is_(False), ex.is_edited),
+        # An older edit arriving late must not overwrite a newer one (review 13.10).
+        where=or_(
+            t.is_edited.is_(False),
+            and_(ex.is_edited, or_(t.edited_at.is_(None), ex.edited_at.is_(None), ex.edited_at >= t.edited_at)),
+        ),
     ).returning(Message.id)
     message_id = (await db.execute(stmt)).scalar_one_or_none()
     if message_id is None:

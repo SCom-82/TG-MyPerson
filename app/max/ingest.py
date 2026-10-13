@@ -73,6 +73,11 @@ class MaxIngest:
     async def on_frame(self, opcode: int, cmd: int, payload: dict | None) -> None:
         if cmd != normalize.SERVER_PUSH or opcode not in normalize.JOURNALED_OPCODES:
             return
+        if new_mode() and not getattr(self.session, "identity_ok", False):
+            # Not yet confirmed (or mismatched) profile: nothing goes into the
+            # account's tables; the gap fill after authorization catches up.
+            log.warning("max[%s]: frame opcode=%s before identity check — dropped", self.session.alias, opcode)
+            return
         payload = payload or {}
         # PyMax runs every inbound frame in its own task (connection.py), so frames
         # of one chat would race: a delete processed before the insert of its

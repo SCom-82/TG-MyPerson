@@ -141,3 +141,40 @@ def _row(mid):
         "is_outgoing": False, "is_edited": False, "edit_date": None, "views": None, "raw_data": {},
         "deleted_at": None,
     }
+
+
+async def test_other_profile_under_account_is_stopped(env, monkeypatch):  # noqa: F811
+    """R2-1: the account knows another MAX user → error, nothing stored."""
+    from tests.test_max_ingest import _wait_for
+
+    monkeypatch.setattr(settings, "storage_mode", "new")
+    monkeypatch.setattr(settings, "shadow_legacy_write", False)
+    sql("SELECT create_account_partitions(%s)", (env.account_id,))
+    sql("UPDATE accounts SET external_user_id = 777 WHERE id = %s", (env.account_id,))
+    try:
+        env.server.user_id = ME
+        resp = await env.client.post("/api/v1/auth/qr", headers=env.h())
+        assert resp.status_code == 202, resp.text
+        env.server.qr_confirmed = True
+        session = await env.session()
+        assert await _wait_for(lambda: session.state == "error")
+        assert "identity mismatch" in session.last_error
+        assert not session.identity_ok
+        async with account_db(env.account_id) as db:
+            assert (await db.execute(select(Message))).first() is None
+    finally:
+        await env.pool.stop_all()
+        for t in ("raw_events", "snapshot_members", "member_snapshots", "sync_state", "media", "messages",
+                  "chats", "users"):
+            sql(f'ALTER TABLE "{t}" DETACH PARTITION "{t}_a{env.account_id}"')
+            sql(f'DROP TABLE "{t}_a{env.account_id}"')
+
+
+async def test_frames_before_identity_check_are_dropped(new_env):
+    from app.max.ingest import MaxIngest
+
+    session = await new_env.session()
+    ingest = MaxIngest(session) if session.ingest is None else session.ingest
+    session.identity_ok = False
+    await ingest.on_frame(normalize.OP_MESSAGE, normalize.SERVER_PUSH, fx("n03_photo")["frame"]["payload"])
+    assert await _rows(new_env.account_id, Message, Message.id) == []

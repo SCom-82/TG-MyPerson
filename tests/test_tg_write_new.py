@@ -301,7 +301,7 @@ async def test_attach_handlers_preloads_then_registers(accounts):
 
     await tg_store.store_event(accounts.a, event(message(1), sender_entity=user(access_hash=7)))
     client = telethon.TelegramClient(StringSession(), 1, "x")
-    session = SimpleNamespace(account_id=accounts.a, client=client)
+    session = SimpleNamespace(account_id=accounts.a, client=client, me_id=SELF_A)
     with patch("app.telegram.handlers.register_handlers") as reg:
         await pool_module.attach_handlers("iso-a", session)
     reg.assert_called_once_with(client, account_id=accounts.a)

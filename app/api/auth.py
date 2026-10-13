@@ -79,6 +79,7 @@ async def auth_code(req: LoginCodeRequest, request: Request, session: str = Quer
     if result.get("status") == "authorized":
         session_string = tg_session.get_session_string()
         user_id = result.get("user_id")
+        await _require_same_user(alias, tg_session, user_id)
         if session_string:
             await _save_session_to_db(alias, session_string, user_id)
 
@@ -95,6 +96,7 @@ async def auth_session(req: SessionImportRequest, request: Request, session: str
     if result.get("status") == "authorized":
         session_string = tg_session.get_session_string()
         user_id = result.get("user_id")
+        await _require_same_user(alias, tg_session, user_id)
         if session_string:
             await _save_session_to_db(alias, session_string, user_id)
         # Restart in pool with new session string
@@ -122,6 +124,32 @@ async def auth_logout(request: Request, session: str = Query(_DEFAULT_ALIAS)):
 # ---------------------------------------------------------------------------
 # DB helpers
 # ---------------------------------------------------------------------------
+
+async def _require_same_user(alias: str, tg_session, user_id: int | None) -> None:
+    """409 — and nothing saved — when the session is another Telegram user than
+    the account (accounts.external_user_id, or tg_user_id before migration 010
+    data), or a user another TG account already has (review R2-1)."""
+    if not user_id:
+        return
+    async with async_session() as db:
+        account = (await db.execute(select(Account).where(Account.alias == alias))).scalar_one_or_none()
+        taken = (await db.execute(
+            select(Account.alias).where(
+                Account.platform == "telegram", Account.alias != alias,
+                (Account.external_user_id == user_id) | (Account.tg_user_id == user_id),
+            )
+        )).scalars().first()
+    known = None if account is None else (account.external_user_id or account.tg_user_id)
+    if (known is not None and known != user_id) or taken is not None:
+        detail = (
+            f"session belongs to Telegram user {user_id}, account '{alias}' is user {known}"
+            if known is not None and known != user_id
+            else f"Telegram user {user_id} is already account '{taken}'"
+        )
+        log.error("auth: %s — session not saved", detail)
+        await pool.stop(alias)  # drop the in-memory client of the wrong user
+        raise HTTPException(status_code=409, detail=detail)
+
 
 async def _save_session_to_db(alias: str, session_string: str, user_id: int | None) -> None:
     """Persist session string to account_sessions and update accounts.tg_user_id."""
