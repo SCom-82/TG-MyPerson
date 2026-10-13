@@ -437,7 +437,8 @@ class MaxSession:
             try:
                 async with database.async_session() as db:
                     await db.execute(
-                        update(Account).where(Account.id == self.account_id).values(platform_user_id=user_id)
+                        update(Account).where(Account.id == self.account_id)
+                        .values(platform_user_id=user_id, external_user_id=user_id)
                     )
                     await db.commit()
             except Exception:  # noqa: BLE001

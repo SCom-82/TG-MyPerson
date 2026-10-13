@@ -22,7 +22,7 @@ from app.models import (
     ChatMembersSnapshot,
     TgChat,
 )
-from app.services import registry_service
+from app.services import registry_service, tg_store
 from app.telegram.pool import pool
 
 router = APIRouter(prefix="/snapshots", tags=["snapshots"])
@@ -185,6 +185,29 @@ async def snapshot_chat(
 
     took_ms = int((time.monotonic() - t0) * 1000)
     members_count = len(members_raw)
+
+    if tg_store.new_mode():
+        snapshot_id = await tg_store.store_snapshot(
+            account_id, session.client, chat_id, list(seen.values()), members_raw, note=note
+        )
+        await tg_store.shadow(
+            "snapshot", lambda: _store_legacy_snapshot(chat_id, account_id, members_raw, note)
+        )
+    else:
+        snapshot_id = await _store_legacy_snapshot(chat_id, account_id, members_raw, note)
+
+    return {
+        "snapshot_id": snapshot_id,
+        "members_count": members_count,
+        "took_ms": took_ms,
+        "chat_id": chat_id,
+        "account_id": account_id,
+    }
+
+
+async def _store_legacy_snapshot(chat_id: int, account_id: int, members_raw: list[dict], note: str | None) -> int:
+    """chat_members_snapshots + records + users_registry + chat_access (tg_* era)."""
+    members_count = len(members_raw)
     now = datetime.now(timezone.utc)
 
     async with async_session() as db:
@@ -246,13 +269,7 @@ async def snapshot_chat(
 
         await db.commit()
 
-    return {
-        "snapshot_id": snapshot_id,
-        "members_count": members_count,
-        "took_ms": took_ms,
-        "chat_id": chat_id,
-        "account_id": account_id,
-    }
+    return snapshot_id
 
 
 # ---------------------------------------------------------------------------

@@ -18,7 +18,8 @@ from app.schemas import (
     UnresolvedUserItem,
 )
 from app.services.user_service import get_users, upsert_user
-from app.services import registry_service
+from app.config import settings
+from app.services import registry_service, tg_store
 from app.telegram.pool import require_authorized_client, pool
 
 log = logging.getLogger(__name__)
@@ -51,7 +52,12 @@ async def resolve_user(req: ResolveUserRequest, request: Request, db: AsyncSessi
         entity = await client.get_entity(username)
 
         if isinstance(entity, User):
-            await upsert_user(db, entity)
+            account_id = getattr(request.state, "account_id", None)
+            if tg_store.new_mode() and account_id is not None:
+                await tg_store.store_resolved(account_id, entity)
+                await tg_store.shadow("resolve", lambda: upsert_user(db, entity))
+            else:
+                await upsert_user(db, entity)
             return ResolveResponse(
                 id=entity.id,
                 type='user',
@@ -158,7 +164,9 @@ async def bulk_resolve_by_id(
                         is_premium=bool(getattr(entity, "premium", False)),
                     )
                     resolved.append(item)
-                    if req.persist:
+                    if req.persist and tg_store.new_mode() and account_id is not None:
+                        await tg_store.store_resolved(account_id, entity)
+                    if req.persist and (not tg_store.new_mode() or settings.shadow_legacy_write):
                         member_data = {
                             "tg_user_id": entity.id,
                             "username": item.username,

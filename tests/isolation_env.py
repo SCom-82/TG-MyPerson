@@ -181,3 +181,56 @@ def has_privilege(table: str, priv: str = "SELECT") -> bool:
     [(ok,)] = sql("SELECT has_table_privilege(%s, %s, %s)", (APP_ROLE, table, priv), fetch=True)
     return ok
 
+
+
+# ---------------------------------------------------------------------------
+# STORAGE_MODE=new test runs: accounts created by any test get partitions
+# ---------------------------------------------------------------------------
+
+_NEW_MODE_TRIGGERS = """
+CREATE OR REPLACE FUNCTION test_iso_account_ins() RETURNS trigger LANGUAGE plpgsql AS $f$
+BEGIN
+    PERFORM create_account_partitions(NEW.id);
+    RETURN NEW;
+END $f$;
+CREATE OR REPLACE FUNCTION test_iso_account_del() RETURNS trigger LANGUAGE plpgsql AS $f$
+DECLARE t text;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['raw_events','snapshot_members','member_snapshots','sync_state',
+                             'media','messages','chats','users'] LOOP
+        IF to_regclass(t || '_a' || OLD.id) IS NOT NULL THEN
+            EXECUTE format('ALTER TABLE %I DETACH PARTITION %I', t, t || '_a' || OLD.id);
+            EXECUTE format('DROP TABLE %I', t || '_a' || OLD.id);
+        END IF;
+    END LOOP;
+    RETURN OLD;
+END $f$;
+DROP TRIGGER IF EXISTS test_iso_account_ins ON accounts;
+DROP TRIGGER IF EXISTS test_iso_account_del ON accounts;
+CREATE TRIGGER test_iso_account_ins AFTER INSERT ON accounts FOR EACH ROW EXECUTE FUNCTION test_iso_account_ins();
+CREATE TRIGGER test_iso_account_del BEFORE DELETE ON accounts FOR EACH ROW EXECUTE FUNCTION test_iso_account_del();
+"""
+
+_NEW_MODE_TRIGGERS_DROP = """
+DROP TRIGGER IF EXISTS test_iso_account_ins ON accounts;
+DROP TRIGGER IF EXISTS test_iso_account_del ON accounts;
+DROP FUNCTION IF EXISTS test_iso_account_ins();
+DROP FUNCTION IF EXISTS test_iso_account_del();
+"""
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _new_mode_account_partitions():
+    """Test infrastructure only (not part of migration 010): with
+    STORAGE_MODE=new, every account a test inserts gets its partitions and
+    loses them again on delete, so suites written for legacy run unchanged."""
+    from app.config import settings
+
+    if settings.storage_mode != "new":
+        yield
+        return
+    sql(_NEW_MODE_TRIGGERS)
+    try:
+        yield
+    finally:
+        sql(_NEW_MODE_TRIGGERS_DROP)

@@ -138,6 +138,9 @@ async def _save_session_to_db(alias: str, session_string: str, user_id: int | No
             # Update tg_user_id if provided
             if user_id and not account.tg_user_id:
                 account.tg_user_id = user_id
+            # The account's own id for the isolated tables (migration 010).
+            if user_id and not account.external_user_id:
+                account.external_user_id = user_id
 
             # Upsert active account_session
             sess_result = await db.execute(

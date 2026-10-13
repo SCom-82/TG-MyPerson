@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     # new tables, shadow-write the old ones while SHADOW_LEGACY_WRITE is on.
     storage_mode: Literal["legacy", "new"] = "legacy"
     shadow_legacy_write: bool = True
+    # Daily address-book sync of TG accounts (new mode).
+    contacts_sync_hours: float = 24
 
     model_config = {
         "env_file": ".env",

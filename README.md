@@ -198,6 +198,14 @@ automatically in-process. It exists only as a manual escape hatch.
 - Контакты: `people` → `identities` → `users` аккаунта; склейка TG↔MAX по телефону (E.164).
 - Роль приложения `tg_myperson_app` (без superuser) получает права на родителей и служебные таблицы,
   на партиции — нет. Миграции — под владельцем: `MIGRATIONS_DATABASE_URL`.
+- Запись при `STORAGE_MODE=new` (PR-2): TG (`app/services/tg_store.py`, нормализатор
+  `app/telegram/normalize.py`, полный `raw` = `message.to_dict()`) и MAX (`app/max/store_new.py`)
+  пишут в таблицы аккаунта; старые `tg_*`/`max_*` — теневой записью, пока `SHADOW_LEGACY_WRITE=true`
+  (ошибка тени — только `warning`). Хендлеры, бэкфилл (`(аккаунт, чат)`), SSE (подписка по аккаунту),
+  удаления TG (`deleted_at`), ежедневный `contacts_sync`, предзагрузка `access_hash` в кэш Telethon
+  на старте сессии (без «прогрева» `vault-anomaly-sync`). Чтение API пока из старых таблиц (PR-3).
+- Замер полного `raw` на живых сообщениях (только чтение):
+  `python -m app.scripts.measure_raw --alias personal-ro --chat <id> --limit 1000`.
 - Аккаунт целиком (infra-ops, под владельцем):
   `python -m app.scripts.account_partitions list|grants|dump|restore|drop --account N`
   (`drop` — только выключенный аккаунт и дамп моложе часа, `--confirm <alias>`).

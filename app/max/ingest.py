@@ -22,7 +22,10 @@ from typing import TYPE_CHECKING, Any
 
 from app import database
 from app.max import normalize, repo
+from app.max.store_new import NewMaxStore
 from app.max.stream import max_stream_manager
+from app.services.stream_service import stream_manager
+from app.services.tg_store import new_mode, shadow
 
 if TYPE_CHECKING:
     from app.max.session import MaxSession
@@ -54,6 +57,17 @@ class MaxIngest:
         contact = getattr(me, "contact", None)
         return getattr(contact, "id", None)
 
+    @property
+    def new(self) -> NewMaxStore | None:
+        """STORAGE_MODE=new: the account's tables are primary, max_* a shadow."""
+        return NewMaxStore(self.session.account_id) if new_mode() else None
+
+    async def _broadcast(self, data: dict) -> None:
+        if new_mode():
+            await stream_manager.broadcast(data, self.session.account_id)
+        else:
+            await max_stream_manager.broadcast(data)
+
     # -- frames --------------------------------------------------------------
 
     async def on_frame(self, opcode: int, cmd: int, payload: dict | None) -> None:
@@ -77,13 +91,23 @@ class MaxIngest:
     async def _process_frame(self, opcode: int, payload: dict) -> None:
         received_at = datetime.now(timezone.utc)
         self.session.last_event_at = received_at
-        try:
-            async with database.async_session() as db:
-                raw_id = await repo.insert_raw_event(db, self.session.account_id, opcode, payload)
-                await db.commit()
-        except Exception:  # noqa: BLE001
-            log.exception("max[%s]: failed to journal frame opcode=%s", self.session.alias, opcode)
-            raw_id = None
+        new = self.new
+        new_raw_id = None
+        if new is not None:
+            try:
+                new_raw_id = await new.journal(opcode, payload)
+            except Exception:  # noqa: BLE001
+                log.exception("max[%s]: failed to journal frame opcode=%s", self.session.alias, opcode)
+        raw_id = None
+        if new is None or self._shadow_on():
+            try:
+                async with database.async_session() as db:
+                    raw_id = await repo.insert_raw_event(db, self.session.account_id, opcode, payload)
+                    await db.commit()
+            except Exception:  # noqa: BLE001
+                log.log(logging.WARNING if new else logging.ERROR,
+                        "max[%s]: failed to journal frame opcode=%s", self.session.alias, opcode,
+                        exc_info=True)
 
         error: str | None = None
         normalized = False
@@ -100,6 +124,11 @@ class MaxIngest:
             error = f"{type(exc).__name__}: {exc}"[:_ERROR_MAX_LEN]
             log.warning("max[%s]: frame opcode=%s not normalized: %s", self.session.alias, opcode, error)
 
+        if new_raw_id is not None:
+            try:
+                await new.finish_journal(new_raw_id, normalized=normalized, error=error)
+            except Exception:  # noqa: BLE001
+                log.exception("max[%s]: failed to update raw event %s", self.session.alias, new_raw_id)
         if raw_id is not None:
             try:
                 async with database.async_session() as db:
@@ -114,7 +143,7 @@ class MaxIngest:
             return await self._on_delete(msg.chat_id, [msg.id], received_at)
         event = "edit" if is_edit or str(getattr(msg.status, "value", msg.status)) == "EDITED" else "message"
         row = await self.store_message(msg, received_at=received_at, is_edit=event == "edit")
-        await max_stream_manager.broadcast(self._event_payload(event, row))
+        await self._broadcast(self._event_payload(event, row))
         return None
 
     async def store_message(self, msg: Any, *, received_at: datetime | None = None, is_edit: bool = False,
@@ -130,6 +159,28 @@ class MaxIngest:
         cid = msg.chat_id if msg.chat_id is not None else chat_id
         if advance_cursor is None:
             advance_cursor = cid in self.session.caught_up
+        new = self.new
+        if new is None:
+            return await self._store_legacy(msg, cid, received_at, is_edit, advance_cursor)
+
+        chat_type = await new.chat_type(cid) if cid is not None else None
+        row, media = normalize.normalize_message(
+            msg, me_id=self.me_id, chat_id=cid, chat_type=chat_type, received_at=received_at, is_edit=is_edit,
+        )
+        missing = await new.store_message(
+            row, media,
+            chat_type=chat_type or normalize.guess_chat_type(msg, row["chat_id"]),
+            advance_cursor=advance_cursor, time_ms=msg.time,
+        )
+        await shadow("max message", lambda: self._store_legacy(
+            msg, cid, received_at, is_edit, advance_cursor, fill=False
+        ))
+        if missing:
+            self._spawn(self.fill_users(missing))
+        return row
+
+    async def _store_legacy(self, msg: Any, cid: int | None, received_at: datetime | None, is_edit: bool,
+                            advance_cursor: bool, *, fill: bool = True) -> dict:
         async with database.async_session() as db:
             chat = await repo.get_chat(db, cid) if cid is not None else None
             row, media = normalize.normalize_message(
@@ -150,23 +201,40 @@ class MaxIngest:
             await db.commit()
         if row["from_user_id"] is not None:
             self._known_users.add(row["from_user_id"])
-        if missing:
+        if missing and fill:
             self._spawn(self.fill_users(missing))
         return row
 
     async def _on_delete(self, chat_id: int, ids: list[int], received_at: datetime) -> str | None:
-        async with database.async_session() as db:
-            found = await repo.mark_deleted(db, chat_id, ids, received_at)
-            await db.commit()
-        await max_stream_manager.broadcast(
+        new = self.new
+        if new is not None:
+            found = await new.mark_deleted(chat_id, ids, received_at)
+            await shadow("max delete", lambda: self._delete_legacy(chat_id, ids, received_at))
+        else:
+            found = await self._delete_legacy(chat_id, ids, received_at)
+        await self._broadcast(
             {"event": "delete", "platform": "max", "chat_id": chat_id, "message_ids": ids}
         )
         unknown = set(ids) - found
         # No tombstones for messages we never had (ADR §2.G).
         return "delete_unknown_message" if unknown else None
 
+    async def _delete_legacy(self, chat_id: int, ids: list[int], received_at: datetime) -> set[int]:
+        async with database.async_session() as db:
+            found = await repo.mark_deleted(db, chat_id, ids, received_at)
+            await db.commit()
+        return found
+
     async def _on_chat(self, payload: dict) -> None:
         chat = normalize.parse_chat(payload)
+        new = self.new
+        if new is not None:
+            await new.upsert_chats([normalize.normalize_chat(chat)])
+            await shadow("max chat", lambda: self._chat_legacy(chat))
+        else:
+            await self._chat_legacy(chat)
+
+    async def _chat_legacy(self, chat: Any) -> None:
         async with database.async_session() as db:
             await repo.upsert_chat(db, normalize.normalize_chat(chat))
             await db.commit()
@@ -176,15 +244,27 @@ class MaxIngest:
     async def on_authorized(self, client: Any) -> None:
         """Chats and contacts from the login response (no extra network)."""
         me_id = self.me_id
+        chats_ = list(getattr(client, "chats", None) or [])
+        contacts = [c for c in (getattr(client, "contacts", None) or []) if c is not None]
+        me = getattr(getattr(client, "me", None), "contact", None)
+        users = contacts + ([me] if me is not None else [])
+        new = self.new
+        if new is not None:
+            await new.upsert_chats([normalize.normalize_chat(c) for c in chats_])
+            await new.upsert_users([normalize.normalize_user(u) for u in contacts], "contact", is_contact=True)
+            if me is not None:
+                await new.upsert_users([normalize.normalize_user(me)], "dialog")
+            await shadow("max login", lambda: self._authorized_legacy(chats_, users, me_id))
+        else:
+            await self._authorized_legacy(chats_, users, me_id)
+        self._known_users.update(u.id for u in users)
+
+    async def _authorized_legacy(self, chats_: list, users: list, me_id: int | None) -> None:
         async with database.async_session() as db:
-            for chat in getattr(client, "chats", None) or []:
+            for chat in chats_:
                 await repo.upsert_chat(db, normalize.normalize_chat(chat))
-            contacts = [c for c in (getattr(client, "contacts", None) or []) if c is not None]
-            me = getattr(getattr(client, "me", None), "contact", None)
-            users = contacts + ([me] if me is not None else [])
             await repo.upsert_users(db, [normalize.normalize_user(u, me_id=me_id) for u in users])
             await db.commit()
-        self._known_users.update(u.id for u in users)
 
     async def fill_users(self, user_ids: set[int]) -> None:
         """Fetch unknown senders in one batch and fill their stub rows (best effort)."""
@@ -192,14 +272,25 @@ class MaxIngest:
         if client is None or not user_ids:
             return
         try:
-            users = await client.get_users(sorted(user_ids))
-            async with database.async_session() as db:
-                await repo.upsert_users(
-                    db, [normalize.normalize_user(u, me_id=self.me_id) for u in users if u is not None]
-                )
-                await db.commit()
+            users = [u for u in await client.get_users(sorted(user_ids)) if u is not None]
+            new = self.new
+            if new is not None:
+                await new.upsert_users([normalize.normalize_user(u) for u in users], "message")
+                await shadow("max users", lambda: self._users_legacy(users))
+            else:
+                await self._users_legacy(users)
         except Exception:  # noqa: BLE001
             log.warning("max[%s]: failed to fetch users %s", self.session.alias, sorted(user_ids), exc_info=True)
+
+    async def _users_legacy(self, users: list) -> None:
+        async with database.async_session() as db:
+            await repo.upsert_users(db, [normalize.normalize_user(u, me_id=self.me_id) for u in users])
+            await db.commit()
+
+    def _shadow_on(self) -> bool:
+        from app.config import settings
+
+        return settings.shadow_legacy_write
 
     def _spawn(self, coro) -> None:  # noqa: ANN001
         """Tied to the session: stop() cancels it, a stopped session writes nothing."""

@@ -2,10 +2,14 @@
 
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 
 from app import database
 from app.max import repo
 from app.max.config import MaxSettings
+from app.repo import raw_events
+from app.services.tg_store import new_mode
+from app.storage import owner_db
 
 log = logging.getLogger(__name__)
 
@@ -18,6 +22,12 @@ async def purge_raw_events_once(settings: MaxSettings) -> int:
         async with database.async_session() as db:
             deleted = await repo.purge_raw_events(db, settings.raw_events_retention_days)
             await db.commit()
+        if new_mode():
+            # raw_events of every account: a service operation under the owner scope.
+            cutoff = datetime.now(timezone.utc) - timedelta(days=settings.raw_events_retention_days)
+            async with owner_db() as db:
+                deleted += await raw_events.purge_older_than(db, cutoff)
+                await db.commit()
         if deleted:
             log.info("max raw events: purged %d row(s) older than %d days", deleted, settings.raw_events_retention_days)
         return deleted

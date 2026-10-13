@@ -24,7 +24,9 @@ from sqlalchemy import select
 
 from app import database
 from app.max import normalize, repo
+from app.max.store_new import Cursor, NewMaxStore
 from app.models import MaxChat, MaxSyncState
+from app.services.tg_store import new_mode, shadow
 
 if TYPE_CHECKING:
     from app.max.session import MaxSession
@@ -39,8 +41,9 @@ MAX_CHAT_PAGES = 50  # fetch_chats pages per sync — guard against a non-advanc
 # Module attribute so tests can skip the human-pace pauses.
 _sleep = asyncio.sleep
 
-# chat_id → running backfill (MAX only; TG keeps its own dict)
-_backfill_tasks: dict[int, asyncio.Task] = {}
+# (account, chat) → running backfill (MAX only; TG keeps its own dict). Two MAX
+# accounts backfill the same chat id independently (ТЗ 2026-10-13 T10).
+_backfill_tasks: dict[tuple[int, int], asyncio.Task] = {}
 
 
 def _page(remaining: int, has_cursor: bool) -> int:
@@ -50,9 +53,12 @@ def _page(remaining: int, has_cursor: bool) -> int:
     return min(PAGE_SIZE, remaining + (1 if has_cursor else 0))
 
 
-def is_backfill_running(chat_id: int) -> bool:
-    task = _backfill_tasks.get(chat_id)
-    return task is not None and not task.done()
+def is_backfill_running(chat_id: int, account_id: int | None = None) -> bool:
+    """account_id None: running for any account."""
+    return any(
+        cid == chat_id and (account_id is None or acc == account_id) and not task.done()
+        for (acc, cid), task in list(_backfill_tasks.items())
+    )
 
 
 class SessionUnavailable(Exception):
@@ -67,6 +73,11 @@ class MaxSync:
 
     def install(self) -> None:
         self.session.authorized_hooks.append(self.on_authorized)
+
+    @property
+    def new(self) -> NewMaxStore | None:
+        """STORAGE_MODE=new: cursors and chats of the account's own tables."""
+        return NewMaxStore(self.session.account_id) if new_mode() else None
 
     def _client(self) -> Any:
         client = self.session.client
@@ -102,10 +113,7 @@ class MaxSync:
             fresh = [c for c in chats if c.id not in seen]
             if not fresh:
                 break
-            async with database.async_session() as db:
-                for chat in fresh:
-                    await repo.upsert_chat(db, normalize.normalize_chat(chat))
-                await db.commit()
+            await self._store_chats(fresh)
             seen.update(c.id for c in fresh)
             times = [c.last_event_time for c in chats if c.last_event_time]
             next_marker = min(times) if times else None
@@ -114,10 +122,25 @@ class MaxSync:
             marker = next_marker
         return len(seen)
 
+    async def _store_chats(self, fresh: list) -> None:
+        new = self.new
+        if new is not None:
+            await new.upsert_chats([normalize.normalize_chat(c) for c in fresh])
+            await shadow("max chats", lambda: self._store_chats_legacy(fresh))
+        else:
+            await self._store_chats_legacy(fresh)
+
+    async def _store_chats_legacy(self, fresh: list) -> None:
+        async with database.async_session() as db:
+            for chat in fresh:
+                await repo.upsert_chat(db, normalize.normalize_chat(chat))
+            await db.commit()
+
     # -- backfill -------------------------------------------------------------
 
     async def start_backfill(self, chat_id: int, limit: int, direction: str, days: int | None) -> dict:
-        if is_backfill_running(chat_id):
+        account_id = self.session.account_id
+        if is_backfill_running(chat_id, account_id):
             return {"status": "already_running", "chat_id": chat_id}
         self._client()  # 503 now rather than inside the task
         if direction == "forward":
@@ -126,11 +149,15 @@ class MaxSync:
                 return {"status": "error", "chat_id": chat_id,
                         "detail": "no newest_time_ms for this chat yet: run a backward backfill first"}
         task = asyncio.create_task(self._run_backfill(chat_id, limit, direction, days))
-        _backfill_tasks[chat_id] = task
-        task.add_done_callback(lambda t: _backfill_tasks.get(chat_id) is t and _backfill_tasks.pop(chat_id))
+        key = (account_id, chat_id)
+        _backfill_tasks[key] = task
+        task.add_done_callback(lambda t: _backfill_tasks.get(key) is t and _backfill_tasks.pop(key))
         return {"status": "started", "chat_id": chat_id, "limit": limit, "direction": direction, "days": days}
 
-    async def _state(self, chat_id: int) -> MaxSyncState | None:
+    async def _state(self, chat_id: int) -> MaxSyncState | Cursor | None:
+        new = self.new
+        if new is not None:
+            return await new.cursor(chat_id)
         async with database.async_session() as db:
             return (await db.execute(select(MaxSyncState).where(MaxSyncState.chat_id == chat_id))).scalar_one_or_none()
 
@@ -213,6 +240,14 @@ class MaxSync:
         return stored
 
     async def _move_oldest(self, chat_id: int, message_id: int, time_ms: int, stored_delta: int) -> None:
+        new = self.new
+        if new is not None:
+            await new.move_oldest(chat_id, message_id, time_ms, stored_delta)
+            await shadow("max cursor", lambda: self._move_oldest_legacy(chat_id, message_id, time_ms, stored_delta))
+            return
+        await self._move_oldest_legacy(chat_id, message_id, time_ms, stored_delta)
+
+    async def _move_oldest_legacy(self, chat_id: int, message_id: int, time_ms: int, stored_delta: int) -> None:
         async with database.async_session() as db:
             state = (await db.execute(select(MaxSyncState).where(MaxSyncState.chat_id == chat_id))).scalar_one()
             if state.oldest_time_ms is None or time_ms < state.oldest_time_ms:
@@ -222,6 +257,14 @@ class MaxSync:
             await db.commit()
 
     async def _finish_backfill(self, chat_id: int, fully_synced: bool | None) -> None:
+        new = self.new
+        if new is not None:
+            await new.finish_backfill(chat_id, fully_synced)
+            await shadow("max backfill", lambda: self._finish_backfill_legacy(chat_id, fully_synced))
+            return
+        await self._finish_backfill_legacy(chat_id, fully_synced)
+
+    async def _finish_backfill_legacy(self, chat_id: int, fully_synced: bool | None) -> None:
         async with database.async_session() as db:
             state = (await db.execute(select(MaxSyncState).where(MaxSyncState.chat_id == chat_id))).scalar_one_or_none()
             if state is None:
@@ -310,7 +353,19 @@ class MaxSync:
 
         All chats: MAX keeps every chat (brief requirement), is_monitored does not
         gate the gap fill. A chat without messages has no tail either.
+        STORAGE_MODE=new: only the account's own chats.
         """
+        new = self.new
+        if new is not None:
+            candidates, no_tail = [], set()
+            for chat_id, last_ms, cursor in await new.catchup_rows():
+                if last_ms is None:
+                    no_tail.add(chat_id)
+                elif cursor is None or cursor.newest_time_ms is None or last_ms > cursor.newest_time_ms:
+                    candidates.append((chat_id, cursor))
+                else:
+                    no_tail.add(chat_id)
+            return candidates, no_tail
         async with database.async_session() as db:
             rows = (
                 await db.execute(
@@ -331,6 +386,14 @@ class MaxSync:
         return candidates, no_tail
 
     async def _mark_catchup(self, chat_id: int) -> None:
+        new = self.new
+        if new is not None:
+            await new.mark_catchup(chat_id)
+            await shadow("max catch-up", lambda: self._mark_catchup_legacy(chat_id))
+            return
+        await self._mark_catchup_legacy(chat_id)
+
+    async def _mark_catchup_legacy(self, chat_id: int) -> None:
         async with database.async_session() as db:
             state = (await db.execute(select(MaxSyncState).where(MaxSyncState.chat_id == chat_id))).scalar_one_or_none()
             if state is not None:

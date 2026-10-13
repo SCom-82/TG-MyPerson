@@ -23,9 +23,9 @@ from app.max import pool as max_pool_module
 from app.max.config import max_settings
 from app.max.maintenance import raw_events_loop
 from app.max.api import MAX_API_ROUTERS, max_api_router
+from app.services.contacts_sync import contacts_sync_loop
 from app.services.partition_maintenance import ensure_partitions, partition_loop
-from app.telegram.pool import pool
-from app.telegram.handlers import register_handlers
+from app.telegram.pool import attach_handlers, pool
 
 logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
@@ -43,7 +43,7 @@ async def lifespan(app: FastAPI):
     # Register event handlers for ALL authorized sessions (PR #4: was 'work'-only)
     for alias, session in pool._pool.items():
         if session.client and await session.client.is_user_authorized():
-            register_handlers(session.client)
+            await attach_handlers(alias, session)
             log.info("Lifespan: registered handlers for alias '%s'", alias)
 
     # Self-sufficient audit_logs partition maintenance (ADR 2026-06-16):
@@ -51,6 +51,8 @@ async def lifespan(app: FastAPI):
     # No external cron/sidecar — rotation lives and dies with this process.
     await ensure_partitions()
     partition_task = asyncio.create_task(partition_loop())
+    # Address books of TG accounts into users (STORAGE_MODE=new, ТЗ §5.1).
+    contacts_task = asyncio.create_task(contacts_sync_loop()) if settings.storage_mode == "new" else None
 
     # MAX (ADR §2.C/§2.I): only with MAX_ENABLED=true; started in the background
     # so a hanging MAX handshake never delays startup or touches the TG pool.
@@ -64,7 +66,7 @@ async def lifespan(app: FastAPI):
 
     # Stop the partition loop, then shut down all sessions
     partition_task.cancel()
-    for task in (max_start_task, max_retention_task):
+    for task in (max_start_task, max_retention_task, contacts_task):
         if task is not None:
             task.cancel()
     if max_pool_module.max_pool is not None:

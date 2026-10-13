@@ -2,6 +2,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from app.services import tg_store
 from app.telegram.pool import require_authorized_client
 
 log = logging.getLogger(__name__)
@@ -33,6 +34,10 @@ async def list_contacts(
                 "is_bot": u.bot or False,
                 "is_self": u.is_self or False,
             })
+
+        if tg_store.new_mode() and getattr(request.state, "account_id", None) is not None:
+            # A live read of the address book also refreshes it in the account's users.
+            await tg_store.store_contacts(request.state.account_id, users, full=False)
 
         total = len(items)
         paginated = items[offset:offset + limit]

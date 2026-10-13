@@ -75,6 +75,7 @@ class TelegramClientPool:
             api_id=settings.tg_api_id,
             api_hash=settings.tg_api_hash,
             initial_session_string=session_string,
+            account_id=account.id,
         )
         return tg_session
 
@@ -301,11 +302,33 @@ async def _maybe_register_handlers(alias: str, session: TelegramSession) -> None
         return
     try:
         if await session.client.is_user_authorized():
-            from app.telegram.handlers import register_handlers
-            register_handlers(session.client)
+            await attach_handlers(alias, session)
             log.info("Pool: re-registered handlers for alias '%s' after restart/reload", alias)
     except Exception as exc:
         log.warning("Pool: failed to re-register handlers for '%s': %s", alias, exc)
+
+
+async def attach_handlers(alias: str, session: TelegramSession) -> None:
+    """Handlers for an authorized session.
+
+    STORAGE_MODE=new: first the account's access_hash cache is preloaded into
+    Telethon (ТЗ §5.2 — no warm-up sync after a restart), then handlers bound
+    to the account. legacy: handlers exactly as before.
+    """
+    from app.services import tg_store
+    from app.telegram.handlers import register_handlers
+
+    if not tg_store.new_mode():
+        register_handlers(session.client)
+        return
+    if session.account_id is None:
+        raise RuntimeError(f"Pool: session '{alias}' has no account id")
+    try:
+        loaded = await tg_store.preload(session.account_id, session.client)
+        log.info("Pool: preloaded %d entities for alias '%s'", loaded, alias)
+    except Exception as exc:  # a failed preload must not leave the account without handlers
+        log.error("Pool: entity preload failed for '%s': %s", alias, exc)
+    register_handlers(session.client, account_id=session.account_id)
 
 
 # Singleton pool instance

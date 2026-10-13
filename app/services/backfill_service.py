@@ -11,13 +11,18 @@ from app.services.chat_service import upsert_chat
 from app.services.message_service import upsert_message
 log = logging.getLogger(__name__)
 
-# Track running backfill tasks
-_backfill_tasks: dict[int, asyncio.Task] = {}
+# Running backfill tasks by (account, chat): two accounts backfill the same
+# chat independently (ТЗ 2026-10-13 T10). The account part is the account id,
+# or the alias for a session that has none.
+_backfill_tasks: dict[tuple[int | str, int], asyncio.Task] = {}
 
 
-def is_backfill_running(chat_id: int) -> bool:
-    task = _backfill_tasks.get(chat_id)
-    return task is not None and not task.done()
+def is_backfill_running(chat_id: int, account: int | str | None = None) -> bool:
+    """account None: running for any account (legacy status view)."""
+    for (acc, cid), task in list(_backfill_tasks.items()):
+        if cid == chat_id and (account is None or acc == account) and not task.done():
+            return True
+    return False
 
 
 async def start_backfill(
@@ -27,17 +32,26 @@ async def start_backfill(
     direction: str = "backward",
 ) -> dict:
     """Start a background backfill for a given chat."""
-    if is_backfill_running(chat_id):
-        return {"status": "already_running", "chat_id": chat_id}
-
+    from app.services import tg_store
     from app.telegram.pool import pool
     tg_session = await pool.get(alias)
+    account = getattr(tg_session, "account_id", None)
+    key = (account if isinstance(account, int) else alias, chat_id)
+    if is_backfill_running(chat_id, key[0]):
+        return {"status": "already_running", "chat_id": chat_id}
+
     client = tg_session.client
     if not client or not await client.is_user_authorized():
         return {"status": "error", "detail": f"Session '{alias}' not authorized"}
 
-    task = asyncio.create_task(_run_backfill(chat_id, limit, alias, direction))
-    _backfill_tasks[chat_id] = task
+    if tg_store.new_mode():
+        if not isinstance(account, int):
+            return {"status": "error", "detail": f"Session '{alias}' has no account"}
+        task = asyncio.create_task(_run_backfill_new(account, chat_id, limit, alias, direction))
+    else:
+        task = asyncio.create_task(_run_backfill(chat_id, limit, alias, direction))
+    _backfill_tasks[key] = task
+    task.add_done_callback(lambda t: _backfill_tasks.get(key) is t and _backfill_tasks.pop(key, None))
     return {"status": "started", "chat_id": chat_id, "limit": limit, "direction": direction}
 
 
@@ -86,7 +100,6 @@ async def _run_backfill(chat_id: int, limit: int, alias: str = "work", direction
     except Exception:
         log.exception("Backfill error for chat %d", chat_id)
     finally:
-        _backfill_tasks.pop(chat_id, None)
         log.info("Backfill finished for chat %d", chat_id)
 
 
@@ -252,3 +265,88 @@ async def get_sync_states(session: AsyncSession) -> list[dict]:
         })
 
     return states
+
+
+# ---------------------------------------------------------------------------
+# STORAGE_MODE=new: the account's own tables and cursor (ТЗ 2026-10-13 §5.1)
+# ---------------------------------------------------------------------------
+
+async def _shadow_legacy_batch(client, chat_id: int, batch: list) -> None:
+    """Same messages into tg_* (shadow write; tg_sync_state is left alone)."""
+    from app.services.user_service import upsert_user
+    from app.utils.sender import is_user_entity
+
+    async with async_session() as session:
+        db_chat = await session.get(TgChat, chat_id)
+        if db_chat is None:
+            db_chat = await upsert_chat(session, await client.get_entity(chat_id))
+        for msg in batch:
+            if msg is None or msg.id is None:
+                continue
+            try:
+                if msg.sender and is_user_entity(msg.sender):
+                    await upsert_user(session, msg.sender)
+                await upsert_message(session, msg, db_chat)
+            except Exception:
+                await session.rollback()
+
+
+async def _run_backfill_new(account_id: int, chat_id: int, limit: int, alias: str, direction: str) -> None:
+    from app.services import tg_store
+    from app.telegram.pool import pool
+
+    client = (await pool.get(alias)).client
+    if not client:
+        return
+    log.info("Backfill started for chat %d account %d (limit=%d, direction=%s)", chat_id, account_id, limit, direction)
+    try:
+        chat_pk = await tg_store.ensure_chat(account_id, client, chat_id)
+        if chat_pk is None:
+            return
+        state = await tg_store.get_cursor(account_id, chat_pk)
+        oldest = state.oldest_external_id if state else None
+        newest = state.newest_external_id if state else None
+        total = 0
+        fully_synced = None
+
+        if direction == "forward":
+            kwargs = {"entity": chat_id, "min_id": newest or 0, "reverse": True}
+        else:
+            kwargs = {"entity": chat_id}
+            if oldest:
+                kwargs["offset_id"] = oldest
+
+        fetched = 0
+        while fetched < limit:
+            kwargs["limit"] = min(100, limit - fetched)
+            batch = await client.get_messages(**kwargs)
+            if not batch:
+                if direction != "forward":
+                    fully_synced = True
+                break
+            stored, ids = await tg_store.store_history(account_id, chat_pk, list(batch))
+            await tg_store.shadow("backfill", lambda b=list(batch): _shadow_legacy_batch(client, chat_id, b))
+            total += stored
+            if ids:
+                oldest = min([i for i in (oldest, *ids) if i])
+                newest = max([i for i in (newest, *ids) if i])
+            fetched += len(batch)
+            if direction == "forward":
+                kwargs["min_id"] = batch[-1].id
+            else:
+                kwargs["offset_id"] = batch[-1].id
+            await asyncio.sleep(1.5)
+
+        fields = {
+            "newest_external_id": newest,
+            "total_synced": ((state.total_synced if state else 0) or 0) + total,
+            "last_backfill_at": datetime.now(timezone.utc),
+        }
+        if direction != "forward":
+            fields["oldest_external_id"] = oldest
+            if fully_synced is not None:
+                fields["is_fully_synced"] = fully_synced
+        await tg_store.save_cursor(account_id, chat_pk, **fields)
+        log.info("Backfill done for chat %d account %d: %d messages", chat_id, account_id, total)
+    except Exception:
+        log.exception("Backfill error for chat %d account %d", chat_id, account_id)

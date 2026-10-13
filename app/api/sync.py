@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.schemas import BackfillRequest
 from app.services.backfill_service import start_backfill, get_sync_states
+from app.services import tg_store
 from app.services.chat_service import sync_chat_list
 from app.telegram.pool import require_authorized_client
 
@@ -33,5 +34,12 @@ async def sync_status(db: AsyncSession = Depends(get_db)):
 @router.post("/chats")
 async def sync_chats(request: Request, db: AsyncSession = Depends(get_db)):
     client = await require_authorized_client(request)
+    if tg_store.new_mode():
+        account_id = getattr(request.state, "account_id", None)
+        if account_id is None:
+            raise HTTPException(status_code=400, detail="account required")
+        count = await tg_store.store_dialogs(account_id, client)
+        await tg_store.shadow("sync_chats", lambda: sync_chat_list(db, client))
+        return {"status": "ok", "chats_synced": count}
     count = await sync_chat_list(db, client)
     return {"status": "ok", "chats_synced": count}

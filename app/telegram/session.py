@@ -23,8 +23,10 @@ class TelegramSession:
         api_id: int,
         api_hash: str,
         initial_session_string: str | None = None,
+        account_id: int | None = None,
     ) -> None:
         self.alias = alias
+        self.account_id = account_id
         self.phone = phone
         self._api_id = api_id
         self._api_hash = api_hash
