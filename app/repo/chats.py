@@ -132,3 +132,14 @@ async def touch_last_message(
         )
         .values(last_message_external_id=external_id, last_message_at=at)
     )
+
+
+async def external_ids(db: AsyncSession, account_id: int, chat_ids: set[int]) -> dict[int, int]:
+    """internal chat id → external id, for building responses."""
+    ensure_scope(db, account_id)
+    if not chat_ids:
+        return {}
+    rows = await db.execute(
+        select(Chat.id, Chat.external_id).where(Chat.account_id == account_id, Chat.id.in_(chat_ids))
+    )
+    return dict(rows.all())

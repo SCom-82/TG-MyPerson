@@ -1,10 +1,12 @@
 """MAX chats (API spec §3): same paths, names and schemas as app/api/chats.py."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.api import data_reads
 from app.max import repo
+from app.services.tg_store import new_mode, shadow
 from app.schemas import ChatResponse, ChatUpdateRequest, PaginatedResponse
 
 router = APIRouter(prefix="/chats", tags=["max-chats"])
@@ -18,7 +20,12 @@ async def list_chats(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
+    request: Request = None,
 ):
+    if new_mode():
+        return await data_reads.list_chats(
+            request, chat_type=chat_type, search=search, is_monitored=is_monitored, limit=limit, offset=offset
+        )
     chats, total = await repo.get_chats(
         db, chat_type=chat_type, search=search, is_monitored=is_monitored, limit=limit, offset=offset
     )
@@ -28,7 +35,9 @@ async def list_chats(
 
 
 @router.get("/{chat_id}", response_model=ChatResponse, name="get_chat_detail")
-async def get_chat_detail(chat_id: int, db: AsyncSession = Depends(get_db)):
+async def get_chat_detail(chat_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    if new_mode():
+        return await data_reads.get_chat(request, chat_id)
     chat = await repo.get_chat(db, chat_id)
     if chat is None:
         raise HTTPException(status_code=404, detail="Chat not found")
@@ -36,7 +45,13 @@ async def get_chat_detail(chat_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.patch("/{chat_id}", response_model=ChatResponse, name="update_chat_settings")
-async def update_chat_settings(chat_id: int, req: ChatUpdateRequest, db: AsyncSession = Depends(get_db)):
+async def update_chat_settings(
+    chat_id: int, req: ChatUpdateRequest, request: Request, db: AsyncSession = Depends(get_db)
+):
+    if new_mode():
+        result = await data_reads.set_monitored(request, chat_id, req.is_monitored)
+        await shadow("max update_chat", lambda: repo.set_chat_monitored(db, chat_id, req.is_monitored))
+        return result
     chat = await repo.set_chat_monitored(db, chat_id, req.is_monitored)
     if chat is None:
         raise HTTPException(status_code=404, detail="Chat not found")

@@ -1,10 +1,12 @@
 """MAX search_global (API spec §3): over our DB — MAX has no server search in PyMax."""
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.api import data_reads
 from app.max import repo
+from app.services.tg_store import new_mode
 
 router = APIRouter(prefix="/search", tags=["max-search"])
 
@@ -14,7 +16,10 @@ async def search_global(
     q: str = Query(..., description="Search query"),
     limit: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
+    request: Request = None,
 ):
+    if new_mode():
+        return await data_reads.search_global(request, q, limit)
     rows = await repo.search_messages(db, q, limit)
     items = [
         {

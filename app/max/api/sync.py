@@ -5,7 +5,9 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.api import data_reads
 from app.max import repo
+from app.services.tg_store import new_mode
 from app.max.api.common import authorized_or_error
 from app.max.schemas import MaxBackfillRequest
 from app.max.sync import SessionUnavailable, is_backfill_running
@@ -44,7 +46,9 @@ async def sync_chats(request: Request):
 
 
 @router.get("/status", name="sync_status")
-async def sync_status(db: AsyncSession = Depends(get_db)):
+async def sync_status(request: Request, db: AsyncSession = Depends(get_db)):
+    if new_mode():
+        return await data_reads.sync_status(request, is_running=is_backfill_running, max_fields=True)
     states = []
     for state, title in await repo.get_sync_states(db):
         states.append({

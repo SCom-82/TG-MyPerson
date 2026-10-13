@@ -28,6 +28,7 @@ from typing import Any
 from fastapi import Request
 from starlette.responses import JSONResponse
 
+from app.authz.policy import AuthContext, authorize
 from app.authz.tool_catalog import (
     MAX_ONLY_TOOLS,
     READ_ONLY_TOOLS,
@@ -49,7 +50,13 @@ _SKIP_PATHS = {
 
 # Admin path prefixes — authenticated via X-Admin-Key, not X-API-Key + alias.
 # /api/v1/admin: service operations of infra-ops (migrate_isolation probe), not tools.
-ADMIN_PREFIXES = ("/api/v1/accounts", "/api/v1/admin")
+ADMIN_PREFIXES = ("/api/v1/accounts", "/api/v1/admin", "/api/v1/owner-keys", "/api/v1/keys")
+
+# Owner-key area (contacts, §6.4): the only paths an owner key may call, and
+# paths an account key may not.
+OWNER_PREFIX = "/api/v1/people"
+PUBLIC_PATHS = {"/api/v1/healthz", "/api/v1/readyz", "/docs", "/openapi.json", "/redoc"}
+ACCOUNT_REQUIRED = "account required: X-Session-Alias or per-account key"
 _ADMIN_PREFIX = ADMIN_PREFIXES[0]  # kept for importers of the old name
 
 
@@ -125,6 +132,46 @@ async def admin_auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+def _presented_key(request: Request) -> str | None:
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip() or None
+    return request.headers.get("x-api-key") or request.query_params.get("api_key")
+
+
+async def authenticate(request: Request) -> JSONResponse | None:
+    """§6.1: per-account / owner key (Authorization: Bearer or X-API-Key), else the
+    shared API_KEY while LEGACY_API_KEY_ENABLED. None = authenticated (or open)."""
+    from app.authz import keys
+    from app.config import settings as cfg
+
+    path = request.url.path
+    if path in PUBLIC_PATHS or is_admin_path(path):
+        return None
+    request.state.api_key = None
+    presented = _presented_key(request)
+    info = await keys.lookup(presented)
+    owner_path = path == OWNER_PREFIX or path.startswith(OWNER_PREFIX + "/")
+    if info is not None:
+        request.state.api_key = info
+        if info.scope == "owner" and not owner_path:
+            return JSONResponse(status_code=403, content={"detail": "owner key: contacts endpoints only"})
+        if info.scope == "account" and owner_path:
+            return JSONResponse(status_code=403, content={"detail": "account key: no access to contacts"})
+        return None
+    if not cfg.api_key:
+        return None  # no shared key configured: open (development)
+    if (
+        cfg.legacy_api_key_enabled
+        and presented
+        and secrets.compare_digest(presented.encode(), cfg.api_key.encode())
+    ):
+        if owner_path:
+            return JSONResponse(status_code=403, content={"detail": "contacts need the owner key"})
+        return None
+    return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
+
+
 async def resolve_alias_middleware(request: Request, call_next):
     """Resolve X-Session-Alias header (or ?session= query) to an account.
 
@@ -143,11 +190,34 @@ async def resolve_alias_middleware(request: Request, call_next):
         request.state.platform = _DEFAULT_PLATFORM
         return await call_next(request)
 
-    alias = (
-        request.headers.get("x-session-alias")
-        or request.query_params.get("session")
-        or "work"
-    )
+    header_alias = request.headers.get("x-session-alias") or request.query_params.get("session")
+    key = getattr(request.state, "api_key", None)
+    if key is not None and key.scope == "owner":
+        request.state.scope = "owner"
+        request.state.session_alias = "owner"
+        request.state.account_id = None
+        request.state.platform = _DEFAULT_PLATFORM
+        return await call_next(request)
+    if key is not None:
+        # Per-account key: the key decides; a different alias is a mistake, not a switch.
+        if header_alias and header_alias != key.alias:
+            return JSONResponse(status_code=403, content={
+                "error": f"X-Session-Alias '{header_alias}' does not match the key's account '{key.alias}'",
+            })
+        request.state.session_alias = key.alias
+        request.state.account_id = key.account_id
+        request.state.platform = key.platform or _DEFAULT_PLATFORM
+        return await call_next(request)
+
+    if header_alias is None and request.url.path.startswith(_API_PREFIX + "/"):
+        from app.config import settings as cfg
+
+        if cfg.require_account:
+            return JSONResponse(status_code=400, content={"detail": ACCOUNT_REQUIRED})
+        # D6 transition: implicit 'work', visible in the log and in audit_logs.error.
+        log.warning("implicit 'work' account for %s %s", request.method, request.url.path)
+        request.state.implicit_work = True
+    alias = header_alias or "work"
 
     # Check cache
     now = time.monotonic()
@@ -346,32 +416,20 @@ async def tool_authz_middleware(request: Request, call_next):
         return await call_next(request)
 
     request.state.tool_is_write = is_write
-
-    if not is_write:
-        # Read — always allowed regardless of mode
-        return await call_next(request)
-
-    account_id = getattr(request.state, "account_id", None)
-    alias = getattr(request.state, "session_alias", "work")
-
-    if account_id is None:
-        # No account resolved (skip paths) — pass through
-        return await call_next(request)
-
-    # Check account_tool_policy first (explicit deny/allow overrides mode)
-    policy_effect = await _get_tool_policy(account_id, tool_name)
-    if policy_effect == "deny":
-        return _forbidden(alias, tool_name, "denied by account policy")
-
-    if policy_effect == "allow":
-        return await call_next(request)
-
-    # No explicit policy — fall back to account mode
-    mode = await _get_account_mode(account_id)
-    if mode == "ro":
-        return _forbidden(alias, tool_name, "read-only account")
-
+    ctx = request_context(request)
+    decision = await authorize(ctx, tool_name, is_write=is_write)
+    if not decision.allowed:
+        return decision.response(ctx, tool_name)
     return await call_next(request)
+
+
+def request_context(request: Request) -> AuthContext:
+    return AuthContext(
+        account_id=getattr(request.state, "account_id", None),
+        alias=getattr(request.state, "session_alias", "work"),
+        platform=getattr(request.state, "platform", _DEFAULT_PLATFORM),
+        scope=getattr(request.state, "scope", "account"),
+    )
 
 
 def _forbidden(alias: str, tool_name: str, reason: str) -> JSONResponse:
@@ -480,6 +538,8 @@ async def audit_log_middleware(request: Request, call_next):
             error_text = f"HTTP {status_code}"
         except Exception:
             pass
+    elif getattr(request.state, "implicit_work", False):
+        error_text = "implicit_work"  # D6: who still calls without an account
 
     asyncio.create_task(
         _write_audit_log(

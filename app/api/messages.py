@@ -33,7 +33,9 @@ from app.schemas import (
     SendPollRequest,
     ScheduledMessageItem,
 )
+from app.api import data_reads
 from app.services.message_service import get_messages, get_message
+from app.services.tg_store import new_mode
 from app.telegram.pool import require_authorized_client
 
 log = logging.getLogger(__name__)
@@ -69,7 +71,13 @@ async def list_messages(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
+    request: Request = None,
 ):
+    if new_mode():
+        return await data_reads.list_messages(
+            request, chat_id=chat_id, from_user_id=from_user_id, search=search, date_from=date_from,
+            date_to=date_to, message_type=message_type, is_outgoing=is_outgoing, limit=limit, offset=offset,
+        )
     messages, total = await get_messages(
         db,
         chat_id=chat_id,
@@ -154,7 +162,9 @@ async def send_scheduled_now(chat_id: int, message_id: int, request: Request):
 
 
 @router.get("/{chat_id}/{message_id}", response_model=MessageResponse)
-async def get_single_message(chat_id: int, message_id: int, db: AsyncSession = Depends(get_db)):
+async def get_single_message(chat_id: int, message_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    if new_mode():
+        return await data_reads.get_message(request, chat_id, message_id)
     msg = await get_message(db, chat_id, message_id)
     if msg is None:
         raise HTTPException(status_code=404, detail="Message not found")

@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     shadow_legacy_write: bool = True
     # Daily address-book sync of TG accounts (new mode).
     contacts_sync_hours: float = 24
+    # §6.1 / D6, D10: the shared API_KEY keeps working while this is true;
+    # without X-Session-Alias it means 'work' unless REQUIRE_ACCOUNT=true (→ 400).
+    legacy_api_key_enabled: bool = True
+    require_account: bool = False
 
     model_config = {
         "env_file": ".env",

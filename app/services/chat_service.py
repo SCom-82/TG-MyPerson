@@ -138,6 +138,12 @@ def _parse_target(target: str) -> tuple[str, str]:
 
 async def join_chat(session: AsyncSession, client, target: str) -> TgChat:
     """Join a channel/group by username or invite link. Returns upserted TgChat."""
+    entity = await join_chat_entity(client, target)
+    return await upsert_chat(session, entity)
+
+
+async def join_chat_entity(client, target: str):
+    """Join by invite link or username; returns the joined entity."""
     target_type, value = _parse_target(target)
 
     if target_type == 'invite':
@@ -155,7 +161,7 @@ async def join_chat(session: AsyncSession, client, target: str) -> TgChat:
             await client(JoinChannelRequest(entity))
         # If it's a User (private chat), no join needed
 
-    return await upsert_chat(session, entity)
+    return entity
 
 
 async def leave_chat(client, chat_id: int) -> None:

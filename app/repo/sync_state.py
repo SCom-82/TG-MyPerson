@@ -36,3 +36,16 @@ async def upsert_state(db: AsyncSession, account_id: int, chat_id: int, **fields
     else:
         stmt = stmt.on_conflict_do_nothing(index_elements=[SyncState.account_id, SyncState.chat_id])
     await db.execute(stmt)
+
+
+async def list_states(db: AsyncSession, account_id: int):
+    """(SyncState, chat external id, chat title) of the account's chats."""
+    from app.models import Chat
+
+    ensure_scope(db, account_id)
+    return (await db.execute(
+        select(SyncState, Chat.external_id, Chat.title)
+        .join(Chat, (Chat.account_id == SyncState.account_id) & (Chat.id == SyncState.chat_id))
+        .where(SyncState.account_id == account_id)
+        .order_by(Chat.external_id)
+    )).all()

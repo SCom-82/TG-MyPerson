@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Literal
+from typing import ClassVar, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 
 
 ParseMode = Literal["markdown", "html"]
@@ -125,8 +125,21 @@ class MessageResponse(BaseModel):
     views: int | None = None
     media: list[MediaResponse] = Field(default_factory=list)
     created_at: datetime
+    # Soft-deleted messages (account isolation, STORAGE_MODE=new). Left out of a TG
+    # response while empty, so legacy responses stay byte-for-byte the same.
+    deleted_at: datetime | None = None
 
     model_config = {"from_attributes": True}
+
+    # Subclasses that always carry deleted_at (MAX, API spec) set this to True.
+    always_deleted_at: ClassVar[bool] = False
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_deleted_at(self, handler):
+        data = handler(self)
+        if not self.always_deleted_at and self.deleted_at is None:
+            data.pop("deleted_at", None)
+        return data
 
 class SendMessageRequest(BaseModel):
     chat_id: int

@@ -201,6 +201,16 @@ async def store_dialogs(account_id: int, client: Any) -> int:
     return count
 
 
+async def store_dialog_entity(account_id: int, entity: Any) -> int:
+    """A chat the account just joined (or a private peer)."""
+    async with account_db(account_id) as db:
+        pk = await put_chat(db, account_id, entity)
+        if isinstance(entity, User):
+            await put_user(db, account_id, entity, "dialog")
+        await db.commit()
+    return pk
+
+
 async def store_resolved(account_id: int, user: Any) -> int:
     async with account_db(account_id) as db:
         pk = await put_user(db, account_id, user, "resolve")

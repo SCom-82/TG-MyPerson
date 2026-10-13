@@ -50,6 +50,8 @@ WRITE_MESSENGER_TOOLS: frozenset[str] = frozenset({
     # user writes
     "block_user",
     "unblock_user",
+    # contacts (account isolation §6.4): write to a person from the shared base
+    "send_to_person",
 })
 
 # Backward-compatible name: same object, so `in` checks and imports keep working.
@@ -63,6 +65,10 @@ WRITE_DB_TOOLS: frozenset[str] = frozenset({
     "snapshot_import_members",  # manual import, writes to our DB
     "sync_chats",               # iter_dialogs (TG read), writes to our DB
     "trigger_backfill",         # iter_messages (TG read), writes to our DB
+    # contacts, owner key (account isolation §6.4): our DB only
+    "update_person",
+    "merge_people",
+    "split_person",
 })
 
 # ---------------------------------------------------------------------------
@@ -119,6 +125,12 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset({
     # snapshots reads
     "list_chat_snapshots",
     "get_snapshot_members",
+    # contacts (account isolation §6.4): owner key / rw account
+    "find_person",
+    "get_person",
+    "person_messages",
+    "person_chats",
+    "reachable_contacts",
 })
 
 # ---------------------------------------------------------------------------

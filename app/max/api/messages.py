@@ -11,7 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
 from app.database import get_db
+from app.api import data_reads
 from app.max import media, repo
+from app.services.tg_store import new_mode
 from app.max.api.common import authorized_or_error
 from app.max.schemas import MaxMessageResponse
 from app.schemas import PaginatedResponse
@@ -33,7 +35,14 @@ async def list_messages(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
+    request: Request = None,
 ):
+    if new_mode():
+        return await data_reads.list_messages(
+            request, chat_id=chat_id, from_user_id=from_user_id, search=search, date_from=date_from,
+            date_to=date_to, message_type=message_type, is_outgoing=is_outgoing, limit=limit, offset=offset,
+            cls=MaxMessageResponse,
+        )
     # Deleted messages are listed too (with deleted_at), like TG keeps them (ADR §2.G).
     messages, total = await repo.get_messages(
         db,
@@ -53,7 +62,9 @@ async def list_messages(
 
 
 @router.get("/{chat_id}/{message_id}", response_model=MaxMessageResponse, name="get_single_message")
-async def get_single_message(chat_id: int, message_id: int, db: AsyncSession = Depends(get_db)):
+async def get_single_message(chat_id: int, message_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    if new_mode():
+        return await data_reads.get_message(request, chat_id, message_id, MaxMessageResponse)
     msg = await repo.get_message(db, chat_id, message_id)
     if msg is None:
         raise HTTPException(status_code=404, detail="Message not found")
@@ -91,8 +102,11 @@ async def download_media(
     client = session.client
 
     # 1. The attachment: from the stored raw message, else from MAX.
-    stored = await repo.get_message(db, chat_id, message_id)
-    raw = dict(stored.raw_data) if stored is not None and stored.raw_data else None
+    if new_mode():
+        raw = await data_reads.stored_raw(request, chat_id, message_id)
+    else:
+        stored = await repo.get_message(db, chat_id, message_id)
+        raw = dict(stored.raw_data) if stored is not None and stored.raw_data else None
     if raw is None:
         try:
             fetched = await client.get_message(chat_id, message_id)

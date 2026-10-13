@@ -204,6 +204,19 @@ automatically in-process. It exists only as a manual escape hatch.
   (ошибка тени — только `warning`). Хендлеры, бэкфилл (`(аккаунт, чат)`), SSE (подписка по аккаунту),
   удаления TG (`deleted_at`), ежедневный `contacts_sync`, предзагрузка `access_hash` в кэш Telethon
   на старте сессии (без «прогрева» `vault-anomaly-sync`). Чтение API пока из старых таблиц (PR-3).
+- Чтение при `STORAGE_MODE=new` (PR-3): эндпоинты данных TG и MAX читают таблицы аккаунта запроса
+  (`app/api/data_reads.py`, мапперы `app/api/mappers.py`); внешние id в параметрах резолвятся внутри
+  аккаунта, чужие → 404. Контракт ответов прежний (+ необязательный `deleted_at` у удалённых сообщений).
+- Ключи (`app/authz/keys.py`): `Authorization: Bearer <key>` или `X-API-Key`. Ключ аккаунта задаёт
+  аккаунт (чужой `X-Session-Alias` → 403); owner-ключ — только `/api/v1/people/*`. Выпуск/отзыв —
+  admin: `POST/GET /api/v1/accounts/{id}/keys`, `POST/GET /api/v1/owner-keys`, `DELETE /api/v1/keys/{id}`
+  (ключ показывается один раз). Общий `API_KEY` — пока `LEGACY_API_KEY_ENABLED=true`; без алиаса —
+  `work` с пометкой `implicit_work` в аудите, при `REQUIRE_ACCOUNT=true` — 400.
+- Авторизация — одна функция `app/authz/policy.py: authorize()` для HTTP и MCP: политика тулов,
+  ro, `write_chat_ids`, `write_rate_per_hour` (MAX по умолчанию `MAX_WRITE_RATE_DEFAULT`).
+- Контакты: `/api/v1/people` (owner-ключ: поиск, карточка с аккаунтами и достижимостью, сообщения и чаты
+  человека, теги/заметки, merge/split), `/api/v1/reachable` и `POST /api/v1/messages/to-person` (rw-аккаунт).
+  Кросс-аккаунтные запросы — только `app/repo/people_queries.py`.
 - Замер полного `raw` на живых сообщениях (только чтение):
   `python -m app.scripts.measure_raw --alias personal-ro --chat <id> --limit 1000`.
 - Аккаунт целиком (infra-ops, под владельцем):

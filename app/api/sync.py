@@ -5,7 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.schemas import BackfillRequest
-from app.services.backfill_service import start_backfill, get_sync_states
+from app.api import data_reads
+from app.services.backfill_service import get_sync_states, is_backfill_running, start_backfill
 from app.services import tg_store
 from app.services.chat_service import sync_chat_list
 from app.telegram.pool import require_authorized_client
@@ -26,7 +27,9 @@ async def trigger_backfill(req: BackfillRequest, request: Request):
 
 
 @router.get("/status")
-async def sync_status(db: AsyncSession = Depends(get_db)):
+async def sync_status(request: Request, db: AsyncSession = Depends(get_db)):
+    if tg_store.new_mode():
+        return await data_reads.sync_status(request, is_running=is_backfill_running)
     states = await get_sync_states(db)
     return {"states": states}
 

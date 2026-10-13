@@ -179,12 +179,12 @@ def test_compare_digest_used_in_middleware_source():
     main_src = inspect.getsource(main_module)
     middleware_src = inspect.getsource(middleware_module)
 
-    assert "secrets.compare_digest" in main_src, (
-        "main.py must use secrets.compare_digest for X-API-Key comparison"
+    # The shared X-API-Key check moved from main.py into middleware.authenticate()
+    # (per-account keys, ТЗ 2026-10-13 §6.1); both comparisons live there now.
+    assert middleware_src.count("secrets.compare_digest") >= 2, (
+        "middleware.py must use secrets.compare_digest for X-API-Key and X-Admin-Key comparison"
     )
-    assert "secrets.compare_digest" in middleware_src, (
-        "middleware.py must use secrets.compare_digest for X-Admin-Key comparison"
-    )
+    assert "authenticate(request)" in main_src, "main.py must run the API key check"
     # Guard: must NOT use plain == for key comparison in auth paths
     # (this is a heuristic — we check the API key check block)
     assert "api_key ==" not in main_src, "main.py must not use == for api_key comparison"

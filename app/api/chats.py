@@ -10,6 +10,10 @@ from app.schemas import (
     MemberResponse, ArchiveRequest, MyRightsResponse,
 )
 from app.services.chat_service import get_chats, get_chat, update_chat, join_chat, leave_chat, resolve_target, get_members
+from app.api import data_reads
+from app.services import tg_store
+from app.services.chat_service import join_chat_entity, upsert_chat
+from app.services.tg_store import new_mode
 from app.telegram.pool import require_authorized_client
 
 log = logging.getLogger(__name__)
@@ -25,7 +29,12 @@ async def list_chats(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
+    request: Request = None,
 ):
+    if new_mode():
+        return await data_reads.list_chats(
+            request, chat_type=chat_type, search=search, is_monitored=is_monitored, limit=limit, offset=offset
+        )
     chats, total = await get_chats(db, chat_type=chat_type, search=search, is_monitored=is_monitored, limit=limit, offset=offset)
     return PaginatedResponse(
         items=[ChatResponse.model_validate(c) for c in chats],
@@ -41,6 +50,12 @@ async def list_chats(
 async def join_chat_endpoint(req: JoinChatRequest, request: Request, db: AsyncSession = Depends(get_db)):
     client = await require_authorized_client(request)
     try:
+        if new_mode():
+            account_id = data_reads.account_of(request)
+            entity = await join_chat_entity(client, req.target)
+            await tg_store.store_dialog_entity(account_id, entity)
+            await tg_store.shadow("join_chat", lambda: upsert_chat(db, entity))
+            return await data_reads.get_chat(request, tg_store.chat_row(entity).external_id)
         db_chat = await join_chat(db, client, req.target)
         return ChatResponse.model_validate(db_chat)
     except Exception as e:
@@ -73,7 +88,9 @@ async def resolve_chat_endpoint(req: ResolveRequest, request: Request):
 # --- Параметризованные пути ---
 
 @router.get("/{chat_id}", response_model=ChatResponse)
-async def get_chat_detail(chat_id: int, db: AsyncSession = Depends(get_db)):
+async def get_chat_detail(chat_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    if new_mode():
+        return await data_reads.get_chat(request, chat_id)
     chat = await get_chat(db, chat_id)
     if chat is None:
         raise HTTPException(status_code=404, detail="Chat not found")
@@ -81,7 +98,13 @@ async def get_chat_detail(chat_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.patch("/{chat_id}", response_model=ChatResponse)
-async def update_chat_settings(chat_id: int, req: ChatUpdateRequest, db: AsyncSession = Depends(get_db)):
+async def update_chat_settings(
+    chat_id: int, req: ChatUpdateRequest, request: Request, db: AsyncSession = Depends(get_db)
+):
+    if new_mode():
+        result = await data_reads.set_monitored(request, chat_id, req.is_monitored)
+        await tg_store.shadow("update_chat", lambda: update_chat(db, chat_id, req.is_monitored))
+        return result
     chat = await update_chat(db, chat_id, req.is_monitored)
     if chat is None:
         raise HTTPException(status_code=404, detail="Chat not found")

@@ -18,6 +18,7 @@ from app.schemas import (
     UnresolvedUserItem,
 )
 from app.services.user_service import get_users, upsert_user
+from app.api import data_reads
 from app.config import settings
 from app.services import registry_service, tg_store
 from app.telegram.pool import require_identity, require_authorized_client, pool
@@ -32,7 +33,10 @@ async def list_users(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
+    request: Request = None,
 ):
+    if tg_store.new_mode():
+        return await data_reads.list_users(request, search=search, limit=limit, offset=offset)
     users, total = await get_users(db, search=search, limit=limit, offset=offset)
     return PaginatedResponse(
         items=[UserResponse.model_validate(u) for u in users],

@@ -187,3 +187,16 @@ async def get_message(
             Message.external_id == external_id,
         )
     )).scalar_one_or_none()
+
+
+async def search(db: AsyncSession, account_id: int, q: str, limit: int) -> list[tuple[Message, Chat]]:
+    """Text search over the account's messages (MAX search_global)."""
+    ensure_scope(db, account_id)
+    rows = await db.execute(
+        select(Message, Chat)
+        .join(Chat, and_(Chat.account_id == Message.account_id, Chat.id == Message.chat_id))
+        .where(Message.account_id == account_id, Message.text.ilike(f"%{q}%"))
+        .order_by(Message.sent_at.desc())
+        .limit(limit)
+    )
+    return [(m, c) for m, c in rows.all()]

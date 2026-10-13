@@ -22,6 +22,7 @@ from app.models import (
     ChatMembersSnapshot,
     TgChat,
 )
+from app.api import data_reads
 from app.services import registry_service, tg_store
 from app.telegram.pool import require_identity, pool
 
@@ -297,9 +298,12 @@ async def import_snapshot() -> dict:
 @router.get("/chat/{chat_id}", name="list_chat_snapshots")
 async def list_snapshots(
     chat_id: int,
+    request: Request,
     limit: int = Query(default=50, le=500),
 ) -> list[dict]:
     """List snapshots for a chat, newest first."""
+    if tg_store.new_mode():
+        return await data_reads.list_snapshots(request, chat_id, limit)
     async with async_session() as db:
         stmt = (
             select(ChatMembersSnapshot, Account.alias)
@@ -331,10 +335,13 @@ async def list_snapshots(
 @router.get("/{snapshot_id}/members", name="get_snapshot_members")
 async def get_snapshot_members(
     snapshot_id: int,
+    request: Request,
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=200, le=1000),
 ) -> dict:
     """Get paginated member records for a snapshot."""
+    if tg_store.new_mode():
+        return await data_reads.snapshot_members(request, snapshot_id, offset, limit)
     async with async_session() as db:
         # Verify snapshot exists
         snap_result = await db.execute(
