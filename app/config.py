@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     # Switch to STORAGE_MODE=new (§11.2 step 5): migrate_isolation delta before
     # sessions connect, then the cutover mark. Remove after the switch.
     run_delta_on_start: bool = False
+    # HMAC key of the signed file links / upload tokens of MCP (§9.2).
+    file_link_secret: str = ""
     require_account: bool = False
 
     model_config = {

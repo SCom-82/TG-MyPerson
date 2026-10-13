@@ -6,6 +6,7 @@ from app.api.admin_keys import router as admin_keys_router
 from app.api.auth import router as auth_router
 from app.api.chats import router as chats_router
 from app.api.contacts import router as contacts_router
+from app.api.files import router as files_router
 from app.api.messages import router as messages_router
 from app.api.people import router as people_router
 from app.api.reach import router as reach_router
@@ -27,6 +28,7 @@ API_ROUTERS = (
     auth_router,
     chats_router,
     contacts_router,
+    files_router,
     messages_router,
     people_router,
     reach_router,

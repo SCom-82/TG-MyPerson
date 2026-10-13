@@ -65,6 +65,8 @@ WRITE_DB_TOOLS: frozenset[str] = frozenset({
     "snapshot_import_members",  # manual import, writes to our DB
     "sync_chats",               # iter_dialogs (TG read), writes to our DB
     "trigger_backfill",         # iter_messages (TG read), writes to our DB
+    # MCP file upload (account isolation §9.2): a temp file on our side
+    "upload_file",
     # contacts, owner key (account isolation §6.4): our DB only
     "update_person",
     "merge_people",
@@ -125,6 +127,8 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset({
     # snapshots reads
     "list_chat_snapshots",
     "get_snapshot_members",
+    # MCP signed file link (account isolation §9.2)
+    "download_file",
     # contacts (account isolation §6.4): owner key / rw account
     "find_person",
     "get_person",

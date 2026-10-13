@@ -60,6 +60,15 @@ ACCOUNT_REQUIRED = "account required: X-Session-Alias or per-account key"
 _ADMIN_PREFIX = ADMIN_PREFIXES[0]  # kept for importers of the old name
 
 
+# Own authentication, not the API key: MCP (Bearer in app/mcp/server.py) and the
+# signed file/upload tokens (app/api/files.py).
+SELF_AUTH_PREFIXES = ("/mcp", "/api/v1/files/", "/api/v1/uploads/")
+
+
+def is_self_auth_path(path: str) -> bool:
+    return path == "/mcp" or any(path.startswith(p) for p in SELF_AUTH_PREFIXES)
+
+
 def is_admin_path(path: str) -> bool:
     return any(path == p or path.startswith(p + "/") for p in ADMIN_PREFIXES)
 
@@ -150,7 +159,7 @@ async def authenticate(request: Request) -> JSONResponse | None:
     from app.config import settings as cfg
 
     path = request.url.path
-    if path in PUBLIC_PATHS or is_admin_path(path):
+    if path in PUBLIC_PATHS or is_admin_path(path) or is_self_auth_path(path):
         return None
     request.state.api_key = None
     presented, from_query = _presented_key(request)
@@ -187,6 +196,13 @@ async def resolve_alias_middleware(request: Request, call_next):
     """
     # Skip admin paths — already handled by admin_auth_middleware
     if getattr(request.state, "is_admin_path", False):
+        return await call_next(request)
+
+    if is_self_auth_path(request.url.path):
+        # The token / MCP key decides the account inside the endpoint.
+        request.state.session_alias = None
+        request.state.account_id = None
+        request.state.platform = _DEFAULT_PLATFORM
         return await call_next(request)
 
     if request.url.path in _SKIP_PATHS:

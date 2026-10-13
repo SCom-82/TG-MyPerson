@@ -2033,6 +2033,7 @@ dependencies = [
     { name = "cryptg" },
     { name = "fastapi" },
     { name = "maxapi-python" },
+    { name = "mcp" },
     { name = "psycopg2-binary" },
     { name = "pydantic-settings" },
     { name = "python-multipart" },
@@ -2046,7 +2047,6 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "httpx" },
-    { name = "mcp" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
@@ -2061,7 +2061,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115,<0.137" },
     { name = "httpx", marker = "extra == 'dev'" },
     { name = "maxapi-python", specifier = "==2.4.1" },
-    { name = "mcp", marker = "extra == 'dev'", specifier = ">=1.0,<2" },
+    { name = "mcp", specifier = ">=1.30,<2" },
     { name = "psycopg2-binary", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.7" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },

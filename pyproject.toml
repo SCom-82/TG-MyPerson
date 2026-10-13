@@ -28,6 +28,9 @@ dependencies = [
     # MAX media download through MAX_PROXY_URL=socks5://… (aiohttp has no SOCKS
     # support of its own; same author as python-socks, which PyMax uses).
     "aiohttp-socks>=0.10",
+    # MCP over Streamable HTTP inside the service (ТЗ 2026-10-13 §9). Upper bound
+    # mandatory: mcp 2.x removed the low-level Server decorators used here.
+    "mcp>=1.30,<2",
 ]
 
 [project.optional-dependencies]
@@ -35,12 +38,8 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "httpx",
-    # tests/test_download_media_streaming.py импортирует MCP-клиент
-    # (_system/scripts/tg-myperson-mcp.py), который тянет mcp.server.
-    # Без этого T8/T9 падают ModuleNotFoundError на чистом main.
-    # Верхняя граница обязательна: в mcp 2.x у Server убрали декоратор
-    # .list_tools(), а боевой скрипт написан под low-level API 1.x.
-    "mcp>=1.0,<2",
+    # mcp itself is a runtime dependency now (app/mcp); the stdio wrapper used by
+    # tests/test_download_media_streaming.py also needs only that.
 ]
 
 [tool.pytest.ini_options]

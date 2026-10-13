@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from sqlalchemy import text
 from starlette.responses import JSONResponse
+from starlette.routing import Route
 
 from app.api.router import API_ROUTERS, api_router
 from app.authz.middleware import (
@@ -23,6 +24,7 @@ from app.max import pool as max_pool_module
 from app.max.config import max_settings
 from app.max.maintenance import raw_events_loop
 from app.max.api import MAX_API_ROUTERS, max_api_router
+from app.mcp import server as mcp_server
 from app.services.contacts_sync import contacts_sync_loop
 from app.services.startup_delta import run_startup_delta
 from app.services.partition_maintenance import ensure_partitions, partition_loop
@@ -65,7 +67,9 @@ async def lifespan(app: FastAPI):
         max_start_task = asyncio.create_task(max_pool_module.max_pool.start_all())
         max_retention_task = asyncio.create_task(raw_events_loop(max_settings))
 
-    yield
+    # MCP over Streamable HTTP (ТЗ §9): the session manager lives with the app.
+    async with mcp_server.running():
+        yield
 
     # Stop the partition loop, then shut down all sessions
     partition_task.cancel()
@@ -157,6 +161,9 @@ async def audit_log_mw(request, call_next):
 
 
 app.include_router(api_router, prefix=settings.api_prefix)
+# MCP (Bearer account / owner key, its own authentication; app/mcp/server.py).
+# A plain route, not a Mount: a Mount answers "/mcp" with a redirect to "/mcp/".
+app.router.routes.append(Route("/mcp", endpoint=mcp_server.McpEndpoint()))
 # Internal MAX router: same paths and route names as the TG one, reachable only
 # via platform_dispatch rewrite. Hidden from OpenAPI (duplicate operation names).
 app.include_router(max_api_router, prefix=MAX_INTERNAL_PREFIX, include_in_schema=False)

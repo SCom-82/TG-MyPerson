@@ -228,6 +228,13 @@ automatically in-process. It exists only as a manual escape hatch.
   Переключение: деплой с `STORAGE_MODE=new` и `RUN_DELTA_ON_START=true` — до подключения сессий
   выполняется `delta` (ошибка → сервис не стартует), затем отметка `cutover`; после неё `copy`/`delta`
   отказывают (`--force-after-cutover` — только осознанно), `verify` можно всегда.
+- MCP по Streamable HTTP (PR-5, `app/mcp/`): `https://<host>/mcp`, `Authorization: Bearer <ключ>`;
+  без ключа — 401. Ключ аккаунта: 42 тула прежней stdio-обёртки (те же имена и схемы; ro — без
+  записи; rw — плюс `reachable_contacts`, `send_to_person`, `create_upload`); owner-ключ — тулы
+  контактов (`find_person` … `split_person`). Каждый вызов → `authorize()` → тот же REST-маршрут
+  в процессе (без сети и middleware) → `audit()`. Файлы: `download_media` отдаёт подписанную ссылку
+  `GET /api/v1/files/{token}` (15 мин, `FILE_LINK_SECRET`); отправка — `upload_id` из `create_upload`
+  (`curl -T`, ≤ 50 МБ) или https `file_url` (без редиректов и приватных адресов).
 - Аккаунт целиком (infra-ops, под владельцем):
   `python -m app.scripts.account_partitions list|grants|dump|restore|drop --account N`
   (`drop` — только выключенный аккаунт и дамп моложе часа, `--confirm <alias>`).
