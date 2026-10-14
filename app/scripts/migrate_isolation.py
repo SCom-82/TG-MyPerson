@@ -21,8 +21,8 @@ probe (§8.1) — which chats each enabled Telegram account is a member of.
   Per account: get_me() and iter_dialogs(), nothing else — the client is
   wrapped, any other Telegram call raises, and the shared client cannot be
   connected or disconnected through the wrapper. Result goes to
-  mig_membership — created by this command, not by a migration, dropped in
-  PR-6. Per account the rows are replaced in one transaction after the dialog
+  mig_membership — created by migration 011 (the service role has no CREATE),
+  dropped in PR-6. Per account the rows are replaced in one transaction after the dialog
   walk succeeded, so a rerun reflects current membership and a failed walk
   leaves the previous rows intact. No other table is written
   (accounts.external_user_id is filled by `copy`, step A).
@@ -50,18 +50,6 @@ from app.models import Account, AccountSession
 from app.services.chat_service import _get_chat_id, _get_chat_type, _get_title
 
 log = logging.getLogger(__name__)
-
-MEMBERSHIP_DDL = """
-CREATE TABLE IF NOT EXISTS mig_membership (
-    account_id       int    NOT NULL REFERENCES accounts(id),
-    external_chat_id bigint NOT NULL,
-    chat_type        text   NOT NULL,
-    title            text,
-    role             text,
-    access_hash      bigint,
-    PRIMARY KEY (account_id, external_chat_id)
-)
-"""
 
 # Report lists are capped; counts are always exact.
 REPORT_LIST_LIMIT = 200
@@ -162,7 +150,6 @@ async def _probe_account(account: Account, client: ReadOnlyClient) -> dict:
         rows[row["external_chat_id"]] = row
 
     async with async_session() as db:
-        await db.execute(text(MEMBERSHIP_DDL))
         await db.execute(
             text("DELETE FROM mig_membership WHERE account_id = :a"), {"a": account.id}
         )
@@ -190,8 +177,6 @@ async def _probe_account(account: Account, client: ReadOnlyClient) -> dict:
 
 async def _membership_summary() -> dict:
     async with async_session() as db:
-        await db.execute(text(MEMBERSHIP_DDL))
-        await db.commit()
         shared = (await db.execute(text(
             "SELECT chat_type, count(*) FROM ("
             "  SELECT external_chat_id, min(chat_type) AS chat_type FROM mig_membership"

@@ -103,7 +103,6 @@ async def _exec(sql, **params):
 
 
 async def _cleanup():
-    await _exec(mi.MEMBERSHIP_DDL)  # first run on a fresh DB
     ids = "SELECT id FROM accounts WHERE alias = ANY(:a)"
     await _exec(f"DELETE FROM mig_membership WHERE account_id IN ({ids})", a=list(ALIASES))
     await _exec(f"DELETE FROM account_sessions WHERE account_id IN ({ids})", a=list(ALIASES))

@@ -41,10 +41,6 @@ INSERT INTO tg_chats (id, chat_type, title) VALUES
   ({SHARED}, 'channel', 'Shared'), ({SIGNAL}, 'supergroup', 'Signal'), ({ORPHAN}, 'channel', 'Orphan'),
   ({ALICE}, 'private', 'Alice'), ({GROUP}, 'group', 'Basic');
 
-CREATE TABLE IF NOT EXISTS mig_membership (
-    account_id int NOT NULL REFERENCES accounts(id), external_chat_id bigint NOT NULL,
-    chat_type text NOT NULL, title text, role text, access_hash bigint,
-    PRIMARY KEY (account_id, external_chat_id));
 INSERT INTO mig_membership SELECT id, {SHARED}, 'channel', 'Shared', 'admin', 4242 FROM accounts WHERE platform = 'telegram';
 
 INSERT INTO chat_access (account_id, chat_id, role, first_seen_at, last_seen_at)

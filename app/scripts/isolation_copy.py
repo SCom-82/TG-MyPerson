@@ -50,19 +50,8 @@ CREATE OR REPLACE FUNCTION pg_temp.e164(p text) RETURNS text LANGUAGE sql IMMUTA
 $$
 """
 
-MIG_DDL = (
-    """CREATE TABLE IF NOT EXISTS mig_watermark (
-        tbl text PRIMARY KEY, max_id bigint, at timestamptz NOT NULL)""",
-    """CREATE TABLE IF NOT EXISTS mig_chat_owner (
-        platform text NOT NULL, legacy_chat_id bigint NOT NULL, account_id int NOT NULL,
-        rule text NOT NULL, PRIMARY KEY (platform, legacy_chat_id, account_id))""",
-    """CREATE TABLE IF NOT EXISTS mig_unassigned (
-        legacy_chat_id bigint PRIMARY KEY, chat_type text, title text, messages bigint)""",
-    """CREATE TABLE IF NOT EXISTS mig_membership (
-        account_id int NOT NULL REFERENCES accounts(id), external_chat_id bigint NOT NULL,
-        chat_type text NOT NULL, title text, role text, access_hash bigint,
-        PRIMARY KEY (account_id, external_chat_id))""",
-)
+# Created by migration 011 (no DDL at run time: the service role has no CREATE).
+MIG_TABLES = ("mig_watermark", "mig_chat_owner", "mig_unassigned", "mig_membership")
 
 
 class PreconditionFailed(Exception):
@@ -138,15 +127,19 @@ def _account_id(conn, alias: str, platform: str | None = None) -> int | None:
 
 def open_ctx(opts: Options) -> Ctx:
     conn = connect()
+    with conn.cursor() as cur:
+        cur.execute("SELECT t FROM unnest(%s::text[]) t WHERE to_regclass(t) IS NULL", (list(MIG_TABLES),))
+        missing = [r[0] for r in cur.fetchall()]
+    if missing:
+        conn.close()
+        raise SystemExit(f"{', '.join(missing)} missing: run alembic upgrade head (migration 011)")
     low = _account_id(conn, opts.low_account, "telegram")
     high = _account_id(conn, opts.high_account, "telegram")
     if low is None or high is None:
         raise SystemExit(f"TG accounts {opts.low_account!r}/{opts.high_account!r} not found")
     ctx = Ctx(conn, opts, low, high, _account_id(conn, opts.max_account, "max"))
     with conn.cursor() as cur:
-        cur.execute(E164_FN)
-        for ddl in MIG_DDL:
-            cur.execute(ddl)
+        cur.execute(E164_FN)  # pg_temp: needs TEMP on the database, not CREATE on the schema
     conn.commit()
     return ctx
 
