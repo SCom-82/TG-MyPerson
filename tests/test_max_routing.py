@@ -121,7 +121,7 @@ async def test_max_ro_send_message_403_and_audit_denied(client, accounts):
         "mode": "ro",
         "reason": "read-only account",
     }
-    assert await _audit_rows(alias) == [("send_message", True, "denied", "HTTP 403")]
+    assert await _audit_rows(alias) == [("send_message", True, "denied", "HTTP 403,legacy_key")]  # shared key (D10)
 
 
 @pytest.mark.asyncio
@@ -148,7 +148,7 @@ async def test_max_list_members_501_and_audit_error(client, accounts):
         "platform": "max",
         "alias": alias,
     }
-    assert await _audit_rows(alias) == [("list_members", False, "error", "HTTP 501")]
+    assert await _audit_rows(alias) == [("list_members", False, "error", "HTTP 501,legacy_key")]  # shared key (D10)
 
 
 @pytest.mark.parametrize(
@@ -174,7 +174,7 @@ async def test_max_rw_write_passes_authz_then_501(client, accounts):
     resp = await client.post("/api/v1/messages", headers=_h(alias), json={"chat_id": 1, "text": "x"})
     assert resp.status_code == 501
     assert resp.json()["tool"] == "send_message"
-    assert await _audit_rows(alias) == [("send_message", True, "error", "HTTP 501")]
+    assert await _audit_rows(alias) == [("send_message", True, "error", "HTTP 501,legacy_key")]  # shared key (D10)
 
 
 @pytest.mark.asyncio
@@ -255,7 +255,7 @@ async def test_tg_alias_max_only_tool_501(client, accounts, method, path, tool):
         "platform": "telegram",
         "alias": alias,
     }
-    assert await _audit_rows(alias) == [(tool, False, "error", "HTTP 501")]
+    assert await _audit_rows(alias) == [(tool, False, "error", "HTTP 501,legacy_key")]  # shared key (D10)
 
 
 # ---------------------------------------------------------------------------
