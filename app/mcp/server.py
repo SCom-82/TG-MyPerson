@@ -62,10 +62,14 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     caller = _caller()
     args = arguments or {}
     tool = BY_NAME.get(name)
-    if tool is None or tool not in visible(caller):
-        return _text(f"Error: tool '{name}' is not available for this key")
     ctx = AuthContext(account_id=caller.account_id, alias=caller.alias, platform=caller.platform,
                       scope=caller.scope)
+    if tool is None or tool not in visible(caller):
+        # Reaching for another level (ro → write, account → contacts, owner → data)
+        # is visible in the audit like a denied REST call (QA D-4).
+        audit(ctx, tool.route if tool else name, status="denied", is_write=bool(tool and tool.is_write),
+              error="tool not available for this key")
+        return _text(f"Error: tool '{name}' is not available for this key")
     chat = args.get("chat_id", args.get("to_chat_id"))
     decision = await authorize(ctx, tool.route, chat_external_id=chat, is_write=tool.is_write)
     common = {"is_write": tool.is_write, "chat_id": chat if isinstance(chat, int) else None,

@@ -169,9 +169,22 @@ async def test_write_denied_by_policy_is_403_and_audited(app, accounts, mcp_keys
 
 
 async def test_ro_cannot_call_hidden_write_tool(app, mcp_keys):
+    import asyncio
+
     async with session(app, mcp_keys.b) as s:
         out = await tool(s, "send_message", chat_id=1, text="x")
+    async with session(app, mcp_keys.owner) as s:
+        await tool(s, "list_chats")
     assert "not available" in out
+    # QA D-4: the attempt is in the audit as denied
+    for _ in range(50):
+        rows = sql("SELECT alias, tool, status, error FROM audit_logs WHERE status = 'denied'"
+                   " AND alias IN ('iso-b', 'owner') ORDER BY id", fetch=True)
+        if len(rows) >= 2:
+            break
+        await asyncio.sleep(0.05)
+    assert ("iso-b", "send_message", "denied", "tool not available for this key") in rows
+    assert ("owner", "list_chats", "denied", "tool not available for this key") in rows
 
 
 async def test_owner_tools(app, accounts, mcp_keys):
