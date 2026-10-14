@@ -28,8 +28,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 _CHAT_ID = -990_000_000_009
 _USER_ID = 990_000_000_009
 
-# Alembic head of the repo; 009 is no longer the last revision (010 account isolation).
-_HEAD = "010"
+# Alembic head of the repo (010 account isolation, 011 mig_* tables).
+_HEAD = "011"
 
 _MAX_TABLES = (
     "max_users",
