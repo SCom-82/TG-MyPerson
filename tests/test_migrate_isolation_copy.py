@@ -324,3 +324,47 @@ def test_delta_refreshes_account_users(legacy_db):
     ic.delta(_opts())
     names = {r[0] for r in _exec(legacy_db, f"SELECT username FROM users WHERE external_id = {ALICE}", fetch=True)}
     assert names == {"alice_new"}
+
+
+# ---------------------------------------------------------------------------
+# QA D-1 / D-2: watermark of repeated copy and of delta
+# ---------------------------------------------------------------------------
+
+def test_d1_edits_between_two_copies_reach_the_next_delta(legacy_db):
+    ic.copy(_opts())
+    first = _exec(legacy_db, "SELECT tbl, at FROM mig_watermark ORDER BY tbl", fetch=True)
+    _exec(legacy_db, f"""
+        UPDATE tg_messages SET text = 'edited between copies', is_edited = true, edit_date = now() WHERE id = 1;
+        UPDATE tg_chats SET title = 'renamed between copies', updated_at = now() WHERE id = {SHARED};
+        UPDATE max_messages SET deleted_at = now() WHERE id = 1;""")
+    again = ic.copy(_opts())
+    assert set(again["changes"].values()) == {0}
+    assert _exec(legacy_db, "SELECT tbl, at FROM mig_watermark ORDER BY tbl", fetch=True) == first  # not moved
+
+    ic.delta(_opts())
+    msgs = _messages(legacy_db)
+    for alias in ("work", "personal-ro"):
+        assert (alias, SHARED, 1, "edited between copies", False) in msgs
+    assert {t for (t,) in _exec(legacy_db, f"SELECT title FROM chats WHERE external_id = {SHARED}",
+                                fetch=True)} == {"renamed between copies"}
+    assert _exec(legacy_db, "SELECT deleted_at IS NOT NULL FROM messages WHERE external_id = 9001",
+                 fetch=True) == [(True,)]
+
+
+def test_d2_change_during_a_delta_reaches_the_next_one(legacy_db, monkeypatch):
+    ic.copy(_opts())
+    original = ic.step_h_media
+
+    def edit_while_running(ctx):
+        # a legacy write while delta runs, after its message step already read the table
+        _exec(legacy_db, "UPDATE tg_messages SET text = 'edited during delta', is_edited = true,"
+                         " edit_date = clock_timestamp() WHERE id = 2")
+        return original(ctx)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ic, "COPY_STEPS", [(n, edit_while_running if f is original else f)
+                                      for n, f in ic.COPY_STEPS])
+        ic.delta(_opts())
+    assert ("work", SHARED, 2, "edited during delta", False) not in _messages(legacy_db)
+    ic.delta(_opts())
+    assert ("work", SHARED, 2, "edited during delta", False) in _messages(legacy_db)

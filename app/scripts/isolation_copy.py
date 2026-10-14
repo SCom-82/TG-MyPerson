@@ -174,15 +174,26 @@ def _self_ids_from_report(path: Path | None) -> dict[str, int]:
 # Steps (each returns a small dict for the report)
 # ---------------------------------------------------------------------------
 
-def step_watermark(ctx: Ctx) -> dict:
-    out = {}
-    for t in WATERMARK_TABLES:
-        max_id = ctx.one(f"SELECT max(id) FROM {t}") if t not in ("tg_chats", "tg_users") else None
-        ctx.q("INSERT INTO mig_watermark (tbl, max_id, at) VALUES (%(t)s, %(m)s, now())"
-              " ON CONFLICT (tbl) DO UPDATE SET max_id = excluded.max_id, at = excluded.at",
-              {"t": t, "m": max_id})
-        out[t] = max_id
-    return out
+def read_watermark(ctx: Ctx) -> dict[str, tuple[int | None, datetime]]:
+    """The legacy position NOW: max ids and the clock, taken before any step reads
+    a table, so a change made while the steps run is newer than the mark."""
+    at = ctx.one("SELECT clock_timestamp()")
+    return {
+        t: (ctx.one(f"SELECT max(id) FROM {t}") if t not in ("tg_chats", "tg_users") else None, at)
+        for t in WATERMARK_TABLES
+    }
+
+
+def write_watermark(ctx: Ctx, values: dict, *, keep_existing: bool) -> dict:
+    """keep_existing (copy): only the first copy sets the mark. A repeated copy
+    does not update rows it already copied (DO NOTHING); moving the mark would
+    make delta skip legacy edits made between the copies (QA D-1)."""
+    conflict = ("DO NOTHING" if keep_existing
+                else "DO UPDATE SET max_id = excluded.max_id, at = excluded.at")
+    for t, (max_id, at) in values.items():
+        ctx.q(f"INSERT INTO mig_watermark (tbl, max_id, at) VALUES (%(t)s, %(m)s, %(at)s)"
+              f" ON CONFLICT (tbl) {conflict}", {"t": t, "m": max_id, "at": at})
+    return {t: v[0] for t, v in values.items()}
 
 
 def step_a_accounts(ctx: Ctx) -> dict:
@@ -771,7 +782,7 @@ def copy(opts: Options) -> dict:
         _check_cutover(ctx, "copy")
         check_partitions(ctx)
         before = _counts(ctx)
-        step_watermark(ctx)
+        write_watermark(ctx, read_watermark(ctx), keep_existing=True)
         ctx.conn.commit()
         report = _run_steps(ctx, COPY_STEPS)
         after = _counts(ctx)
@@ -792,9 +803,13 @@ def delta(opts: Options, *, cutover: bool = False) -> dict:
         if set(WATERMARK_TABLES) - set(wm):
             raise SystemExit("no watermark: run copy first")
         ctx.delta_wm = wm
+        # The new mark is the position at the START of this delta, written at its
+        # end: changes made during the run go to the next delta (QA D-2).
+        position = read_watermark(ctx)
+        ctx.conn.commit()
         before = _counts(ctx)
         report = _run_steps(ctx, [s for s in COPY_STEPS if s[0] != "D_preconditions"])
-        step_watermark(ctx)
+        write_watermark(ctx, position, keep_existing=False)
         ctx.conn.commit()
         after = _counts(ctx)
         report.update(command="delta", ok=True, since={t: wm[t][1].isoformat() for t in wm if t != CUTOVER},
