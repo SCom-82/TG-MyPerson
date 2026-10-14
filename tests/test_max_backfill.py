@@ -711,6 +711,51 @@ def test_client_user_agent_web_and_tcp():
     assert client_user_agent(SimpleNamespace()) is None
 
 
+@pytest.mark.parametrize("url, shown", [
+    ("https://i.oneme.ru/i?r=SECRET&expires=1", "i.oneme.ru/i?r=…&expires=1"),
+    ("https://cdn.example/a?X-Amz-Signature=SECRET&key=SECRET", "cdn.example/a?X-Amz-Signature=…&key=…"),
+    ("https://vd1.okcdn.ru/?expires=1&srcIp=1.2.3.4&srcAg=CHROME&type=3&pr=4&clientType=0&ct=0&sig=SECRET&id=SECRET",
+     "vd1.okcdn.ru/?expires=1&srcIp=1.2.3.4&srcAg=CHROME&type=3&pr=4&clientType=0&ct=0&sig=…&id=…"),
+    ("https://vsd2.okcdn.ru/cmaf/SECRET/sig/SECRET/expires/2/srcAg/CHROME/mid/SECRET/video.m3u8",
+     "vsd2.okcdn.ru/cmaf/…/sig/…/expires/2/srcAg/CHROME/mid/…/video.m3u8"),
+    ("https://fd.oneme.ru/AbCdSECRETlongSegment/getfile", "fd.oneme.ru/…/getfile"),
+])
+def test_cdn_url_in_the_log_is_allowlisted(url, shown):
+    """R8-1: names of all parameters, values only of the safe ones."""
+    from app.max.media import describe_url
+
+    assert describe_url(url) == shown and "SECRET" not in describe_url(url)
+
+
+def test_cdn_body_in_the_log_is_masked():
+    from app.max.media import body_for_log
+
+    masked = body_for_log("denied https://i.oneme.ru/i?r=SECRET; retry key=SECRET&expires=5")
+    assert "SECRET" not in masked and "i.oneme.ru/i?r=…" in masked and "expires=5" in masked
+
+
+@pytest.mark.parametrize("transport, prefix", [("web", "Mozilla/5.0"), ("tcp", "OKMessages/")])
+async def test_user_agent_comes_from_the_real_pymax_client(transport, prefix):
+    """The private PyMax path (_app.config.device.user_agent) on a real client of
+    the pinned version: an upgrade that moves it fails here, not silently in prod."""
+    from app.max.media import client_user_agent
+    from app.max.session import build_client, build_extra_config
+
+    client = build_client(transport=transport, phone="+70000000000",
+                          extra_config=build_extra_config(proxy=None, store=None), auth_flow=None)
+    await client._ensure_runtime()  # what start/connect does first; no network
+    ua = client_user_agent(client)
+    assert ua is not None and ua.startswith(prefix)
+    assert ua == (client._app.config.device.user_agent.header_user_agent or ua)
+
+
+def test_missing_session_user_agent_is_a_warning(caplog):
+    from app.max.media import client_user_agent
+
+    assert client_user_agent(SimpleNamespace()) is None
+    assert any(r.levelname == "WARNING" and "no session User-Agent" in r.getMessage() for r in caplog.records)
+
+
 @pytest.mark.asyncio
 async def test_download_cdn_error_502(env, cdn):
     await _media_env(env, cdn, [FILE_ATT])

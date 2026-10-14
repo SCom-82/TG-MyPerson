@@ -90,11 +90,15 @@ def client_user_agent(client: Any) -> str | None:
     (srcIp = the proxy egress, srcAg = its browser family, e.g. CHROME); a request
     with another agent (aiohttp's default) gets HTTP 400 from the CDN. Web
     transport: the browser UA of the session; TCP: the app's own form, as PyMax
-    uses for its uploads.
+    uses for its uploads. The path goes through PyMax's private `_app`
+    (maxapi-python pinned in requirements.lock): if it moves, a WARNING says so
+    instead of silently falling back to aiohttp's agent.
     """
     try:
         ua = client._app.config.device.user_agent
-    except Exception:  # noqa: BLE001 — not started / a test double
+    except Exception as exc:  # noqa: BLE001
+        log.warning("max media: no session User-Agent (%s: %s), the CDN gets aiohttp's default",
+                    type(exc).__name__, exc)
         return None
     if getattr(ua, "header_user_agent", None):
         return ua.header_user_agent
@@ -102,17 +106,63 @@ def client_user_agent(client: Any) -> str | None:
         return DEFAULT_WEB_HEADER_USER_AGENT
     if getattr(ua, "app_version", None):
         return f"OKMessages/{ua.app_version} ({ua.os_version}; {ua.device_name}; {ua.screen})"
+    log.warning("max media: session User-Agent %r has no usable form, the CDN gets aiohttp's default",
+                type(ua).__name__)
     return None
 
 
-_SIGNED = re.compile(r"(sig|signature|signatureToken|tkn|token)([=/])[^&/]+", re.IGNORECASE)
+# Values that may go to the log (review 8, R8-1); everything else is "…".
+LOG_SAFE_PARAMS = frozenset({"expires", "srcag", "srcip", "type", "clienttype", "pr", "ct"})
+_WORD = re.compile(r"[a-z][a-z0-9_-]{0,15}(\.[a-z0-9]{1,5})?")
+_PAIR = re.compile(r"([A-Za-z_][\w.-]*)=([^&\s\"'<>]*)")
+_URL = re.compile(r"https?://[^\s\"'<>]+")
+
+
+def _path_for_log(path: str) -> str:
+    """Path segments: safe names and the value after a safe name; a short
+    lowercase word (i, getfile, cmaf, video.m3u8) as is, but the segment after a
+    word that is not a safe name is a value (okcdn /sig/<value>/) → "…"."""
+    out, value_next, safe_next = [], False, False
+    for seg in path.split("/"):
+        if not seg:
+            out.append(seg)
+            continue
+        if safe_next:
+            out.append(seg if len(seg) <= 40 else "…")
+            safe_next = value_next = False
+        elif value_next:
+            out.append("…")
+            value_next = False
+        elif seg.lower() in LOG_SAFE_PARAMS:
+            out.append(seg)
+            safe_next = True
+        elif _WORD.fullmatch(seg):
+            out.append(seg)
+            value_next = True
+        else:
+            out.append("…")
+    return "/".join(out)
+
+
+def _pairs_for_log(text: str) -> str:
+    return _PAIR.sub(lambda m: f"{m.group(1)}={m.group(2) if m.group(1).lower() in LOG_SAFE_PARAMS else '…'}",
+                     text)
 
 
 def describe_url(url: str) -> str:
-    """URL for the log: host, path and query without signatures."""
+    """URL for the log: host, path, the NAMES of all query parameters; values
+    only of LOG_SAFE_PARAMS (photo tokens live in r=, not in sig=)."""
     parts = urllib.parse.urlsplit(url)
-    rest = _SIGNED.sub(r"\1\2…", parts.path + ("?" + parts.query if parts.query else ""))
-    return f"{parts.netloc}{rest[:300]}"
+    query = "&".join(
+        f"{k}={v if k.lower() in LOG_SAFE_PARAMS else '…'}"
+        for k, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+    )
+    return f"{parts.netloc}{_path_for_log(parts.path)}{'?' + query if query else ''}"[:400]
+
+
+def body_for_log(body: str) -> str:
+    """CDN error body: URLs and name=value pairs masked like describe_url."""
+    return _pairs_for_log(_URL.sub(lambda m: describe_url(m.group()), body))
 
 
 def http_session(proxy_url: str | None) -> tuple[aiohttp.ClientSession, dict]:
@@ -187,7 +237,8 @@ async def open_stream(url: str, *, proxy_url: str | None, offset: int,
         response.release()
         await session.close()
         log.warning("max media: CDN answered HTTP %s for %s (ua=%s): %r",
-                    response.status, describe_url(url), "session" if user_agent else "default", body)
+                    response.status, describe_url(url), "session" if user_agent else "default",
+                    body_for_log(body))
         raise MediaUpstreamError(f"CDN answered HTTP {response.status}")
 
     return UpstreamStream(
