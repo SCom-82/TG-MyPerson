@@ -15,7 +15,7 @@ import aiohttp
 from aiohttp_socks import ProxyConnector
 from pymax.types.domain import Message
 
-from app.utils.raw import model_raw
+from app.utils.raw import model_raw, strip_bytes_markers
 
 log = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ class ResolvedMedia:
 
 
 def attachment_at(raw_message: dict, index: int) -> Any:
-    msg = Message.model_validate(raw_message)
+    msg = Message.model_validate(strip_bytes_markers(raw_message))  # stored raw: no bytes (R7-1)
     if index < 0 or index >= len(msg.attaches):
         raise MediaNotFound(f"no attachment #{index}")
     return msg.attaches[index]

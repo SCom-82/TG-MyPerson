@@ -198,3 +198,27 @@ async def test_binary_chat_fields_do_not_break_authorized_and_sync_chats(new_env
     assert await session.sync.sync_chats() == 1
     [row] = await _rows(new_env.account_id, Chat, Chat.id)
     assert row.title == "Переименован"
+
+
+@pytest.mark.parametrize("name, kind", [("n03_photo", "PhotoAttachment"), ("n05_video", "VideoAttachment")])
+async def test_stored_raw_with_preview_bytes_resolves_attachment(new_env, name, kind):
+    """R7-1: previewData bytes → {"_bytes": n} in the stored raw → attachment_at still works."""
+    from types import SimpleNamespace
+
+    from app.api import data_reads
+    from app.max import media
+    from tests.test_raw_bytes import _with_preview
+
+    client = await _authorized(new_env)
+    frame = {**fx(name)["frame"], "payload": _with_preview(name)}
+    await client.push(frame)
+    [msg] = await _rows(new_env.account_id, Message, Message.id)
+    assert msg.raw["attaches"][0]["previewData"] == {"_bytes": 4}
+    [event] = await _rows(new_env.account_id, RawEvent, RawEvent.id)  # the frame journal too
+    assert event.payload["message"]["attaches"][0]["previewData"] == {"_bytes": 4} and event.normalized
+
+    request = SimpleNamespace(state=SimpleNamespace(account_id=new_env.account_id))
+    raw = await data_reads.stored_raw(request, fx(name)["frame"]["payload"]["chatId"], msg.external_id)
+    raw.pop("_pymax", None)
+    att = media.attachment_at(raw, 0)
+    assert type(att).__name__ == kind and att.preview_data is None

@@ -11,11 +11,12 @@ import math
 from datetime import datetime, timezone
 from enum import Enum
 
+import pytest
 from pymax.types import Chat, User
 from pymax.types.domain import Message
 
 from app.max import media, normalize
-from app.utils.raw import jsonable, model_raw
+from app.utils.raw import jsonable, model_raw, strip_bytes_markers
 from tests.test_max_ingest import fx
 
 BIN = b"\xff\xfe\x00\x01"
@@ -72,3 +73,27 @@ def test_media_round_trip_with_binary():
     raw = media.message_from_client(msg)
     assert raw["waveform"] == {"_bytes": 4}
     assert media.attachment_at(raw, 0) is not None
+
+
+def _with_preview(name: str) -> dict:
+    payload = fx(name)["frame"]["payload"]
+    attach = {**payload["message"]["attaches"][0], "previewData": BIN}
+    return {**payload, "message": {**payload["message"], "attaches": [attach]}}
+
+
+@pytest.mark.parametrize("name, kind", [("n03_photo", "PhotoAttachment"), ("n05_video", "VideoAttachment")])
+def test_attachment_from_raw_with_preview_bytes(name, kind):
+    """R7-1: typed preview_data: bytes | None does not accept the marker."""
+    msg = Message.model_validate(_with_preview(name)["message"])
+    raw = media.message_from_client(msg)
+    assert raw["attaches"][0]["previewData"] == {"_bytes": 4}
+    json.dumps(raw, allow_nan=False)
+
+    att = media.attachment_at(json.loads(json.dumps(raw)), 0)  # as read back from jsonb
+    assert type(att).__name__ == kind and att.preview_data is None
+
+
+def test_strip_bytes_markers_only_exact_marker():
+    raw = {"a": {"_bytes": 3}, "b": [{"_bytes": 1}], "c": {"_bytes": 3, "x": 1}, "d": {"_bytes": True}}
+    assert strip_bytes_markers(raw) == {"a": None, "b": [None], "c": {"_bytes": 3, "x": 1},
+                                        "d": {"_bytes": True}}

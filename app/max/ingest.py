@@ -26,6 +26,7 @@ from app.max.store_new import NewMaxStore
 from app.max.stream import max_stream_manager
 from app.services.stream_service import stream_manager
 from app.services.tg_store import new_mode, shadow
+from app.utils.raw import jsonable
 
 if TYPE_CHECKING:
     from app.max.session import MaxSession
@@ -97,17 +98,19 @@ class MaxIngest:
         received_at = datetime.now(timezone.utc)
         self.session.last_event_at = received_at
         new = self.new
+        # The journal is jsonb: binary fields as {"_bytes": n} (D16 B); parsing gets the frame as is.
+        journaled = jsonable(payload)
         new_raw_id = None
         if new is not None:
             try:
-                new_raw_id = await new.journal(opcode, payload)
+                new_raw_id = await new.journal(opcode, journaled)
             except Exception:  # noqa: BLE001
                 log.exception("max[%s]: failed to journal frame opcode=%s", self.session.alias, opcode)
         raw_id = None
         if new is None or self._shadow_on():
             try:
                 async with database.async_session() as db:
-                    raw_id = await repo.insert_raw_event(db, self.session.account_id, opcode, payload)
+                    raw_id = await repo.insert_raw_event(db, self.session.account_id, opcode, journaled)
                     await db.commit()
             except Exception:  # noqa: BLE001
                 log.log(logging.WARNING if new else logging.ERROR,

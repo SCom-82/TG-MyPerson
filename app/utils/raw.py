@@ -60,3 +60,23 @@ def jsonable(value: Any) -> Any:
 def model_raw(model: Any) -> dict:
     """A pymax model → raw dict (camelCase keys, as model_dump(by_alias=True))."""
     return jsonable(model.model_dump(mode="python", by_alias=True))
+
+
+def is_bytes_marker(value: Any) -> bool:
+    return (isinstance(value, dict) and len(value) == 1
+            and isinstance(value.get("_bytes"), int) and not isinstance(value["_bytes"], bool))
+
+
+def strip_bytes_markers(value: Any) -> Any:
+    """Stored raw → input for model_validate: {"_bytes": n} → None.
+
+    Typed bytes fields (pymax PhotoAttachment/VideoAttachment.preview_data:
+    bytes | None) do not accept the marker; the content is gone anyway (D16 B).
+    """
+    if is_bytes_marker(value):
+        return None
+    if isinstance(value, dict):
+        return {k: strip_bytes_markers(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [strip_bytes_markers(v) for v in value]
+    return value
