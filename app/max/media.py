@@ -8,11 +8,15 @@ PROXY as the MAX connection, 256 KiB chunks, with `Range: bytes=N-` resume.
 """
 
 import logging
+import re
+import urllib.parse
 from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
 from aiohttp_socks import ProxyConnector
+from pymax.api.session.enums import DeviceType
+from pymax.api.session.payloads import DEFAULT_WEB_HEADER_USER_AGENT
 from pymax.types.domain import Message
 
 from app.utils.raw import model_raw, strip_bytes_markers
@@ -79,6 +83,38 @@ async def resolve(client: Any, chat_id: int, message_id: int, attachment: Any, k
     return ResolvedMedia(url=url, file_type=file_type, filename=filename, size=size)
 
 
+def client_user_agent(client: Any) -> str | None:
+    """The HTTP User-Agent of the MAX session itself.
+
+    Video URLs from VIDEO_PLAY are okcdn links signed for the requesting client
+    (srcIp = the proxy egress, srcAg = its browser family, e.g. CHROME); a request
+    with another agent (aiohttp's default) gets HTTP 400 from the CDN. Web
+    transport: the browser UA of the session; TCP: the app's own form, as PyMax
+    uses for its uploads.
+    """
+    try:
+        ua = client._app.config.device.user_agent
+    except Exception:  # noqa: BLE001 — not started / a test double
+        return None
+    if getattr(ua, "header_user_agent", None):
+        return ua.header_user_agent
+    if getattr(ua, "device_type", None) == DeviceType.WEB:
+        return DEFAULT_WEB_HEADER_USER_AGENT
+    if getattr(ua, "app_version", None):
+        return f"OKMessages/{ua.app_version} ({ua.os_version}; {ua.device_name}; {ua.screen})"
+    return None
+
+
+_SIGNED = re.compile(r"(sig|signature|signatureToken|tkn|token)([=/])[^&/]+", re.IGNORECASE)
+
+
+def describe_url(url: str) -> str:
+    """URL for the log: host, path and query without signatures."""
+    parts = urllib.parse.urlsplit(url)
+    rest = _SIGNED.sub(r"\1\2…", parts.path + ("?" + parts.query if parts.query else ""))
+    return f"{parts.netloc}{rest[:300]}"
+
+
 def http_session(proxy_url: str | None) -> tuple[aiohttp.ClientSession, dict]:
     """aiohttp session + per-request kwargs that route through MAX_PROXY_URL.
 
@@ -117,10 +153,13 @@ class UpstreamStream:
             await self.session.close()
 
 
-async def open_stream(url: str, *, proxy_url: str | None, offset: int) -> UpstreamStream:
+async def open_stream(url: str, *, proxy_url: str | None, offset: int,
+                      user_agent: str | None = None) -> UpstreamStream:
     """Start the upstream request; raise before any byte is sent to our client."""
     session, kwargs = http_session(proxy_url)
     headers = {"Range": f"bytes={offset}-"} if offset else {}
+    if user_agent:
+        headers["User-Agent"] = user_agent
     try:
         response = await session.get(url, headers=headers, **kwargs)
     except Exception as exc:  # noqa: BLE001
@@ -141,8 +180,14 @@ async def open_stream(url: str, *, proxy_url: str | None, offset: int) -> Upstre
         size = content_range.rsplit("/", 1)[1] if "/" in content_range else "*"
         raise RangeNotSatisfiable(size)
     else:
+        try:
+            body = (await response.content.read(300)).decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001
+            body = ""
         response.release()
         await session.close()
+        log.warning("max media: CDN answered HTTP %s for %s (ua=%s): %r",
+                    response.status, describe_url(url), "session" if user_agent else "default", body)
         raise MediaUpstreamError(f"CDN answered HTTP {response.status}")
 
     return UpstreamStream(

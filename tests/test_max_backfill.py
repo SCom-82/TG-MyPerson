@@ -16,6 +16,7 @@
 import asyncio
 import time
 import urllib.parse
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -577,7 +578,14 @@ async def cdn():
     async def gone(request):
         return web.Response(status=404)
 
+    async def signed_for_chrome(request):
+        # okcdn video links are signed for the client's agent family (srcAg=CHROME)
+        if "Chrome/" not in request.headers.get("User-Agent", ""):
+            return web.Response(status=400, text="bad agent")
+        return web.Response(body=BLOB, content_type="video/mp4")
+
     app = web.Application()
+    app.router.add_get("/signed", signed_for_chrome)
     app.router.add_get("/file", ranged)
     app.router.add_get("/plain", no_range)
     app.router.add_get("/gone", gone)
@@ -662,6 +670,45 @@ async def test_download_video_not_ready_502(env, cdn):
     resp = await env.client.get(f"/api/v1/messages/{GROUP}/5/media", headers=env.h())
     assert resp.status_code == 502
     assert "video.not.ready" in resp.json()["detail"]
+
+
+VIDEO_ATT = {"_type": "VIDEO", "height": 1, "width": 1, "videoId": 7, "thumbnail": "t", "token": "v", "videoType": 0}
+
+
+@pytest.mark.asyncio
+async def test_download_video_with_the_session_user_agent(env, cdn, caplog):
+    """Prod 14.10: the okcdn video link is signed for the session's agent
+    (srcAg=CHROME); aiohttp's default User-Agent got HTTP 400 → 502."""
+    from pymax import ExtraConfig
+
+    await _media_env(env, cdn, [VIDEO_ATT])
+    env.server.video_url = cdn("/signed") + "?expires=1&srcAg=CHROME&sig=SECRET"
+    client = env.server.clients[-1]
+
+    resp = await env.client.get(f"/api/v1/messages/{GROUP}/5/media", headers=env.h())  # no agent known
+    assert resp.status_code == 502 and resp.json()["detail"] == "CDN answered HTTP 400"
+    logged = [r.getMessage() for r in caplog.records if "CDN answered" in r.getMessage()]
+    assert logged and "srcAg=CHROME" in logged[-1] and "SECRET" not in logged[-1] and "bad agent" in logged[-1]
+
+    client._app = SimpleNamespace(config=SimpleNamespace(
+        device=SimpleNamespace(user_agent=ExtraConfig().generate_web_user_agent())))
+    resp = await env.client.get(f"/api/v1/messages/{GROUP}/5/media", headers=env.h())
+    assert resp.status_code == 200 and resp.content == BLOB
+
+
+def test_client_user_agent_web_and_tcp():
+    from pymax import ExtraConfig
+
+    from app.max.media import client_user_agent
+
+    def client(ua):
+        return SimpleNamespace(_app=SimpleNamespace(config=SimpleNamespace(device=SimpleNamespace(user_agent=ua))))
+
+    web_ua = ExtraConfig().generate_web_user_agent()
+    assert client_user_agent(client(web_ua)) == web_ua.header_user_agent
+    tcp_ua = ExtraConfig().generate_user_agent("26.25.0", 6790)
+    assert client_user_agent(client(tcp_ua)).startswith(f"OKMessages/{tcp_ua.app_version} (")
+    assert client_user_agent(SimpleNamespace()) is None
 
 
 @pytest.mark.asyncio

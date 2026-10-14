@@ -139,7 +139,8 @@ async def download_media(
 
     # 4. Upstream through the MAX proxy; fail before any byte is sent.
     try:
-        upstream = await media.open_stream(resolved.url, proxy_url=session.settings.proxy_url, offset=offset)
+        upstream = await media.open_stream(resolved.url, proxy_url=session.settings.proxy_url, offset=offset,
+                                           user_agent=media.client_user_agent(client))
     except media.RangeNotSatisfiable as exc:
         return _range_not_satisfiable(exc.size)
     except media.MediaUpstreamError as exc:
