@@ -15,6 +15,8 @@ import aiohttp
 from aiohttp_socks import ProxyConnector
 from pymax.types.domain import Message
 
+from app.utils.raw import model_raw
+
 log = logging.getLogger(__name__)
 
 CHUNK_SIZE = 256 * 1024
@@ -47,7 +49,7 @@ def attachment_at(raw_message: dict, index: int) -> Any:
 
 
 def message_from_client(message: Any) -> dict:
-    return message.model_dump(mode="json", by_alias=True)
+    return model_raw(message)
 
 
 async def resolve(client: Any, chat_id: int, message_id: int, attachment: Any, kind: str | None) -> ResolvedMedia:

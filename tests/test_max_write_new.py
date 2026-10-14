@@ -178,3 +178,23 @@ async def test_frames_before_identity_check_are_dropped(new_env):
     session.identity_ok = False
     await ingest.on_frame(normalize.OP_MESSAGE, normalize.SERVER_PUSH, fx("n03_photo")["frame"]["payload"])
     assert await _rows(new_env.account_id, Message, Message.id) == []
+
+
+async def test_binary_chat_fields_do_not_break_authorized_and_sync_chats(new_env):
+    """Prod 14.10: a chat with a binary extra field broke the authorized hook and
+    sync_chats (UnicodeDecodeError) — the chat list stopped updating (D16 B)."""
+    blob = b"\xff\xfe\x00\x01"
+    chat = {**fx("c01_chat")["frame"]["payload"]["chat"], "iconBlob": blob}
+    new_env.server.chats = [chat]
+    new_env.server.contacts = [{"id": 200, "names": [{"firstName": "Анна"}], "avatarBlob": blob}]
+    await _authorized(new_env)
+    [row] = await _rows(new_env.account_id, Chat, Chat.id)
+    assert (row.external_id, row.raw["iconBlob"]) == (GROUP, {"_bytes": 4})
+    users = {u.external_id: u for u in await _rows(new_env.account_id, User, User.id)}
+    assert users[200].raw["avatarBlob"] == {"_bytes": 4}
+
+    new_env.server.chats = [{**chat, "title": "Переименован", "lastEventTime": chat.get("lastEventTime", 0) + 1}]
+    session = await new_env.session()
+    assert await session.sync.sync_chats() == 1
+    [row] = await _rows(new_env.account_id, Chat, Chat.id)
+    assert row.title == "Переименован"

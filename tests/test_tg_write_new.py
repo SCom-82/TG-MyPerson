@@ -21,7 +21,10 @@ from telethon.tl.types import (
     InputPeerChannel,
     InputPeerUser,
     Message,
+    MessageMediaPhoto,
     PeerChannel,
+    Photo,
+    PhotoStrippedSize,
     PeerUser,
     User,
 )
@@ -103,6 +106,19 @@ async def test_store_event_writes_account_tables(accounts):
     # Full TL object in raw, not the 7 legacy fields.
     assert msg.raw["_"] == "Message" and msg.raw["peer_id"]["channel_id"] == CHANNEL
     assert msg.raw["views"] == 3
+
+
+async def test_binary_fields_in_raw_are_sizes(accounts):
+    """D16 B: file_reference / thumbs → {"_bytes": len}, the raw stays valid jsonb."""
+    photo = Photo(id=1, access_hash=2, file_reference=b"\xff\x00\x01", date=DATE,
+                  sizes=[PhotoStrippedSize("i", b"\xff\xfe")], dc_id=2)
+    msg = message(8)
+    msg.media = MessageMediaPhoto(photo=photo)
+    await tg_store.store_event(accounts.a, event(msg, channel(), user()))
+
+    [row] = await _messages(accounts.a)
+    assert row.raw["media"]["photo"]["file_reference"] == {"_bytes": 3}
+    assert row.raw["media"]["photo"]["sizes"][0]["bytes"] == {"_bytes": 2}
 
 
 async def test_sender_without_entity_gets_stub_user(accounts):

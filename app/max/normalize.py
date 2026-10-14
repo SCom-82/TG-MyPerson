@@ -16,6 +16,8 @@ from pymax.types.domain import Message
 from pymax.types.domain.attachments.enums import AttachmentType
 from pymax.types.domain.enums import ChatType, LinkType, MessageStatus
 
+from app.utils.raw import model_raw
+
 PYMAX_VERSION = pymax.__version__
 
 # Frames journaled into max_raw_events before typed processing (ADR §2.E).
@@ -151,7 +153,7 @@ def normalize_message(
     edited = is_edit or status == MessageStatus.EDITED.value
     stats = msg.stats or {}
 
-    raw = msg.model_dump(mode="json", by_alias=True)
+    raw = model_raw(msg)
     raw["_pymax"] = PYMAX_VERSION
 
     row = {
@@ -179,7 +181,7 @@ def normalize_message(
 def normalize_chat(chat: Chat) -> dict:
     kind = _value(chat.type)
     last = chat.last_message
-    raw = chat.model_dump(mode="json", by_alias=True)
+    raw = model_raw(chat)
     raw["_pymax"] = PYMAX_VERSION
     return {
         "id": chat.id,
@@ -198,7 +200,7 @@ def normalize_user(user: User, *, me_id: int | None = None) -> dict:
     names = user.names or []
     first = names[0] if names else None
     first_name = getattr(first, "first_name", None) or getattr(first, "name", None)
-    raw = user.model_dump(mode="json", by_alias=True)
+    raw = model_raw(user)
     raw["_pymax"] = PYMAX_VERSION
     return {
         "id": user.id,

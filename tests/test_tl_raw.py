@@ -19,8 +19,8 @@ def test_tl_to_json_bytes_datetimes_nested():
     raw = tl_to_json(msg.to_dict())
     json.dumps(raw)  # serialisable
     assert raw["date"] == D.isoformat()
-    assert raw["media"]["photo"]["file_reference"] == "AQI="
-    assert raw["media"]["photo"]["sizes"][0]["bytes"] == "/w=="
+    assert raw["media"]["photo"]["file_reference"] == {"_bytes": 2}  # D16 B
+    assert raw["media"]["photo"]["sizes"][0]["bytes"] == {"_bytes": 1}
     assert raw["from_id"] == {"_": "PeerUser", "user_id": 9}
 
 

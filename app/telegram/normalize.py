@@ -1,11 +1,10 @@
 """Telethon objects → platform-neutral rows of app/repo (ТЗ 2026-10-13 §4.2, §5.1). No IO.
 
-The full TL object goes to raw (tl_to_json of to_dict()): everything platform
+The full TL object goes to raw (tl_to_json of to_dict(), binary fields as
+{"_bytes": len} — D16 B): everything platform
 specific lives there, the columns carry the core only.
 """
 
-import base64
-from datetime import datetime
 from typing import Any
 
 from telethon.tl.types import Channel, Chat, User
@@ -19,25 +18,13 @@ from app.services.message_service import (
     _get_forward_msg_id,
     _get_reply_to,
 )
+from app.utils.raw import jsonable
 from app.utils.sender import classify_sender
 
 
 def tl_to_json(value: Any) -> Any:
-    """to_dict() output → JSON-safe: bytes → base64, datetime → ISO, the rest as is."""
-    if isinstance(value, dict):
-        return {str(k): tl_to_json(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [tl_to_json(v) for v in value]
-    if isinstance(value, (bytes, bytearray)):
-        return base64.b64encode(bytes(value)).decode("ascii")
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    to_dict = getattr(value, "to_dict", None)
-    if callable(to_dict):
-        return tl_to_json(to_dict())
-    return str(value)
+    """to_dict() output → valid jsonb: bytes → {"_bytes": len} (D16 B), see app.utils.raw."""
+    return jsonable(value)
 
 
 def raw_of(obj: Any) -> dict | None:
