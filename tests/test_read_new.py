@@ -145,19 +145,42 @@ async def test_t16_require_account(accounts, test_client, monkeypatch):
     assert (await test_client.get("/api/v1/chats", headers=h("iso-a"))).status_code == 200
 
 
-async def test_implicit_work_is_audited(accounts, test_client):
+async def _audit_error(where: str, params=()) -> list:
     import asyncio
 
-    sql("DELETE FROM audit_logs WHERE error = 'implicit_work' AND tool = 'list_chat_snapshots'")
-    await test_client.get("/api/v1/snapshots/chat/1", headers=LEGACY)
     for _ in range(50):
-        rows = sql("SELECT alias FROM audit_logs WHERE error = 'implicit_work' AND tool = 'list_chat_snapshots'",
-                   fetch=True)
+        rows = sql(f"SELECT error FROM audit_logs WHERE {where} ORDER BY id DESC LIMIT 1", params, fetch=True)
         if rows:
-            break
+            return rows
         await asyncio.sleep(0.05)
-    assert rows == [("work",)]
-    sql("DELETE FROM audit_logs WHERE error = 'implicit_work' AND tool = 'list_chat_snapshots'")
+    return []
+
+
+async def test_implicit_work_and_legacy_key_are_audited(accounts, test_client):
+    """D6 + D10: no account and the shared key → both markers."""
+    sql("DELETE FROM audit_logs WHERE alias = 'work' AND tool = 'list_chat_snapshots'")
+    await test_client.get("/api/v1/snapshots/chat/1", headers=LEGACY)
+    assert await _audit_error("alias = 'work' AND tool = 'list_chat_snapshots'") == [("implicit_work,legacy_key",)]
+    sql("DELETE FROM audit_logs WHERE alias = 'work' AND tool = 'list_chat_snapshots'")
+
+
+async def test_legacy_key_with_alias_is_audited(accounts, test_client):
+    """D10: the shared key with X-Session-Alias — ok and error calls carry legacy_key."""
+    acc = accounts.a
+    sql("DELETE FROM audit_logs WHERE account_id = %s", (acc,))
+    assert (await test_client.get("/api/v1/snapshots/chat/1", headers=h("iso-a"))).status_code == 200
+    assert await _audit_error("account_id = %s AND status = 'ok'", (acc,)) == [("legacy_key",)]
+    r = await test_client.get("/api/v1/chats/999999999", headers=h("iso-a"))
+    assert r.status_code == 404
+    assert await _audit_error("account_id = %s AND status <> 'ok'", (acc,)) == [("HTTP 404,legacy_key",)]
+
+
+async def test_account_key_is_not_legacy(accounts, test_client):
+    acc = accounts.a
+    _, key_a = await keys.create_key(scope="account", account_id=acc, label="iso-test-d10")
+    sql("DELETE FROM audit_logs WHERE account_id = %s", (acc,))
+    assert (await test_client.get("/api/v1/snapshots/chat/1", headers=h(key=key_a))).status_code == 200
+    assert await _audit_error("account_id = %s", (acc,)) == [(None,)]
 
 
 # ---------------------------------------------------------------------------

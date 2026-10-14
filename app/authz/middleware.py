@@ -182,6 +182,7 @@ async def authenticate(request: Request) -> JSONResponse | None:
     ):
         if owner_path:
             return JSONResponse(status_code=403, content={"detail": "contacts need the owner key"})
+        request.state.legacy_key = True  # D10: who still calls with the shared key, in audit_logs.error
         return None
     return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
 
@@ -559,8 +560,15 @@ async def audit_log_middleware(request: Request, call_next):
             error_text = f"HTTP {status_code}"
         except Exception:
             pass
-    elif getattr(request.state, "implicit_work", False):
-        error_text = "implicit_work"  # D6: who still calls without an account
+    # Transition markers, comma-separated after the status hint: D6 implicit 'work'
+    # (successful calls, as before), D10 the shared API_KEY (every call).
+    markers = []
+    if status == "ok" and getattr(request.state, "implicit_work", False):
+        markers.append("implicit_work")
+    if getattr(request.state, "legacy_key", False):
+        markers.append("legacy_key")
+    if markers:
+        error_text = ",".join(([error_text] if error_text else []) + markers)
 
     asyncio.create_task(
         _write_audit_log(
