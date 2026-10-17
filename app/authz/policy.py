@@ -59,12 +59,14 @@ async def authorize(
     chat_external_id: int | None = None,
     is_write: bool,
 ) -> Decision:
-    """account_tool_policy (deny > allow) → mode ro → write limits of messenger writes.
+    """account_tool_policy (deny > allow) → mode ro → legacy write guards of messenger writes.
 
-    Write limits: write_chat_ids (a list restricts the chats; for MAX a NULL
-    list forbids every chat, ADR MAX §2) and write_rate_per_hour (successful
-    writes in audit_logs during the last hour; MAX default MAX_WRITE_RATE_DEFAULT).
-    A chat that is unknown at decision time (HTTP body) skips the list check.
+    Legacy guards on accounts, both optional (NULL = off): write_chat_ids (a list
+    restricts the chats) and write_rate_per_hour (successful writes in audit_logs
+    during the last hour). A chat that is unknown at decision time (HTTP body)
+    skips the list check. MAX writes may go to any chat (owner's decision
+    17.10); the per-account limits live in app/authz/write_limits.py and are
+    applied inside the write routes.
     """
     from app.authz import middleware as mw  # patched by tests; cached lookups live there
 
@@ -82,16 +84,9 @@ async def authorize(
     limits = await _write_limits(ctx.account_id)
     if limits is None:
         return ALLOW
-    platform, chat_ids, rate = limits
-    if chat_external_id is not None:
-        if platform == "max" and chat_ids is None:
-            return Decision(False, 403, "no write_chat_ids for this MAX account")
-        if chat_ids is not None and chat_external_id not in chat_ids:
-            return Decision(False, 403, f"chat {chat_external_id} is not in write_chat_ids")
-    if platform == "max" and rate is None:
-        from app.max.config import max_settings
-
-        rate = max_settings.write_rate_default
+    _, chat_ids, rate = limits
+    if chat_external_id is not None and chat_ids is not None and chat_external_id not in chat_ids:
+        return Decision(False, 403, f"chat {chat_external_id} is not in write_chat_ids")
     if rate is not None and await _writes_last_hour(ctx.account_id) >= rate:
         return Decision(False, 429, f"write rate limit {rate}/h reached")
     return ALLOW

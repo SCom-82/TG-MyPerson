@@ -170,11 +170,22 @@ async def test_max_tools_not_yet_implemented_501(client, accounts, method, path,
 
 @pytest.mark.asyncio
 async def test_max_rw_write_passes_authz_then_501(client, accounts):
+    """A MAX write MAX has no counterpart for: authz lets it through, the route answers 501."""
+    alias = accounts["max_rw"]["alias"]
+    resp = await client.post("/api/v1/messages/poll", headers=_h(alias),
+                             json={"chat_id": 1, "question": "q", "options": ["a", "b"]})
+    assert resp.status_code == 501
+    assert resp.json()["tool"] == "send_poll"
+    assert await _audit_rows(alias) == [("send_poll", True, "error", "HTTP 501,legacy_key")]  # shared key (D10)
+
+
+@pytest.mark.asyncio
+async def test_max_rw_send_message_reaches_the_max_route(client, accounts):
+    """PR-7: send_message is served by the MAX router; without a MAX session → 503, not 501."""
     alias = accounts["max_rw"]["alias"]
     resp = await client.post("/api/v1/messages", headers=_h(alias), json={"chat_id": 1, "text": "x"})
-    assert resp.status_code == 501
-    assert resp.json()["tool"] == "send_message"
-    assert await _audit_rows(alias) == [("send_message", True, "error", "HTTP 501,legacy_key")]  # shared key (D10)
+    assert resp.status_code == 503, resp.text
+    assert await _audit_rows(alias) == [("send_message", True, "error", "HTTP 503,legacy_key")]
 
 
 @pytest.mark.asyncio

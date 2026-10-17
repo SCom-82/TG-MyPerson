@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from app.api.data_reads import account_of
+from app.authz.write_limits import SEND, write_slot
 from app.database import async_session
 from app.models import Account
 from app.repo import people_queries
@@ -58,12 +59,17 @@ async def send_to_person(req: ToPersonRequest, request: Request):
         raise HTTPException(status_code=404, detail="person is not reachable from this account")
     identity, user, reach = best
 
-    from telethon.tl.functions.contacts import ImportContactsRequest
-    from telethon.tl.types import InputPeerUser, InputPhoneContact
-
     from app.telegram.pool import require_authorized_client
 
     client = await require_authorized_client(request)
+    async with write_slot(request, SEND, "send_to_person", identity.external_user_id):
+        return await _send_to_person(client, account, identity, user, reach, req)
+
+
+async def _send_to_person(client, account: Account, identity, user, reach, req: ToPersonRequest) -> dict:
+    from telethon.tl.functions.contacts import ImportContactsRequest
+    from telethon.tl.types import InputPeerUser, InputPhoneContact
+
     if reach.method == "direct":
         peer = InputPeerUser(identity.external_user_id, user.access_hash)
     elif reach.method == "username":

@@ -187,6 +187,21 @@ class MaxIngest:
             self._spawn(self.fill_users(missing))
         return row
 
+    async def store_sent(self, msg: Any, chat_id: int, *, is_edit: bool = False) -> dict:
+        """A message we just sent or edited (PR-7): stored at once, not on the echo.
+
+        Under the chat lock of the frames, so the echo of the same message is
+        an upsert after it, not a race.
+        """
+        async with self._chat_lock(chat_id):
+            return await self.store_message(msg, received_at=datetime.now(timezone.utc), is_edit=is_edit,
+                                            chat_id=chat_id)
+
+    async def apply_delete(self, chat_id: int, ids: list[int]) -> None:
+        """Messages we just deleted (PR-7): soft delete as for a delete frame."""
+        async with self._chat_lock(chat_id):
+            await self._on_delete(chat_id, ids, datetime.now(timezone.utc))
+
     async def _store_legacy(self, msg: Any, cid: int | None, received_at: datetime | None, is_edit: bool,
                             advance_cursor: bool, *, fill: bool = True) -> dict:
         async with database.async_session() as db:

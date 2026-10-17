@@ -129,6 +129,8 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "get_snapshot_members",
     # MCP signed file link (account isolation §9.2)
     "download_file",
+    # MCP tools of the caller's account, for the stdio wrapper (QA D-3)
+    "available_tools",
     # contacts (account isolation §6.4): owner key / rw account
     "find_person",
     "get_person",

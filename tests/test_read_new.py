@@ -286,14 +286,17 @@ async def test_authorize_write_limits(accounts):
     assert (limited.allowed, limited.status) == (False, 429)
     assert (await authorize(ctx, "sync_chats", is_write=False)).allowed  # reads / DB writes unaffected
 
+    # MAX writes go to any chat (owner's decision 17.10, PR-7): no list is no restriction;
+    # its limits are app/authz/write_limits.py, inside the routes.
     max_ctx = AuthContext(account_id=accounts.m, alias="iso-max", platform="max")
     sql("UPDATE accounts SET mode = 'rw' WHERE id = %s", (accounts.m,))
     import app.authz.middleware as mw
 
     mw._mode_cache.clear()
-    no_list = await authorize(max_ctx, "send_message", chat_external_id=5, is_write=True)
-    assert (no_list.allowed, no_list.status) == (False, 403)
+    assert (await authorize(max_ctx, "send_message", chat_external_id=5, is_write=True)).allowed
     sql("UPDATE accounts SET write_chat_ids = NULL, write_rate_per_hour = NULL WHERE id = %s", (accounts.a,))
+    sql("UPDATE accounts SET mode = 'ro' WHERE id = %s", (accounts.m,))
+    mw._mode_cache.clear()
 
 
 async def test_r3_1_reachable_one_row_per_person_and_pages(accounts, test_client):

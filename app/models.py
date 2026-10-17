@@ -381,6 +381,44 @@ class AuditLog(Base):
     )
 
 
+class AccountWriteLimits(Base):
+    """Messenger write limits of one account (migration 012); NULL = that limit off.
+
+    No row: the platform default (app/authz/write_limits.py).
+    """
+
+    __tablename__ = "account_write_limits"
+
+    account_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, server_default="true", nullable=False)
+    per_minute: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    per_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    per_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    new_dialogs_per_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    min_interval_sec: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    jitter_sec: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    actions_per_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class WriteEvent(Base):
+    """A messenger write that passed the limits (migration 012): the counters' source."""
+
+    __tablename__ = "write_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, GeneratedIdentity(always=True), primary_key=True)
+    account_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)  # 'send' | 'action'
+    tool: Mapped[str] = mapped_column(Text, nullable=False)
+    chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # external chat id
+    new_dialog: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 # ---------------------------------------------------------------------------
 # MAX platform (migration 009, ADR 2026-10-07 §2.A).
 # Column names mirror tg_* one-to-one (including tg_date) so the TG response

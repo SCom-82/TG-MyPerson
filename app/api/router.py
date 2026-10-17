@@ -15,12 +15,16 @@ from app.api.snapshots import router as snapshots_router
 from app.api.users import router as users_router
 from app.api.stream import router as stream_router
 from app.api.sync import router as sync_router
+from app.api.tools import router as tools_router
+from app.api.write_limits_admin import router as write_limits_router
 
 # Leaf routers in inclusion order. Single source for both include_router below and
 # the authz route table (app/authz/route_table.py) — a router missing here would
 # be served but invisible to tool authz.
 API_ROUTERS = (
-    # Admin endpoints (X-Admin-Key auth, separate from user API)
+    # Admin endpoints (X-Admin-Key auth, separate from user API).
+    # write_limits before accounts: GET /accounts/write-limits ≠ /accounts/{account_id}.
+    write_limits_router,
     accounts_router,
     admin_isolation_router,
     admin_keys_router,
@@ -37,6 +41,7 @@ API_ROUTERS = (
     users_router,
     stream_router,
     sync_router,
+    tools_router,
 )
 
 api_router = APIRouter()

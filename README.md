@@ -213,7 +213,24 @@ automatically in-process. It exists only as a manual escape hatch.
   (ключ показывается один раз). Общий `API_KEY` — пока `LEGACY_API_KEY_ENABLED=true`; без алиаса —
   `work` с пометкой `implicit_work` в аудите, при `REQUIRE_ACCOUNT=true` — 400.
 - Авторизация — одна функция `app/authz/policy.py: authorize()` для HTTP и MCP: политика тулов,
-  ro, `write_chat_ids`, `write_rate_per_hour` (MAX по умолчанию `MAX_WRITE_RATE_DEFAULT`).
+  ro, необязательные `write_chat_ids` / `write_rate_per_hour` (NULL — выключено; MAX пишет в любые чаты).
+- Лимиты записи (PR-7, `app/authz/write_limits.py`, миграция 012): настройки на аккаунт в
+  `account_write_limits`, счётчики — `write_events` (рестарт их не обнуляет). Без своей строки — дефолт
+  платформы: MAX `per_minute=5, per_hour=20, per_day=100, new_dialogs_per_day=10, min_interval_sec=3,
+  jitter_sec=2, actions_per_hour=60`; Telegram — без лимитов. `null` выключает лимит, `enabled=false` —
+  аварийный стоп записи (403) без смены `mode`. Отправки (`send_*`, `forward_message`, `send_to_person`)
+  и действия (`edit`, `delete`, `react`, `mark_read`) считаются раздельно; новый диалог — первая отправка в чат
+  без всякой истории (ни входящих, ни исходящих; ответ написавшему первым — не новый), один раз на чат. Превышение → 429 + `Retry-After`
+  (`limit`, `max`, `used`, `remaining`, `message`); `min_interval` — ожидание до 15 с, дальше 429.
+  Админ (`X-Admin-Key`): `GET /api/v1/accounts/write-limits` (все), `GET|PATCH|DELETE
+  /api/v1/accounts/{id}/write-limits` (статус со счётчиками / изменить / вернуть дефолт); действует сразу.
+- Запись MAX (PR-7): `send_message`, `send_file` (картинка → фото, иначе файл; `force_document`),
+  `forward_message` (по сообщению за вызов MAX; остановка лимитом посреди пачки → 200 `status=partial`),
+  `edit_message`, `delete_message` (`?for_all=false` — только у себя), `react_to_message`, `mark_read`
+  (до последнего сообщения чата). Отправленное сразу пишется в хранилище. `schedule_date`, `voice_note`,
+  `scheduled` → 501; тулы без маршрута MAX → 501.
+- Набор MCP-тулов зависит от платформы (QA D-3): аккаунт видит только тулы, чьи маршруты есть у его
+  платформы. Тот же список для stdio-обёртки — `GET /api/v1/tools` (ключ/алиас аккаунта).
 - Контакты: `/api/v1/people` (owner-ключ: поиск, карточка с аккаунтами и достижимостью, сообщения и чаты
   человека, теги/заметки, merge/split), `/api/v1/reachable` и `POST /api/v1/messages/to-person` (rw-аккаунт).
   Кросс-аккаунтные запросы — только `app/repo/people_queries.py`.
@@ -298,7 +315,6 @@ automatically in-process. It exists only as a manual escape hatch.
 | `MAX_CATCHUP_SEED` | `50` | сколько последних сообщений брать у впервые увиденного чата |
 | `MAX_CATCHUP_MAX_CHATS` | `60` | чатов за проход добора; остаток — через 15 мин |
 | `MAX_RAW_EVENTS_RETENTION_DAYS` | `30` | хранение `max_raw_events` |
-| `MAX_WRITE_RATE_DEFAULT` | `20` | фаза 2: лимит отправок в час |
 
 ### Вход: QR + пароль 2FA (runbook)
 

@@ -72,6 +72,11 @@ class FakeMaxServer:
         self.video_url = ""
         self.video_not_ready = False
 
+        # Writes (PR-7): every write call in order, errors raised one per write call
+        self.writes: list[tuple] = []
+        self.write_errors: list[BaseException] = []
+        self.next_message_id = 900_000
+
         self.factory_calls: list[dict] = []
         self.clients: list["FakePyMaxClient"] = []
         self.authenticate_calls = 0
@@ -277,9 +282,57 @@ class FakePyMaxClient:
         self.server.logged_out = True
         return True
 
-    # Anything that would change what the MAX side sees ("read", presence, typing)
-    async def read_message(self, *a, **kw):  # pragma: no cover - must never be called
-        self.calls.append("read_message")
+    # -- writes (PR-7) ---------------------------------------------------------
+
+    def _write(self, name: str, *args) -> None:
+        self.calls.append(name)
+        if self.server.write_errors:
+            raise self.server.write_errors.pop(0)
+        self.server.writes.append((name, *args))
+
+    def _new_message(self, chat_id: int, text: str | None, **extra) -> Message:
+        self.server.next_message_id += 1
+        m = {"id": self.server.next_message_id, "time": int(time.time() * 1000), "type": "USER",
+             "text": text or "", "attaches": [], "sender": self.server.user_id, **extra}
+        self.server.history.setdefault(chat_id, []).append(m)
+        return Message.model_validate({**m, "chatId": chat_id})
+
+    async def send_message(self, chat_id: int, text: str | None = None, reply_to: int | None = None,
+                           attachments=None, *, notify: bool = True, send_at=None) -> Message:
+        kinds = [type(a).__name__ for a in attachments or []]
+        names = [getattr(a, "name", None) or getattr(a, "file_name", None) for a in attachments or []]
+        self._write("send_message", chat_id, text, reply_to, kinds, names)
+        return self._new_message(chat_id, text)
+
+    async def forward_message(self, chat_id: int, message_id, source_chat_id: int | None = None, *,
+                              notify: bool = True) -> Message:
+        self._write("forward_message", chat_id, message_id, source_chat_id)
+        return self._new_message(chat_id, f"fwd {message_id}")
+
+    async def edit_message(self, chat_id: int, message_id: int, text: str | None = None, attachments=None):
+        self._write("edit_message", chat_id, message_id, text)
+        for m in self.server.history.get(chat_id, []):
+            if int(m["id"]) == int(message_id):
+                m.update(text=text, status="EDITED")
+                return Message.model_validate({**m, "chatId": chat_id})
+        raise ApiError(opcode=67, error="message.not.found", message="Message not found")
+
+    async def delete_message(self, chat_id: int, message_ids: list[int], for_me: bool) -> bool:
+        self._write("delete_message", chat_id, list(message_ids), for_me)
+        return True
+
+    async def add_reaction(self, chat_id: int, message_id: int, reaction: str):
+        self._write("add_reaction", chat_id, message_id, reaction)
+        return None
+
+    async def remove_reaction(self, chat_id: int, message_id: int):
+        self._write("remove_reaction", chat_id, message_id)
+        return None
+
+    # Anything that would change what the MAX side sees ("read", presence, typing):
+    # recorded, so the read paths can assert they never call it.
+    async def read_message(self, message_id, chat_id: int):
+        self._write("read_message", message_id, chat_id)
 
     def set_presence(self, *a, **kw):  # pragma: no cover - must never be called
         self.calls.append("set_presence")

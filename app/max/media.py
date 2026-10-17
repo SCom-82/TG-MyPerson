@@ -11,6 +11,7 @@ import logging
 import re
 import urllib.parse
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any
 
 import aiohttp
@@ -255,3 +256,17 @@ class RangeNotSatisfiable(Exception):
     def __init__(self, size: str) -> None:
         super().__init__(size)
         self.size = size
+
+
+# ---------------------------------------------------------------------------
+# Upload (send_file, PR-7)
+# ---------------------------------------------------------------------------
+
+def upload_attachment(data: bytes, name: str, *, force_document: bool = False) -> Any:
+    """A file to send: Photo for the image extensions PyMax accepts, File otherwise."""
+    from pymax import File, Photo
+    from pymax.files.static import ALLOWED_EXTENSIONS
+
+    if not force_document and PurePosixPath(name).suffix.lower() in ALLOWED_EXTENSIONS:
+        return Photo(raw=data, name=name)
+    return File(raw=data, name=name)

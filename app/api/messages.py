@@ -36,6 +36,7 @@ from app.schemas import (
 from app.api import data_reads
 from app.services.message_service import get_messages, get_message
 from app.services.tg_store import new_mode
+from app.authz.write_limits import ACTION, SEND, write_slot
 from app.telegram.pool import require_authorized_client
 
 log = logging.getLogger(__name__)
@@ -176,73 +177,74 @@ async def get_single_message(chat_id: int, message_id: int, request: Request, db
 @router.post("")
 async def send_message(req: SendMessageRequest, request: Request):
     client = await require_authorized_client(request)
-
-    try:
-        schedule = _to_utc(req.schedule_date)
-        result = await client.send_message(
-            entity=req.chat_id,
-            message=req.text,
-            reply_to=req.reply_to_message_id,
-            parse_mode=req.parse_mode,
-            schedule=schedule,
-        )
-        return {
-            "status": "scheduled" if schedule else "sent",
-            "message_id": result.id,
-            "chat_id": req.chat_id,
-            "schedule_date": schedule.isoformat() if schedule else None,
-        }
-    except Exception as e:
-        log.exception("Failed to send message to chat %d", req.chat_id)
-        raise HTTPException(status_code=500, detail=str(e))
+    async with write_slot(request, SEND, "send_message", req.chat_id):
+        try:
+            schedule = _to_utc(req.schedule_date)
+            result = await client.send_message(
+                entity=req.chat_id,
+                message=req.text,
+                reply_to=req.reply_to_message_id,
+                parse_mode=req.parse_mode,
+                schedule=schedule,
+            )
+            return {
+                "status": "scheduled" if schedule else "sent",
+                "message_id": result.id,
+                "chat_id": req.chat_id,
+                "schedule_date": schedule.isoformat() if schedule else None,
+            }
+        except Exception as e:
+            log.exception("Failed to send message to chat %d", req.chat_id)
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/forward")
 async def forward_message(req: ForwardMessageRequest, request: Request):
     client = await require_authorized_client(request)
+    async with write_slot(request, SEND, "forward_message", req.to_chat_id):
+        ids = req.message_ids if req.message_ids else ([req.message_id] if req.message_id else [])
+        if not ids:
+            raise HTTPException(status_code=400, detail="Provide message_id or message_ids")
 
-    ids = req.message_ids if req.message_ids else ([req.message_id] if req.message_id else [])
-    if not ids:
-        raise HTTPException(status_code=400, detail="Provide message_id or message_ids")
-
-    try:
-        result = await client.forward_messages(
-            entity=req.to_chat_id,
-            messages=ids if len(ids) > 1 else ids[0],
-            from_peer=req.from_chat_id,
-        )
-        if isinstance(result, list):
-            forwarded_ids = [m.id for m in result]
-        else:
-            forwarded_ids = [result.id]
-        return {
-            "status": "forwarded",
-            "message_ids": forwarded_ids,
-            "to_chat_id": req.to_chat_id,
-        }
-    except Exception as e:
-        log.exception("Failed to forward message")
-        raise HTTPException(status_code=500, detail=str(e))
+        try:
+            result = await client.forward_messages(
+                entity=req.to_chat_id,
+                messages=ids if len(ids) > 1 else ids[0],
+                from_peer=req.from_chat_id,
+            )
+            if isinstance(result, list):
+                forwarded_ids = [m.id for m in result]
+            else:
+                forwarded_ids = [result.id]
+            return {
+                "status": "forwarded",
+                "message_ids": forwarded_ids,
+                "to_chat_id": req.to_chat_id,
+            }
+        except Exception as e:
+            log.exception("Failed to forward message")
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/edit")
 async def edit_message(req: EditMessageRequest, request: Request):
     client = await require_authorized_client(request)
-    try:
-        kwargs: dict = {
-            "entity": req.chat_id,
-            "message": req.message_id,
-            "text": req.text,
-        }
-        if req.parse_mode:
-            kwargs["parse_mode"] = req.parse_mode
-        if req.scheduled:
-            kwargs["schedule"] = True
-        await client.edit_message(**kwargs)
-        return {"status": "edited", "chat_id": req.chat_id, "message_id": req.message_id}
-    except Exception as e:
-        log.exception("Failed to edit message %d in chat %d", req.message_id, req.chat_id)
-        raise HTTPException(status_code=400, detail=str(e))
+    async with write_slot(request, ACTION, "edit_message", req.chat_id):
+        try:
+            kwargs: dict = {
+                "entity": req.chat_id,
+                "message": req.message_id,
+                "text": req.text,
+            }
+            if req.parse_mode:
+                kwargs["parse_mode"] = req.parse_mode
+            if req.scheduled:
+                kwargs["schedule"] = True
+            await client.edit_message(**kwargs)
+            return {"status": "edited", "chat_id": req.chat_id, "message_id": req.message_id}
+        except Exception as e:
+            log.exception("Failed to edit message %d in chat %d", req.message_id, req.chat_id)
+            raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/send-file")
@@ -259,30 +261,31 @@ async def send_file(
 ):
     """Send any file. By default auto-detects images and sends them as photos."""
     client = await require_authorized_client(request)
-    try:
-        file_bytes = await file.read()
-        bio = io.BytesIO(file_bytes)
-        bio.name = file.filename or "file.bin"
-        schedule = _to_utc(schedule_date)
-        result = await client.send_file(
-            entity=chat_id,
-            file=bio,
-            caption=caption,
-            reply_to=reply_to_message_id,
-            parse_mode=parse_mode,
-            schedule=schedule,
-            voice_note=voice_note,
-            force_document=force_document,
-        )
-        return {
-            "status": "scheduled" if schedule else "sent",
-            "message_id": result.id,
-            "chat_id": chat_id,
-            "schedule_date": schedule.isoformat() if schedule else None,
-        }
-    except Exception as e:
-        log.exception("Failed to send file to chat %d", chat_id)
-        raise HTTPException(status_code=500, detail=str(e))
+    async with write_slot(request, SEND, "send_file", chat_id):
+        try:
+            file_bytes = await file.read()
+            bio = io.BytesIO(file_bytes)
+            bio.name = file.filename or "file.bin"
+            schedule = _to_utc(schedule_date)
+            result = await client.send_file(
+                entity=chat_id,
+                file=bio,
+                caption=caption,
+                reply_to=reply_to_message_id,
+                parse_mode=parse_mode,
+                schedule=schedule,
+                voice_note=voice_note,
+                force_document=force_document,
+            )
+            return {
+                "status": "scheduled" if schedule else "sent",
+                "message_id": result.id,
+                "chat_id": chat_id,
+                "schedule_date": schedule.isoformat() if schedule else None,
+            }
+        except Exception as e:
+            log.exception("Failed to send file to chat %d", chat_id)
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/send-voice")
@@ -297,29 +300,30 @@ async def send_voice(
 ):
     """Convenience wrapper: forces voice_note=True for sending as voice message."""
     client = await require_authorized_client(request)
-    try:
-        file_bytes = await file.read()
-        bio = io.BytesIO(file_bytes)
-        bio.name = file.filename or "voice.ogg"
-        schedule = _to_utc(schedule_date)
-        result = await client.send_file(
-            entity=chat_id,
-            file=bio,
-            caption=caption,
-            reply_to=reply_to_message_id,
-            parse_mode=parse_mode,
-            schedule=schedule,
-            voice_note=True,
-        )
-        return {
-            "status": "scheduled" if schedule else "sent",
-            "message_id": result.id,
-            "chat_id": chat_id,
-            "schedule_date": schedule.isoformat() if schedule else None,
-        }
-    except Exception as e:
-        log.exception("Failed to send voice to chat %d", chat_id)
-        raise HTTPException(status_code=500, detail=str(e))
+    async with write_slot(request, SEND, "send_voice", chat_id):
+        try:
+            file_bytes = await file.read()
+            bio = io.BytesIO(file_bytes)
+            bio.name = file.filename or "voice.ogg"
+            schedule = _to_utc(schedule_date)
+            result = await client.send_file(
+                entity=chat_id,
+                file=bio,
+                caption=caption,
+                reply_to=reply_to_message_id,
+                parse_mode=parse_mode,
+                schedule=schedule,
+                voice_note=True,
+            )
+            return {
+                "status": "scheduled" if schedule else "sent",
+                "message_id": result.id,
+                "chat_id": chat_id,
+                "schedule_date": schedule.isoformat() if schedule else None,
+            }
+        except Exception as e:
+            log.exception("Failed to send voice to chat %d", chat_id)
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/album")
@@ -334,115 +338,117 @@ async def send_album(
 ):
     """Send multiple photos/files as a single album (media group)."""
     client = await require_authorized_client(request)
-    if len(files) < 2:
-        raise HTTPException(status_code=400, detail="Album requires at least 2 files")
-    if len(files) > 10:
-        raise HTTPException(status_code=400, detail="Album supports max 10 files")
-    try:
-        file_objects = []
-        for f in files:
-            data = await f.read()
-            bio = io.BytesIO(data)
-            bio.name = f.filename or "file"
-            file_objects.append(bio)
+    async with write_slot(request, SEND, "send_album", chat_id):
+        if len(files) < 2:
+            raise HTTPException(status_code=400, detail="Album requires at least 2 files")
+        if len(files) > 10:
+            raise HTTPException(status_code=400, detail="Album supports max 10 files")
+        try:
+            file_objects = []
+            for f in files:
+                data = await f.read()
+                bio = io.BytesIO(data)
+                bio.name = f.filename or "file"
+                file_objects.append(bio)
 
-        schedule = _to_utc(schedule_date)
-        result = await client.send_file(
-            entity=chat_id,
-            file=file_objects,
-            caption=caption,
-            reply_to=reply_to_message_id,
-            parse_mode=parse_mode,
-            schedule=schedule,
-        )
-        msg_ids = [m.id for m in result] if isinstance(result, list) else [result.id]
-        return {
-            "status": "scheduled" if schedule else "sent",
-            "message_ids": msg_ids,
-            "chat_id": chat_id,
-            "schedule_date": schedule.isoformat() if schedule else None,
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.exception("Failed to send album to chat %d", chat_id)
-        raise HTTPException(status_code=500, detail=str(e))
+            schedule = _to_utc(schedule_date)
+            result = await client.send_file(
+                entity=chat_id,
+                file=file_objects,
+                caption=caption,
+                reply_to=reply_to_message_id,
+                parse_mode=parse_mode,
+                schedule=schedule,
+            )
+            msg_ids = [m.id for m in result] if isinstance(result, list) else [result.id]
+            return {
+                "status": "scheduled" if schedule else "sent",
+                "message_ids": msg_ids,
+                "chat_id": chat_id,
+                "schedule_date": schedule.isoformat() if schedule else None,
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            log.exception("Failed to send album to chat %d", chat_id)
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/poll")
 async def send_poll(req: SendPollRequest, request: Request):
     """Create a poll (regular or quiz) and send or schedule it to a chat."""
     client = await require_authorized_client(request)
-    try:
-        peer = await client.get_input_entity(req.chat_id)
+    async with write_slot(request, SEND, "send_poll", req.chat_id):
+        try:
+            peer = await client.get_input_entity(req.chat_id)
 
-        answers = [
-            tl_types.PollAnswer(text=opt, option=bytes([i]))
-            for i, opt in enumerate(req.options)
-        ]
-        poll = tl_types.Poll(
-            id=0,
-            question=req.question,
-            answers=answers,
-            closed=False,
-            public_voters=not req.is_anonymous,
-            multiple_choice=req.allows_multiple,
-            quiz=req.quiz_correct_option is not None,
-        )
-
-        correct_answers = None
-        if req.quiz_correct_option is not None:
-            correct_answers = [bytes([req.quiz_correct_option])]
-
-        media = tl_types.InputMediaPoll(
-            poll=poll,
-            correct_answers=correct_answers,
-        )
-
-        schedule = _to_utc(req.schedule_date)
-        result = await client(
-            functions.messages.SendMediaRequest(
-                peer=peer,
-                media=media,
-                message="",
-                random_id=_random_id(),
-                reply_to=(
-                    tl_types.InputReplyToMessage(reply_to_msg_id=req.reply_to_message_id)
-                    if req.reply_to_message_id
-                    else None
-                ),
-                schedule_date=schedule,
+            answers = [
+                tl_types.PollAnswer(text=opt, option=bytes([i]))
+                for i, opt in enumerate(req.options)
+            ]
+            poll = tl_types.Poll(
+                id=0,
+                question=req.question,
+                answers=answers,
+                closed=False,
+                public_voters=not req.is_anonymous,
+                multiple_choice=req.allows_multiple,
+                quiz=req.quiz_correct_option is not None,
             )
-        )
-        msg_id = None
-        for upd in getattr(result, "updates", []):
-            if hasattr(upd, "id") and isinstance(getattr(upd, "id", None), int):
-                msg_id = upd.id
-                break
-            if hasattr(upd, "message") and hasattr(upd.message, "id"):
-                msg_id = upd.message.id
-                break
-        return {
-            "status": "scheduled" if schedule else "sent",
-            "message_id": msg_id,
-            "chat_id": req.chat_id,
-            "schedule_date": schedule.isoformat() if schedule else None,
-        }
-    except Exception as e:
-        log.exception("Failed to send poll to chat %d", req.chat_id)
-        raise HTTPException(status_code=500, detail=str(e))
+
+            correct_answers = None
+            if req.quiz_correct_option is not None:
+                correct_answers = [bytes([req.quiz_correct_option])]
+
+            media = tl_types.InputMediaPoll(
+                poll=poll,
+                correct_answers=correct_answers,
+            )
+
+            schedule = _to_utc(req.schedule_date)
+            result = await client(
+                functions.messages.SendMediaRequest(
+                    peer=peer,
+                    media=media,
+                    message="",
+                    random_id=_random_id(),
+                    reply_to=(
+                        tl_types.InputReplyToMessage(reply_to_msg_id=req.reply_to_message_id)
+                        if req.reply_to_message_id
+                        else None
+                    ),
+                    schedule_date=schedule,
+                )
+            )
+            msg_id = None
+            for upd in getattr(result, "updates", []):
+                if hasattr(upd, "id") and isinstance(getattr(upd, "id", None), int):
+                    msg_id = upd.id
+                    break
+                if hasattr(upd, "message") and hasattr(upd.message, "id"):
+                    msg_id = upd.message.id
+                    break
+            return {
+                "status": "scheduled" if schedule else "sent",
+                "message_id": msg_id,
+                "chat_id": req.chat_id,
+                "schedule_date": schedule.isoformat() if schedule else None,
+            }
+        except Exception as e:
+            log.exception("Failed to send poll to chat %d", req.chat_id)
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.delete("/{chat_id}/{message_id}")
 async def delete_message(chat_id: int, message_id: int, request: Request):
     client = await require_authorized_client(request)
-
-    try:
-        await client.delete_messages(entity=chat_id, message_ids=[message_id])
-        return {"status": "deleted", "chat_id": chat_id, "message_id": message_id}
-    except Exception as e:
-        log.exception("Failed to delete message %d in chat %d", message_id, chat_id)
-        raise HTTPException(status_code=500, detail=str(e))
+    async with write_slot(request, ACTION, "delete_message", chat_id):
+        try:
+            await client.delete_messages(entity=chat_id, message_ids=[message_id])
+            return {"status": "deleted", "chat_id": chat_id, "message_id": message_id}
+        except Exception as e:
+            log.exception("Failed to delete message %d in chat %d", message_id, chat_id)
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/{chat_id}/{message_id}/media")
@@ -582,24 +588,25 @@ async def unpin_message(chat_id: int, message_id: int, request: Request):
 @router.post("/{chat_id}/{message_id}/react")
 async def react_to_message(chat_id: int, message_id: int, req: ReactRequest, request: Request):
     client = await require_authorized_client(request)
-    try:
-        peer = await client.get_input_entity(chat_id)
-        reaction: list = []
-        if req.emoticon:
-            reaction = [tl_types.ReactionEmoji(emoticon=req.emoticon)]
-        await client(
-            functions.messages.SendReactionRequest(
-                peer=peer,
-                msg_id=message_id,
-                reaction=reaction,
+    async with write_slot(request, ACTION, "react_to_message", chat_id):
+        try:
+            peer = await client.get_input_entity(chat_id)
+            reaction: list = []
+            if req.emoticon:
+                reaction = [tl_types.ReactionEmoji(emoticon=req.emoticon)]
+            await client(
+                functions.messages.SendReactionRequest(
+                    peer=peer,
+                    msg_id=message_id,
+                    reaction=reaction,
+                )
             )
-        )
-        return {
-            "status": "reacted" if req.emoticon else "unreacted",
-            "chat_id": chat_id,
-            "message_id": message_id,
-            "emoticon": req.emoticon,
-        }
-    except Exception as e:
-        log.exception("Failed to react to message %d in chat %d", message_id, chat_id)
-        raise HTTPException(status_code=400, detail=str(e))
+            return {
+                "status": "reacted" if req.emoticon else "unreacted",
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "emoticon": req.emoticon,
+            }
+        except Exception as e:
+            log.exception("Failed to react to message %d in chat %d", message_id, chat_id)
+            raise HTTPException(status_code=400, detail=str(e))

@@ -10,6 +10,7 @@ below and for the authz route table (app/authz/route_table.py), like API_ROUTERS
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from app.api.tools import router as tools_router
 from app.authz.middleware import _not_supported
 from app.max.api.auth import router as auth_router
 from app.max.api.chats import router as chats_router
@@ -49,6 +50,7 @@ MAX_API_ROUTERS = (
     users_router,
     stream_router,
     sync_router,
+    tools_router,
     unsupported_router,
 )
 

@@ -1,11 +1,14 @@
 """MAX chats (API spec §3): same paths, names and schemas as app/api/chats.py."""
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.authz.write_limits import ACTION, write_slot
 from app.database import get_db
 from app.api import data_reads
 from app.max import repo
+from app.max.api.common import authorized_or_error, call_max
 from app.services.tg_store import new_mode, shadow
 from app.schemas import ChatResponse, ChatUpdateRequest, PaginatedResponse
 
@@ -56,3 +59,23 @@ async def update_chat_settings(
     if chat is None:
         raise HTTPException(status_code=404, detail="Chat not found")
     return ChatResponse.model_validate(chat)
+
+
+@router.post("/{chat_id}/read", name="mark_read")
+async def mark_read(chat_id: int, request: Request):
+    """Read up to the chat's last message (MAX marks a message, not a chat).
+
+    The last message comes from MAX (history, 1 message). Its id goes as str
+    for the web client and as int for TCP (PyMax read_message).
+    """
+    session = await authorized_or_error(request)
+    if isinstance(session, JSONResponse):
+        return session
+    history = await call_max(session.client.fetch_history(chat_id, backward=1))
+    if not history:
+        raise HTTPException(status_code=404, detail="Chat has no messages")
+    last = max(history, key=lambda m: (m.time or 0, m.id))
+    message_id = str(last.id) if session.transport == "web" else last.id
+    async with write_slot(request, ACTION, "mark_read", chat_id):
+        await call_max(session.client.read_message(message_id, chat_id))
+    return {"status": "read", "chat_id": chat_id, "message_id": last.id}

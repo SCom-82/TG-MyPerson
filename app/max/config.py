@@ -13,7 +13,6 @@ class MaxSettings(BaseSettings):
     catchup_seed: int = Field(default=50, alias="MAX_CATCHUP_SEED")
     catchup_max_chats: int = Field(default=60, alias="MAX_CATCHUP_MAX_CHATS")
     raw_events_retention_days: int = Field(default=30, alias="MAX_RAW_EVENTS_RETENTION_DAYS")
-    write_rate_default: int = Field(default=20, alias="MAX_WRITE_RATE_DEFAULT")
 
     model_config = {
         "env_file": ".env",

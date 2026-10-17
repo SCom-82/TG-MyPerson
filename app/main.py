@@ -19,6 +19,7 @@ from app.authz.middleware import (
     tool_authz_middleware,
 )
 from app.authz.route_table import RouteTable, verify_route_table
+from app.authz.write_limits import WriteLimited, write_limited_handler
 from app.config import settings
 from app.max import pool as max_pool_module
 from app.max.config import max_settings
@@ -89,6 +90,9 @@ app = FastAPI(
     lifespan=lifespan,
     root_path_in_servers=False,
 )
+# Write limits (app/authz/write_limits.py): 429 + Retry-After / 403 from inside a route,
+# for REST and for MCP (app/mcp/invoke.py takes the app's handlers).
+app.add_exception_handler(WriteLimited, write_limited_handler)
 
 PUBLIC_PATHS = {"/api/v1/healthz", "/api/v1/readyz", "/docs", "/openapi.json", "/redoc"}
 

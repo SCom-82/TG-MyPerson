@@ -14,6 +14,7 @@ from app.api import data_reads
 from app.services import tg_store
 from app.services.chat_service import join_chat_entity, upsert_chat
 from app.services.tg_store import new_mode
+from app.authz.write_limits import ACTION, write_slot
 from app.telegram.pool import require_authorized_client
 
 log = logging.getLogger(__name__)
@@ -130,12 +131,13 @@ async def list_members(
 @router.post("/{chat_id}/read")
 async def mark_read(chat_id: int, request: Request):
     client = await require_authorized_client(request)
-    try:
-        await client.send_read_acknowledge(entity=chat_id)
-        return {"status": "read", "chat_id": chat_id}
-    except Exception as e:
-        log.exception("Failed to mark chat %d as read", chat_id)
-        raise HTTPException(status_code=400, detail=str(e))
+    async with write_slot(request, ACTION, "mark_read", chat_id):
+        try:
+            await client.send_read_acknowledge(entity=chat_id)
+            return {"status": "read", "chat_id": chat_id}
+        except Exception as e:
+            log.exception("Failed to mark chat %d as read", chat_id)
+            raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/{chat_id}/archive")

@@ -7,6 +7,7 @@ denied and logged identically.
 """
 
 import copy
+import functools
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -61,7 +62,11 @@ def _clean(args: dict, *drop: str) -> dict:
 async def _rest(caller: Caller, method: str, path: str, **kw) -> Any:
     result = await invoke.call(caller.platform, method, path, state=caller.state, **kw)
     if not result.ok:
-        raise ToolError(f"HTTP {result.status}: {_text(result.body)}")
+        body = result.body
+        if result.status in (403, 429) and isinstance(body, dict) and body.get("message"):
+            # Write limits (app/authz/write_limits.py): the sentence first, then the details.
+            raise ToolError(f"HTTP {result.status}: {body['message']}. Details: {_text(body)}")
+        raise ToolError(f"HTTP {result.status}: {_text(body)}")
     return result.body
 
 
@@ -352,10 +357,27 @@ OWNER_TOOLS = _owner_tools()
 BY_NAME = {t.name: t for t in (*ACCOUNT_TOOLS, *RW_TOOLS, *OWNER_TOOLS)}
 
 
+@functools.cache
+def route_names(platform: str) -> frozenset[str]:
+    """Names of the REST routes the platform serves (MAX: its internal router)."""
+    return frozenset(getattr(r, "name", None) for _, r in invoke._routes(platform)) - {None}
+
+
+def supported(tool: Tool, platform: str) -> bool:
+    """The platform has the tool's route; otherwise the call would answer 501 (QA D-3)."""
+    return tool.route in route_names(platform)
+
+
 def visible(caller: Caller) -> list[Tool]:
-    """Owner: contacts only. ro account: no messenger writes. rw: everything + contacts reach."""
+    """Owner: contacts only. ro account: no messenger writes. rw: everything + contacts reach.
+
+    Accounts see only the tools their platform serves (a MAX account does not
+    get send_album, reachable_contacts, ...).
+    """
     if caller.scope == "owner":
         return OWNER_TOOLS
     if caller.mode != "rw":
-        return [t for t in ACCOUNT_TOOLS if not t.is_write]
-    return [*ACCOUNT_TOOLS, *RW_TOOLS]
+        tools = [t for t in ACCOUNT_TOOLS if not t.is_write]
+    else:
+        tools = [*ACCOUNT_TOOLS, *RW_TOOLS]
+    return [t for t in tools if supported(t, caller.platform)]
