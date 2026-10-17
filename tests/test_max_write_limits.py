@@ -6,6 +6,7 @@ are replaced: windows and Retry-After are checked to the second, waits are
 recorded instead of slept.
 """
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -304,8 +305,21 @@ async def test_counters_survive_a_restart(rw, monkeypatch):
         assert await session.wait_until(lambda: session.state == "authorized", 5.0), session.state
         rw.clock.at(60)
         _check_429(await _send(rw), "per_hour", 2, 3540)
+        # Let the reconnect's catch-up finish: stopping it mid-transaction would leave
+        # its connection idle in transaction and block the partition teardown.
+        assert await _settled(session), list(session._background)
     finally:
         await restarted.stop_all()
+
+
+async def _settled(session, timeout: float = 10.0) -> bool:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while session._background:
+        if loop.time() > deadline:
+            return False
+        await asyncio.sleep(0.05)
+    return True
 
 
 async def test_null_turns_a_limit_off_and_changes_apply_at_once(rw):
