@@ -206,6 +206,10 @@ class MaxLoginConflict(Exception):
 # MaxSession
 # ---------------------------------------------------------------------------
 
+# stop(): how long cancelled background jobs (catch-up, user fill) get to finish.
+BACKGROUND_STOP_TIMEOUT_S = 5.0
+
+
 class MaxSession:
     def __init__(
         self,
@@ -326,9 +330,14 @@ class MaxSession:
         return task is not None and not task.done()
 
     async def stop(self) -> None:
-        for task in list(self._background.values()):
-            task.cancel()
+        # Wait for the cancelled jobs (up to 5 s): a job stopped in a DB
+        # transaction rolls back and returns its connection before stop() returns.
+        tasks = [t for t in self._background.values() if not t.done()]
         self._background.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.wait(tasks, timeout=BACKGROUND_STOP_TIMEOUT_S)
         if self.login is not None:
             self.login.cancel()
         task, self._task = self._task, None

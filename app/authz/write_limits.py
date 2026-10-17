@@ -69,6 +69,8 @@ class Limits:
 
 LIMIT_FIELDS = tuple(f.name for f in fields(Limits))
 DEFAULT_LIMITS = Limits()
+# Every limit off: the base of the first change for a platform without a default.
+NO_LIMITS = Limits(**{f: None for f in LIMIT_FIELDS if f != "enabled"})
 # None: the platform writes without limits unless the account has its own row.
 PLATFORM_DEFAULTS: dict[str, Limits | None] = {"max": DEFAULT_LIMITS, "telegram": None}
 
@@ -153,10 +155,15 @@ async def effective(db, account_id: int) -> Effective | None:
 
 
 async def set_limits(account_id: int, changes: dict[str, Any]) -> None:
-    """Own row = current effective limits (or DEFAULT_LIMITS) + changes."""
+    """Own row = current effective limits + changes.
+
+    The first change starts from the platform default; a platform without one
+    (Telegram) starts from NO_LIMITS: fields not given stay off, so setting
+    per_hour of a TG account does not switch on MAX's pause or new-dialog limit.
+    """
     async with async_session() as db:
         current = await effective(db, account_id)
-        base = current.limits if current is not None and current.limits is not None else DEFAULT_LIMITS
+        base = current.limits if current is not None and current.limits is not None else NO_LIMITS
         values = replace(base, **changes).as_dict()
         own = await db.get(AccountWriteLimits, account_id)
         if own is None:
@@ -213,16 +220,11 @@ async def _last_send(db, account_id: int) -> datetime | None:
     )).scalar_one()
 
 
-async def _is_new_dialog(db, eff: Effective, chat_id: int) -> bool:
-    """A cold first message: no send of ours in write_events and no message at all
-    (incoming or outgoing) stored for the chat. Replying to someone who wrote
-    first is not a new dialog (owner's clarification 17.10)."""
-    sent = (await db.execute(select(exists().where(
-        WriteEvent.account_id == eff.account_id, WriteEvent.kind == SEND, WriteEvent.chat_id == chat_id,
+async def _sent_to(db, account_id: int, chat_id: int) -> bool:
+    """A send of ours to the chat in write_events (the 'once per chat' part of a new dialog)."""
+    return (await db.execute(select(exists().where(
+        WriteEvent.account_id == account_id, WriteEvent.kind == SEND, WriteEvent.chat_id == chat_id,
     )))).scalar_one()
-    if sent:
-        return False
-    return not await _has_history(eff, chat_id)
 
 
 async def _has_history(eff: Effective, chat_id: int) -> bool:
@@ -285,26 +287,37 @@ async def reserve(account_id: int, kind: str, tool: str, chat_id: int | None = N
     """Check the limits and take a slot; waits out min_interval. None: no limits for the account."""
     assert kind in (SEND, ACTION), kind
     wait = 0.0
+    # Before the lock, each step on its own short-lived connection (review R10-1):
+    # a call never holds one connection while waiting for another, so parallel
+    # sends cannot drain the pool. A new dialog is a cold first message — no
+    # send of ours and no message at all (incoming or outgoing) in the chat;
+    # the history is only read here, the decisive "once per chat" check
+    # (write_events) is repeated under the lock.
     async with async_session() as db:
         eff = await effective(db, account_id)
         if eff is None or eff.limits is None:
             return None
-        limits = eff.limits
-        if not limits.enabled:
-            raise WriteLimited(403, {
-                "error": "writes disabled",
-                "reason": "write limits: enabled = false",
-                "tool": tool,
-                "alias": eff.alias,
-                "platform": eff.platform,
-                "message": f"writes of account '{eff.alias}' are stopped (write limits enabled = false)",
-            })
+        sent_before = kind == SEND and chat_id is not None and await _sent_to(db, account_id, chat_id)
+    limits = eff.limits
+    if not limits.enabled:
+        raise WriteLimited(403, {
+            "error": "writes disabled",
+            "reason": "write limits: enabled = false",
+            "tool": tool,
+            "alias": eff.alias,
+            "platform": eff.platform,
+            "message": f"writes of account '{eff.alias}' are stopped (write limits enabled = false)",
+        })
+    history = kind == SEND and chat_id is not None and not sent_before and await _has_history(eff, chat_id)
+
+    async with async_session() as db:
         await db.execute(text("SELECT pg_advisory_xact_lock(:ns, :a)"), {"ns": _LOCK_NS, "a": account_id})
         now = _now()
         await db.execute(delete(WriteEvent).where(
             WriteEvent.account_id == account_id, WriteEvent.at < now - RETENTION
         ))
-        new_dialog = kind == SEND and chat_id is not None and await _is_new_dialog(db, eff, chat_id)
+        new_dialog = (kind == SEND and chat_id is not None and not history
+                      and not await _sent_to(db, account_id, chat_id))
 
         for w in WINDOWS:
             limit = getattr(limits, w.name)
@@ -350,13 +363,20 @@ async def reserve(account_id: int, kind: str, tool: str, chat_id: int | None = N
 
 @asynccontextmanager
 async def write_slot(request: Request, kind: str, tool: str, chat_id: int | None = None) -> AsyncIterator[Slot | None]:
-    """Take a slot for the request's account; the slot is given back if the body raises."""
+    """Take a slot for the request's account.
+
+    The slot is given back when the body fails for sure (an error answer, a
+    refused upload). It is kept when the outcome is unknown — the exception
+    carries keep_write_slot (a timeout or a dropped connection after the frame
+    went out) or the request was cancelled: the message may have been sent.
+    """
     account_id = getattr(request.state, "account_id", None)
     slot = await reserve(account_id, kind, tool, chat_id) if account_id is not None else None
     try:
         yield slot
-    except BaseException:
-        if slot is not None:
+    except BaseException as exc:
+        uncertain = isinstance(exc, asyncio.CancelledError) or getattr(exc, "keep_write_slot", False)
+        if slot is not None and not uncertain:
             await slot.release()
         raise
 

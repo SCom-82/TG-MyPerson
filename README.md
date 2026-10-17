@@ -222,6 +222,8 @@ automatically in-process. It exists only as a manual escape hatch.
   и действия (`edit`, `delete`, `react`, `mark_read`) считаются раздельно; новый диалог — первая отправка в чат
   без всякой истории (ни входящих, ни исходящих; ответ написавшему первым — не новый), один раз на чат. Превышение → 429 + `Retry-After`
   (`limit`, `max`, `used`, `remaining`, `message`); `min_interval` — ожидание до 15 с, дальше 429.
+  Слот возвращается при явной ошибке MAX (502); при таймауте/обрыве (504, сообщение могло уйти) — нет.
+  Первая правка лимитов TG-аккаунта: незаданные поля = `null` (дефолты MAX не подтягиваются).
   Админ (`X-Admin-Key`): `GET /api/v1/accounts/write-limits` (все), `GET|PATCH|DELETE
   /api/v1/accounts/{id}/write-limits` (статус со счётчиками / изменить / вернуть дефолт); действует сразу.
 - Запись MAX (PR-7): `send_message`, `send_file` (картинка → фото, иначе файл; `force_document`),

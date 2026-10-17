@@ -305,21 +305,9 @@ async def test_counters_survive_a_restart(rw, monkeypatch):
         assert await session.wait_until(lambda: session.state == "authorized", 5.0), session.state
         rw.clock.at(60)
         _check_429(await _send(rw), "per_hour", 2, 3540)
-        # Let the reconnect's catch-up finish: stopping it mid-transaction would leave
-        # its connection idle in transaction and block the partition teardown.
-        assert await _settled(session), list(session._background)
     finally:
         await restarted.stop_all()
 
-
-async def _settled(session, timeout: float = 10.0) -> bool:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while session._background:
-        if loop.time() > deadline:
-            return False
-        await asyncio.sleep(0.05)
-    return True
 
 
 async def test_null_turns_a_limit_off_and_changes_apply_at_once(rw):
@@ -353,6 +341,39 @@ async def test_failed_write_gives_its_slot_back(rw):
     assert (await _send(rw)).status_code == 200
 
 
+async def test_uncertain_failure_keeps_the_slot(rw):
+    """No answer from MAX (timeout, dropped connection): the message may be out → counted."""
+    await _limits(rw, **{**OFF, "per_minute": 1})
+    rw.env.server.write_errors.append(TimeoutError("request timed out"))
+    resp = await _send(rw)
+    assert resp.status_code == 504 and "may have been sent" in resp.text, resp.text
+    assert [e[1] for e in _events(rw.id)] == ["send_message"]
+    _check_429(await _send(rw), "per_minute", 1, 60)
+
+
+async def test_parallel_sends_do_not_drain_the_pool(rw):
+    """Review R10-1: 25 parallel sends to 25 new chats with the default pool (5 + 10):
+    no QueuePool timeout, quick, every call ends in ok or 429, no connection left out."""
+    from app.database import engine
+
+    await _limits(rw, **{**OFF, "per_minute": 10, "new_dialogs_per_day": 100})
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    async def one(i: int):
+        try:
+            return await write_limits.reserve(rw.id, write_limits.SEND, "send_message", 5000 + i)
+        except write_limits.WriteLimited as exc:
+            return exc.status
+
+    results = await asyncio.wait_for(asyncio.gather(*(one(i) for i in range(25))), 20)
+    assert loop.time() - started < 10
+    assert sum(isinstance(r, write_limits.Slot) for r in results) == 10
+    assert results.count(429) == 15
+    assert engine.pool.checkedout() == 0
+    assert sum(e[3] for e in _events(rw.id)) == 10  # each a new dialog
+
+
 # ---------------------------------------------------------------------------
 # Admin API
 # ---------------------------------------------------------------------------
@@ -372,6 +393,11 @@ async def test_admin_write_limits_api(rw, aliases):  # noqa: F811
     assert resp.status_code == 422
     resp = await rw.http.patch(f"/api/v1/accounts/{rw.id}/write-limits", headers=ADMIN_KEY, json={"enabled": None})
     assert resp.status_code == 422
+
+    # The first change of a TG account does not bring MAX's defaults along (review 10).
+    resp = await rw.http.patch(f"/api/v1/accounts/{tg_id}/write-limits", headers=ADMIN_KEY, json={"per_hour": 7})
+    assert resp.json()["source"] == "account"
+    assert resp.json()["limits"] == {**write_limits.NO_LIMITS.as_dict(), "per_hour": 7}
 
     status = await _limits(rw, per_hour=7)
     assert status["source"] == "account"
@@ -469,3 +495,21 @@ async def test_available_tools_endpoint_for_the_stdio_wrapper(rw, aliases):  # n
     body = (await rw.http.get("/api/v1/tools", headers={**API_KEY, "x-session-alias": tg_alias})).json()
     assert body["platform"] == "telegram" and "send_message" not in body["tools"] and "list_scheduled" in body["tools"]
     assert set(body["tools"]) == {t.name for t in mcp_tools.ACCOUNT_TOOLS if not t.is_write}
+
+
+async def test_session_stop_waits_for_cancelled_jobs(new_env):  # noqa: F811
+    """stop() returns after the background jobs ran their cleanup (rollback in a DB job)."""
+    session = await new_env.session()
+    cleaned = []
+
+    async def job():
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            await asyncio.sleep(0.05)  # e.g. the rollback of an open transaction
+            cleaned.append(True)
+
+    session.spawn_background("probe", job())
+    await asyncio.sleep(0)
+    await session.stop()
+    assert cleaned == [True]

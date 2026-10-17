@@ -45,13 +45,32 @@ async def authorized_or_error(request: Request) -> MaxSession | JSONResponse:
     return session
 
 
+# PyMax's transport errors (pymax.connection: request): the frame may have gone
+# out before the answer was lost — the message may be delivered.
+_UNCERTAIN = (TimeoutError, ConnectionError, EOFError, OSError)
+
+
 async def call_max(call: Awaitable[T]) -> T:
-    """A PyMax write; its failure → 502 with the error (the write slot is given back)."""
+    """A PyMax write.
+
+    - an error answer of MAX (ApiError), a bad file (ValueError), ... → 502,
+      the write slot is given back;
+    - a timeout or a dropped connection → 504, the slot is kept
+      (keep_write_slot): the message may have been sent, and undercounting
+      sends is the ban risk.
+    """
     try:
         return await call
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001 — PyMax raises ApiError, ValueError, timeouts, ...
+    except _UNCERTAIN as exc:
+        log.warning("max write: no answer (%s: %s), the message may have been sent", type(exc).__name__, exc)
+        error = HTTPException(status_code=504, detail=(
+            f"{type(exc).__name__}: {exc} — no answer from MAX; the message may have been sent, "
+            "check list_messages before retrying"))
+        error.keep_write_slot = True
+        raise error
+    except Exception as exc:  # noqa: BLE001 — PyMax raises ApiError, ValueError, ...
         log.warning("max write failed: %s: %s", type(exc).__name__, exc)
         raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}")
 
