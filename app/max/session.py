@@ -37,6 +37,7 @@ from pymax.versions.catalog import VersionCatalog
 from sqlalchemy import update
 
 from app import database
+from app.max import media
 from app.max.auth import (
     PASSWORD_MAX_ATTEMPTS,
     LoginController,
@@ -124,6 +125,7 @@ class _AdapterMixin:
             await dispatch(frame)
 
         app.connection.on_event = on_event
+        media.install_uploads(app)
         return app
 
     async def _prepare_config(self):  # noqa: ANN202 — pymax ClientConfig

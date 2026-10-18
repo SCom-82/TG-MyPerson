@@ -332,6 +332,8 @@ class FakePyMaxClient:
     # Anything that would change what the MAX side sees ("read", presence, typing):
     # recorded, so the read paths can assert they never call it.
     async def read_message(self, message_id, chat_id: int):
+        if not isinstance(message_id, int):  # the live MAX (ticket 4b4ffe3c): then it drops the link
+            raise ApiError(opcode=50, error="proto.payload", message="Expected number at 38")
         self._write("read_message", message_id, chat_id)
 
     def set_presence(self, *a, **kw):  # pragma: no cover - must never be called

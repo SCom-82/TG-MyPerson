@@ -231,6 +231,10 @@ automatically in-process. It exists only as a manual escape hatch.
   `edit_message`, `delete_message` (`?for_all=false` — только у себя), `react_to_message`, `mark_read`
   (до последнего сообщения чата). Отправленное сразу пишется в хранилище. `schedule_date`, `voice_note`,
   `scheduled` → 501; тулы без маршрута MAX → 501.
+  Загрузка фото/файлов идёт через `MAX_PROXY_URL` (socks5 — через aiohttp-socks) нашим
+  `app.max.media.ProxiedUploads`: PyMax 2.4.1 шлёт загрузку aiohttp-`proxy=` (только HTTP-прокси,
+  socks5 рвёт соединение) и ищет `photoIds` в ссылке, которого MAX больше не даёт (upstream #108).
+  `mark_read` шлёт id сообщения числом и на web-транспорте (строку MAX отвергает и рвёт соединение).
 - Набор MCP-тулов зависит от платформы (QA D-3): аккаунт видит только тулы, чьи маршруты есть у его
   платформы. Тот же список для stdio-обёртки — `GET /api/v1/tools` (ключ/алиас аккаунта).
 - Контакты: `/api/v1/people` (owner-ключ: поиск, карточка с аккаунтами и достижимостью, сообщения и чаты

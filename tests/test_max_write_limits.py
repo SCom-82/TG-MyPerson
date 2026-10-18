@@ -183,7 +183,7 @@ async def test_forward_edit_react_delete_mark_read(rw):
         "read_message", "delete_message",
     ]
     assert rw.env.server.writes[2] == ("add_reaction", DIALOG, sent, "👍")
-    assert rw.env.server.writes[5] == ("read_message", str(sent), DIALOG)  # web client: id as str
+    assert rw.env.server.writes[5] == ("read_message", sent, DIALOG)  # a number on web too (MAX rejects a str id)
     assert rw.env.server.writes[6] == ("delete_message", DIALOG, [sent], False)
     counters = (await _status(rw))["counters"]
     assert (counters["sends_last_hour"], counters["actions_last_hour"]) == (2, 5)

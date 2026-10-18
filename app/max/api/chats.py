@@ -65,8 +65,10 @@ async def update_chat_settings(
 async def mark_read(chat_id: int, request: Request):
     """Read up to the chat's last message (MAX marks a message, not a chat).
 
-    The last message comes from MAX (history, 1 message). Its id goes as str
-    for the web client and as int for TCP (PyMax read_message).
+    The last message comes from MAX (history, 1 message). Its id goes as a
+    number on both transports: MAX rejects a string id ("proto.payload Expected
+    number") and drops the connection (ticket 4b4ffe3c; PyMax 2.4.1 documents
+    str for web, upstream dev/2.5.0 sends int).
     """
     session = await authorized_or_error(request)
     if isinstance(session, JSONResponse):
@@ -75,7 +77,7 @@ async def mark_read(chat_id: int, request: Request):
     if not history:
         raise HTTPException(status_code=404, detail="Chat has no messages")
     last = max(history, key=lambda m: (m.time or 0, m.id))
-    message_id = str(last.id) if session.transport == "web" else last.id
+    message_id = int(last.id)
     async with write_slot(request, ACTION, "mark_read", chat_id):
         await call_max(session.client.read_message(message_id, chat_id))
     return {"status": "read", "chat_id": chat_id, "message_id": last.id}
