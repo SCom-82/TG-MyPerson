@@ -68,13 +68,15 @@ def _digest(args: dict) -> str:
 async def call_tool(name: str, arguments: dict) -> list[types.TextContent] | types.CallToolResult:
     caller = _caller()
     args = arguments or {}
-    tool = BY_NAME.get(name)
+    known = BY_NAME.get(name)
+    # By name: a MAX key sees its variant of a shared tool (tools.MAX_VARIANTS).
+    tool = next((t for t in visible(caller) if t.name == name), None)
     ctx = AuthContext(account_id=caller.account_id, alias=caller.alias, platform=caller.platform,
                       scope=caller.scope)
-    if tool is None or tool not in visible(caller):
+    if tool is None:
         # Reaching for another level (ro → write, account → contacts, owner → data)
         # is visible in the audit like a denied REST call (QA D-4).
-        audit(ctx, tool.route if tool else name, status="denied", is_write=bool(tool and tool.is_write),
+        audit(ctx, known.route if known else name, status="denied", is_write=bool(known and known.is_write),
               error="tool not available for this key")
         return _text(f"Error: tool '{name}' is not available for this key")
     try:

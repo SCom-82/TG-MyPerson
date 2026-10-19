@@ -7,6 +7,7 @@ denied and logged identically.
 """
 
 import copy
+import dataclasses
 import functools
 import re
 from collections.abc import Awaitable, Callable
@@ -601,6 +602,21 @@ def _max_r4_tools() -> list[Tool]:
 
 
 ACCOUNT_TOOLS = _account_tools() + _max_group_tools() + _max_r4_tools()
+
+
+def _max_variants() -> dict[str, Tool]:
+    """Shared tools as a MAX account sees them (review 17.2 R17.2-1): the TG schema of the
+    stdio wrapper stays as it is, a MAX key gets the MAX facts."""
+    poll = next(t for t in ACCOUNT_TOOLS if t.name == "send_poll")
+    schema = copy.deepcopy(poll.schema)
+    schema["properties"]["is_anonymous"] = {
+        "type": "boolean", "default": False,
+        "description": "MAX: false only — MAX rejects an anonymous poll (answer 501)",
+    }
+    return {"send_poll": dataclasses.replace(poll, schema=schema)}
+
+
+MAX_VARIANTS = _max_variants()
 RW_TOOLS = _rw_tools()
 OWNER_TOOLS = _owner_tools()
 BY_NAME = {t.name: t for t in (*ACCOUNT_TOOLS, *RW_TOOLS, *OWNER_TOOLS)}
@@ -629,4 +645,5 @@ def visible(caller: Caller) -> list[Tool]:
         tools = [t for t in ACCOUNT_TOOLS if not t.is_write]
     else:
         tools = [*ACCOUNT_TOOLS, *RW_TOOLS]
-    return [t for t in tools if supported(t, caller.platform)]
+    variants = MAX_VARIANTS if caller.platform == "max" else {}
+    return [variants.get(t.name, t) for t in tools if supported(t, caller.platform)]

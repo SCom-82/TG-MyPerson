@@ -111,3 +111,19 @@ async def test_mcp_tools_and_calls(rw):
     assert (renamed["title"], renamed["chat_ids"]) == ("MCP 2", [FOREIGN])
     listed = await mcp_tools.BY_NAME["list_folders"].call(caller, {})
     assert [f["title"] for f in listed["items"]] == ["MCP 2"]
+
+
+def test_send_poll_schema_says_max_takes_no_anonymous_poll():
+    """review 17.2 R17.2-1: a MAX key sees is_anonymous default false with the reason; TG — the stdio schema."""
+    from app.mcp.stdio_catalog import STDIO_TOOLS
+
+    def schema(platform: str) -> dict:
+        caller = mcp_tools.Caller("account", 1, "x", platform, "rw", "http://test")
+        return next(t for t in mcp_tools.visible(caller) if t.name == "send_poll").schema
+
+    max_prop = schema("max")["properties"]["is_anonymous"]
+    assert max_prop["default"] is False and "MAX: false only" in max_prop["description"]
+    stdio = next(t for t in STDIO_TOOLS if t["name"] == "send_poll")["inputSchema"]
+    assert schema("telegram") == mcp_tools.widen_ids(stdio) and schema("telegram")["properties"]["is_anonymous"][
+        "default"] is True
+    assert schema("max")["properties"]["chat_id"] == schema("telegram")["properties"]["chat_id"]
