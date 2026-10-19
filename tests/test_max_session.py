@@ -492,7 +492,8 @@ async def test_s15_pymax_logger_never_debug_and_no_token_in_logs(env, caplog):
 
 
 def test_s16_pymax_import_boundary():
-    allowed = {"session.py", "store.py", "auth.py", "normalize.py", "media.py"}
+    allowed = {"session.py", "store.py", "auth.py", "normalize.py", "media.py",
+               "groups.py"}  # the group protocol (plan 2026-10-19 Р3 Р-27); app/max/api/groups.py is not
     app_dir = Path(__file__).resolve().parent.parent / "app"
     offenders = []
     for path in app_dir.rglob("*.py"):

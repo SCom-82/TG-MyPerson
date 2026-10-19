@@ -16,6 +16,7 @@ from app.authz.middleware import _not_supported
 from app.max.api.auth import router as auth_router
 from app.max.api.chats import router as chats_router
 from app.max.api.contacts import router as contacts_router
+from app.max.api.groups import router as groups_router
 from app.max.api.messages import router as messages_router
 from app.max.api.search import router as search_router
 from app.max.api.stream import router as stream_router
@@ -52,6 +53,7 @@ MAX_API_ROUTERS = (
     stream_router,
     sync_router,
     tools_router,
+    groups_router,  # /groups/... MAX-only (plan 2026-10-19 Р3 Р-20)
     reach_router,  # reachable_contacts, send_to_person, contact_by_phone (plan 2026-10-19 Р-17)
     unsupported_router,
 )

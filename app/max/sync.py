@@ -125,7 +125,8 @@ class MaxSync:
     async def _store_chats(self, fresh: list) -> None:
         new = self.new
         if new is not None:
-            await new.upsert_chats([normalize.normalize_chat(c) for c in fresh])
+            me = getattr(getattr(getattr(self.session.client, "me", None), "contact", None), "id", None)
+            await new.upsert_chats([normalize.normalize_chat(c, me) for c in fresh])
             await shadow("max chats", lambda: self._store_chats_legacy(fresh))
         else:
             await self._store_chats_legacy(fresh)

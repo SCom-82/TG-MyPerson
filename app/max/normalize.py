@@ -239,12 +239,26 @@ def normalize_message(
     return row, media
 
 
-def normalize_chat(chat: Chat) -> dict:
+def my_role(chat: Any, me_id: int | None) -> str | None:
+    """creator / admin / member of a group or channel as MAX describes it (plan Р3 Р-28); dialogs: None."""
+    if me_id is None or _CHAT_TYPES.get(str(_value(chat.type))) not in ("group", "channel"):
+        return None
+    if getattr(chat, "owner", None) == me_id:
+        return "creator"
+    if me_id in (getattr(chat, "admins", None) or []):
+        return "admin"
+    return "member"
+
+
+def normalize_chat(chat: Chat, me_id: int | None = None) -> dict:
+    """max_chats row; with me_id (the new storage) also my_role — max_chats has no such column."""
     kind = _value(chat.type)
     last = chat.last_message
     raw = model_raw(chat)
     raw["_pymax"] = PYMAX_VERSION
+    extra = {"my_role": my_role(chat, me_id)} if me_id is not None else {}
     return {
+        **extra,
         "id": chat.id,
         "chat_type": _CHAT_TYPES.get(str(kind), str(kind).lower()),
         "title": chat.title,

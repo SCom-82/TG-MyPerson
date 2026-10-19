@@ -3,7 +3,8 @@
 Real middleware stack against the test DB (accounts are committed and removed):
   A-1  max ro  + send_message        → 403, audit tool=send_message status=denied
   A-2  max ro  + join_chat_endpoint  → 403, not 501
-  A-3  max     + list_members (read) → 501 {tool, platform:max}, audit status=error
+  A-3  max     + list_scheduled (read) → 501 {tool, platform:max}, audit status=error
+       (list_members / get_my_rights are served by MAX since plan 2026-10-19 Р3)
   A-4  TG      + /auth/qr*           → 501 (MAX-only tools)
   A-5  external /api/v1/_max/...     → 404 for any alias
   A-6  max     + list_chats (PR-2)   → 501
@@ -137,18 +138,18 @@ async def test_max_ro_join_chat_403_not_501(client, accounts):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_max_list_members_501_and_audit_error(client, accounts):
+async def test_max_list_scheduled_501_and_audit_error(client, accounts):
     alias = accounts["max_ro"]["alias"]
-    resp = await client.get("/api/v1/chats/-100123/members", headers=_h(alias))
+    resp = await client.get("/api/v1/messages/scheduled?chat_id=1", headers=_h(alias))
 
     assert resp.status_code == 501
     assert resp.json() == {
-        "error": "tool 'list_members' is not supported for platform max",
-        "tool": "list_members",
+        "error": "tool 'list_scheduled' is not supported for platform max",
+        "tool": "list_scheduled",
         "platform": "max",
         "alias": alias,
     }
-    assert await _audit_rows(alias) == [("list_members", False, "error", "HTTP 501,legacy_key")]  # shared key (D10)
+    assert await _audit_rows(alias) == [("list_scheduled", False, "error", "HTTP 501,legacy_key")]  # shared key (D10)
 
 
 @pytest.mark.parametrize(
@@ -156,7 +157,6 @@ async def test_max_list_members_501_and_audit_error(client, accounts):
     [
         ("GET", "/api/v1/messages/scheduled?chat_id=1", "list_scheduled"),
         ("GET", "/api/v1/snapshots/chat/-100123", "list_chat_snapshots"),
-        ("GET", "/api/v1/chats/-100123/my_rights", "get_my_rights"),
     ],
 )
 @pytest.mark.asyncio
@@ -191,7 +191,7 @@ async def test_max_rw_send_message_reaches_the_max_route(client, accounts):
 @pytest.mark.asyncio
 async def test_max_alias_via_query_param(client, accounts):
     alias = accounts["max_ro"]["alias"]
-    resp = await client.get(f"/api/v1/chats/-100123/members?session={alias}", headers=API_KEY)
+    resp = await client.get(f"/api/v1/messages/scheduled?chat_id=1&session={alias}", headers=API_KEY)
     assert resp.status_code == 501
     assert resp.json()["alias"] == alias
 
@@ -324,11 +324,11 @@ async def test_alias_cache_keeps_platform(client, accounts):
     import app.authz.middleware as mw
 
     alias = accounts["max_ro"]["alias"]
-    first = await client.get("/api/v1/chats/-100123/members", headers=_h(alias))
+    first = await client.get("/api/v1/messages/scheduled?chat_id=1", headers=_h(alias))
     assert mw._alias_cache[alias][0] == (accounts["max_ro"]["id"], "max")
 
     with patch.object(mw, "_resolve_alias_from_db", AsyncMock(side_effect=AssertionError("cache miss"))):
-        second = await client.get("/api/v1/chats/-100123/members", headers=_h(alias))
+        second = await client.get("/api/v1/messages/scheduled?chat_id=1", headers=_h(alias))
     assert first.status_code == second.status_code == 501
 
 

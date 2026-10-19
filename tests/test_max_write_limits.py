@@ -16,7 +16,7 @@ from pymax import ApiError
 
 import app.authz.middleware as mw
 import app.max.pool as max_pool_module
-from app.authz import write_limits
+from app.authz import tool_catalog, write_limits
 from app.max.pool import MaxPool
 from app.mcp import tools as mcp_tools
 from tests.isolation_env import sql
@@ -618,10 +618,11 @@ async def test_mcp_send_and_limit_text(rw):
 
 
 MAX_501_TOOLS = {"send_album", "send_voice", "send_poll", "pin_message", "unpin_message", "join_chat",
-                 "leave_chat", "resolve_chat", "archive_chat", "get_my_rights", "get_chat_members",
+                 "resolve_chat", "archive_chat",
                  "list_scheduled", "cancel_scheduled", "send_scheduled_now", "block_user", "unblock_user"}
 MAX_WRITES = {"send_message", "send_photo", "send_file", "create_upload", "forward_message", "edit_message",
-              "delete_message", "react_to_message", "mark_chat_read", "contact_by_phone", "send_to_person"}
+              "delete_message", "react_to_message", "mark_chat_read", "contact_by_phone", "send_to_person",
+              "leave_chat"}
 
 
 async def test_mcp_tools_depend_on_platform(rw):
@@ -631,7 +632,7 @@ async def test_mcp_tools_depend_on_platform(rw):
     assert not MAX_WRITES & max_ro and not MAX_501_TOOLS & max_ro and "list_messages" in max_ro
     tg_rw = names(_caller(rw, platform="telegram"))
     assert len(tg_rw) == 46 and MAX_501_TOOLS | MAX_WRITES <= tg_rw
-    assert len(max_rw) == 30 and "reachable_contacts" in max_rw  # reach on MAX (plan 2026-10-19 Р-17)
+    assert len(max_rw) == 46 and "reachable_contacts" in max_rw  # reach (Р-17) + groups (Р3) on MAX
 
     # Every tool shown to a MAX account has its route on MAX (no 501 by construction).
     for name in max_rw:
@@ -649,7 +650,8 @@ async def test_available_tools_endpoint_for_the_stdio_wrapper(rw, aliases):  # n
     tg_alias, tg_id = aliases("tgt", platform="telegram", mode="ro")
     body = (await rw.http.get("/api/v1/tools", headers={**API_KEY, "x-session-alias": tg_alias})).json()
     assert body["platform"] == "telegram" and "send_message" not in body["tools"] and "list_scheduled" in body["tools"]
-    assert set(body["tools"]) == {t.name for t in mcp_tools.ACCOUNT_TOOLS if not t.is_write}
+    assert set(body["tools"]) == {t.name for t in mcp_tools.ACCOUNT_TOOLS
+                                  if not t.is_write and t.route not in tool_catalog.MAX_ONLY_TOOLS}
 
 
 async def test_session_stop_waits_for_cancelled_jobs(new_env):  # noqa: F811

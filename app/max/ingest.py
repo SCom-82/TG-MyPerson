@@ -262,7 +262,7 @@ class MaxIngest:
         chat = normalize.parse_chat(payload)
         new = self.new
         if new is not None:
-            await new.upsert_chats([normalize.normalize_chat(chat)])
+            await new.upsert_chats([normalize.normalize_chat(chat, self.me_id)])
             await shadow("max chat", lambda: self._chat_legacy(chat))
         else:
             await self._chat_legacy(chat)
@@ -288,7 +288,7 @@ class MaxIngest:
         users = contacts + ([me] if me is not None else [])
         new = self.new
         if new is not None:
-            await new.upsert_chats([normalize.normalize_chat(c) for c in chats_])
+            await new.upsert_chats([normalize.normalize_chat(c, me_id) for c in chats_])
             await new.upsert_users([normalize.normalize_user(u) for u in contacts], "contact", is_contact=True)
             if me is not None:
                 await new.upsert_users([normalize.normalize_user(me)], "dialog")

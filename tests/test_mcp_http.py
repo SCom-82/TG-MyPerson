@@ -300,6 +300,7 @@ def test_every_tool_reaches_its_rest_route(platform):
     same name authz and audit use; MAX: what MAX has, the rest is 501 like REST."""
     import re
 
+    from app.authz.tool_catalog import MAX_ONLY_TOOLS
     from app.mcp import invoke
     from app.mcp.tools import BY_NAME
 
@@ -311,6 +312,8 @@ def test_every_tool_reaches_its_rest_route(platform):
         method, template = ref
         path = re.sub(r"\{[a-z_]+\}", "1", template)
         found = invoke._find(platform, method, path)
+        if found is None and platform == "telegram" and tool.route in MAX_ONLY_TOOLS:
+            continue  # MAX groups (plan 2026-10-19 Р3): TG has no such route, the tool is hidden
         if found is None:
             if platform == "max":
                 continue  # 501 for MAX, as the REST API answers

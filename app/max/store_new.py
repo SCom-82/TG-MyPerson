@@ -55,6 +55,7 @@ def chat_row(row: dict) -> ChatRow:
         members_count=row.get("members_count"),
         last_message_external_id=row.get("last_message_id"),
         last_message_at=row.get("last_message_at"),
+        my_role=row.get("my_role"),
         raw=row.get("raw_data"),
     )
 

@@ -51,7 +51,8 @@ async def authorized_or_error(request: Request) -> MaxSession | JSONResponse:
 _UNCERTAIN = (TimeoutError, ConnectionError, EOFError, OSError)
 
 
-async def call_max(call: Awaitable[T]) -> T:
+async def call_max(call: Awaitable[T], uncertain_text: str = "the message may have been sent, "
+                                                          "check list_messages before retrying") -> T:
     """A PyMax write.
 
     - an error answer of MAX (ApiError), a bad file (ValueError), ... → 502,
@@ -65,10 +66,8 @@ async def call_max(call: Awaitable[T]) -> T:
     except HTTPException:
         raise
     except _UNCERTAIN as exc:
-        log.warning("max write: no answer (%s: %s), the message may have been sent", type(exc).__name__, exc)
-        error = HTTPException(status_code=504, detail=(
-            f"{type(exc).__name__}: {exc} — no answer from MAX; the message may have been sent, "
-            "check list_messages before retrying"))
+        log.warning("max write: no answer (%s: %s), %s", type(exc).__name__, exc, uncertain_text)
+        error = HTTPException(status_code=504, detail=f"{type(exc).__name__}: {exc} — no answer from MAX; {uncertain_text}")
         error.keep_write_slot = True
         raise error
     except Exception as exc:  # noqa: BLE001 — PyMax raises ApiError, ValueError, ...

@@ -21,6 +21,7 @@ from pymax.types.domain.auth import (
     StartAuthResponse,
 )
 from pymax.types import Chat, User
+from pymax.types.domain.member import Member
 from pymax.types.domain import Message
 from pymax.types.domain.attachments.file import FileRequest
 from pymax.types.domain.attachments.video import VideoRequest
@@ -83,6 +84,14 @@ class FakeMaxServer:
         self.lookup_errors: list[BaseException] = []
         self.add_contact_errors: list[BaseException] = []
         self.added_contacts: list[int] = []
+
+        # Groups (plan 2026-10-19 Р3): chat_id → Chat dict; every group call (name, args)
+        self.groups: dict[int, dict] = {}
+        self.group_calls: list[tuple] = []
+        self.group_errors: list[BaseException] = []
+        self.members_page = 2
+        self.join_queue: dict[int, list[int]] = {}
+        self.next_group_id = -71_000_000_000
 
         self.factory_calls: list[dict] = []
         self.clients: list["FakePyMaxClient"] = []
@@ -165,6 +174,7 @@ class FakePyMaxClient:
             config=SimpleNamespace(phone=phone, password_max_attempts=extra_config.password_max_attempts),
         )
         self.me = None
+        self._app = SimpleNamespace(invoke=self._admin_frame)  # raw frames (remove_group_admin)
         self.chats: list = []
         self.contacts: list = []
         self.is_connected = False
@@ -269,6 +279,127 @@ class FakePyMaxClient:
         self.calls.append("get_users")
         self.server.get_users_calls.append(list(user_ids))
         return [User.model_validate(self.server.users[i]) for i in user_ids if i in self.server.users]
+
+    # -- groups (plan 2026-10-19 Р3) -------------------------------------------
+
+    def _group_call(self, name: str, *args):
+        self.calls.append(name)
+        self.server.group_calls.append((name, *args))
+        if self.server.group_errors:
+            raise self.server.group_errors.pop(0)
+
+    def _chat(self, chat_id: int) -> Chat:
+        return Chat.model_validate(self.server.groups[chat_id])
+
+    def _group(self, chat_id: int) -> dict:
+        if chat_id not in self.server.groups:
+            raise ApiError(opcode=48, error="chat.not.found", message="Chat not found")
+        return self.server.groups[chat_id]
+
+    async def create_group(self, name: str, participant_ids=None, notify: bool = True):
+        self._group_call("create_group", name, list(participant_ids or []), notify)
+        self.server.next_group_id -= 1
+        cid, now = self.server.next_group_id, int(time.time() * 1000)
+        members = [self.server.user_id, *(participant_ids or [])]
+        self.server.groups[cid] = {"id": cid, "type": "CHAT", "status": "ACTIVE", "owner": self.server.user_id,
+                                   "title": name, "participants": {str(u): now for u in members},
+                                   "participantsCount": len(members), "admins": [], "lastEventTime": now}
+        msg = self._new_message(cid, None, attaches=[{"_type": "CONTROL", "event": "new", "title": name}])
+        return self._chat(cid), msg
+
+    async def invite_users_to_group(self, chat_id: int, user_ids: list[int], show_history: bool = True):
+        self._group_call("invite_users_to_group", chat_id, list(user_ids), show_history)
+        g = self._group(chat_id)
+        for u in user_ids:
+            g["participants"][str(u)] = int(time.time() * 1000)
+        g["participantsCount"] = len(g["participants"])
+        return self._chat(chat_id)
+
+    async def remove_users_from_group(self, chat_id: int, user_ids: list[int], clean_msg_period: int) -> bool:
+        self._group_call("remove_users_from_group", chat_id, list(user_ids), clean_msg_period)
+        g = self._group(chat_id)
+        for u in user_ids:
+            g["participants"].pop(str(u), None)
+        g["participantsCount"] = len(g["participants"])
+        return True
+
+    async def add_admin(self, chat_id: int, user_id: int, permissions: list) -> None:
+        mask = 0
+        for p in permissions:
+            mask |= int(p)
+        self._group_call("add_admin", chat_id, user_id, mask)
+        g = self._group(chat_id)
+        g["admins"] = sorted({*g.get("admins", []), user_id})
+        g.setdefault("adminParticipants", {})[str(user_id)] = {"permissions": mask}
+
+    async def _admin_frame(self, opcode, payload: dict):
+        self._group_call("invoke", int(opcode), payload)
+        g = self._group(payload["chatId"])
+        if payload.get("type") == "ADMIN" and payload.get("operation") == "remove":
+            g["admins"] = [a for a in g.get("admins", []) if a not in payload["userIds"]]
+        return None
+
+    async def change_group_profile(self, chat_id: int, name=None, description=None, photo=None) -> None:
+        self._group_call("change_group_profile", chat_id, name, description)
+        g = self._group(chat_id)
+        if name is not None:
+            g["title"] = name
+        if description is not None:
+            g["description"] = description
+
+    async def change_group_settings(self, chat_id: int, **options) -> None:
+        self._group_call("change_group_settings", chat_id, options)
+        self._group(chat_id).setdefault("options", {}).update({k.upper(): v for k, v in options.items()})
+
+    async def rework_invite_link(self, chat_id: int):
+        self._group_call("rework_invite_link", chat_id)
+        g = self._group(chat_id)
+        g["link"] = f"https://max.ru/join/new-{len(self.server.group_calls)}"
+        return self._chat(chat_id)
+
+    async def get_chat(self, chat_id: int):
+        self.calls.append("get_chat")
+        self._group(chat_id)
+        return self._chat(chat_id)
+
+    async def get_chat_members(self, chat_id: int, marker: int | None = None, count: int = 50):
+        self._group_call("get_chat_members", chat_id, marker, count)
+        ids = sorted(int(u) for u in self._group(chat_id)["participants"])
+        start = marker or 0
+        page = ids[start:start + min(count, self.server.members_page)]
+        nxt = start + len(page) if start + len(page) < len(ids) else 0
+        return [Member.model_validate({"contact": self._user_of(u), "presence": {}}) for u in page], nxt
+
+    def _user_of(self, uid: int) -> dict:
+        return self.server.users.get(uid) or {"id": uid, "names": [{"firstName": f"U{uid}"}]}
+
+    async def get_join_requests(self, chat_id: int, count: int = 100):
+        self._group_call("get_join_requests", chat_id, count)
+        return [Member.model_validate({"contact": self._user_of(u), "presence": {}})
+                for u in self.server.join_queue.get(chat_id, [])[:count]]
+
+    async def confirm_join_requests(self, chat_id: int, user_ids: list[int], show_history: bool = True):
+        self._group_call("confirm_join_requests", chat_id, list(user_ids), show_history)
+        g = self._group(chat_id)
+        for u in user_ids:
+            g["participants"][str(u)] = 1
+        self.server.join_queue[chat_id] = [u for u in self.server.join_queue.get(chat_id, []) if u not in user_ids]
+        return self._chat(chat_id)
+
+    async def decline_join_requests(self, chat_id: int, user_ids: list[int]):
+        self._group_call("decline_join_requests", chat_id, list(user_ids))
+        self.server.join_queue[chat_id] = [u for u in self.server.join_queue.get(chat_id, []) if u not in user_ids]
+        return None
+
+    async def leave_group(self, chat_id: int) -> None:
+        self._group_call("leave_group", chat_id)
+
+    async def leave_channel(self, chat_id: int) -> None:
+        self._group_call("leave_channel", chat_id)
+
+    async def delete_chat(self, chat_id: int, last_event_time=None, for_all: bool = True) -> None:
+        self._group_call("delete_chat", chat_id, for_all)
+        self.server.groups.pop(chat_id, None)
 
     async def search_by_phone(self, phone: str):
         self.calls.append("search_by_phone")

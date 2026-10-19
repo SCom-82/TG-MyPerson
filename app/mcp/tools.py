@@ -66,7 +66,7 @@ class ToolError(Exception):
 MAX_SAFE_INT = 2**53 - 1
 ID_KEYS = frozenset({
     "chat_id", "message_id", "message_ids", "reply_to_message_id", "from_user_id", "user_id",
-    "to_chat_id", "from_chat_id", "forward_from_chat_id", "forward_from_message_id",
+    "to_chat_id", "from_chat_id", "forward_from_chat_id", "forward_from_message_id", "user_ids",
 })
 # Internal ids of the contacts base: small, stay plain integers.
 SMALL_IDS = frozenset({"person_id", "identity_id", "from_id", "to_id"})
@@ -472,7 +472,68 @@ def _widened(tools: list[Tool]) -> list[Tool]:
     return tools
 
 
-ACCOUNT_TOOLS = _account_tools()
+def _max_group_tools() -> list[Tool]:
+    """MAX groups (plan 2026-10-19 Р3): routes only in the MAX router — visible() hides
+    them from TG, the writes from ro."""
+    cid = {"chat_id": {"type": "integer", "description": "group chat id"}}
+    ids = {"type": "array", "items": {"type": "integer"}, "minItems": 1, "maxItems": 20,
+           "description": "user ids, ≤ 20"}
+    obj = lambda props, req=("chat_id",): {"type": "object", "properties": props, "required": list(req)}  # noqa: E731
+    path = lambda a: {k: v for k, v in a.items() if k != "chat_id" and v is not None}  # noqa: E731
+    perms = {"type": "array", "items": {"type": "string", "enum": ["add_remove_member", "add_admin",
+                                                                  "change_chat_info", "pin_message",
+                                                                  "delete_message"]},
+             "description": "default: add_remove_member, change_chat_info, pin_message, delete_message"}
+    flag = {"type": "boolean"}
+    return _widened([
+        Tool("create_group", "Create a MAX group with this account as owner; user_ids are invited at once. "
+             "Limits: 3 groups and 30 invited people a day.",
+             obj({"title": {"type": "string"}, "user_ids": {**ids, "minItems": 0},
+                  "notify": {"type": "boolean", "default": True}}, ["title"]),
+             "create_group", rest("POST", "/groups", body=ALL)),
+        Tool("add_group_members", "Add people to a group (each counts in the 30 invites a day).",
+             obj({**cid, "user_ids": ids, "show_history": {"type": "boolean", "default": True}},
+                 ["chat_id", "user_ids"]),
+             "add_group_members", rest("POST", "/groups/{chat_id}/members", body=path)),
+        Tool("remove_group_members", "Remove people from a group (their messages stay).",
+             obj({**cid, "user_ids": ids}, ["chat_id", "user_ids"]),
+             "remove_group_members", rest("POST", "/groups/{chat_id}/members/remove", body=path)),
+        Tool("set_group_admin", "Make a member an admin of the group.",
+             obj({**cid, "user_id": {"type": "integer"}, "permissions": perms}, ["chat_id", "user_id"]),
+             "set_group_admin", rest("POST", "/groups/{chat_id}/admins", body=path)),
+        Tool("remove_group_admin", "Take admin rights from a member.",
+             obj({**cid, "user_id": {"type": "integer"}}, ["chat_id", "user_id"]),
+             "remove_group_admin", rest("POST", "/groups/{chat_id}/admins/remove", body=path)),
+        Tool("update_group_profile", "Change the group's title and/or description.",
+             obj({**cid, "title": {"type": "string"}, "description": {"type": "string"}}),
+             "update_group_profile", rest("PATCH", "/groups/{chat_id}", body=path)),
+        Tool("update_group_settings", "Change group settings (only the ones passed).",
+             obj({**cid, "all_can_pin_message": flag, "only_owner_can_change_icon_title": flag,
+                  "only_admin_can_add_member": flag, "only_admin_can_call": flag,
+                  "members_can_see_private_link": flag}),
+             "update_group_settings", rest("PATCH", "/groups/{chat_id}/settings", body=path)),
+        Tool("get_invite_link", "The group's current invite link (null if it has none).", obj(cid),
+             "get_invite_link", rest("GET", "/groups/{chat_id}/invite-link")),
+        Tool("reset_invite_link", "Make a new invite link; the previous one stops working.", obj(cid),
+             "reset_invite_link", rest("POST", "/groups/{chat_id}/invite-link")),
+        Tool("list_join_requests", "People asking to join the group.",
+             obj({**cid, "limit": {"type": "integer", "default": 100, "maximum": 100}}),
+             "list_join_requests", rest("GET", "/groups/{chat_id}/join-requests", query=path)),
+        Tool("approve_join_requests", "Let people who asked in.",
+             obj({**cid, "user_ids": ids, "show_history": {"type": "boolean", "default": True}},
+                 ["chat_id", "user_ids"]),
+             "approve_join_requests", rest("POST", "/groups/{chat_id}/join-requests/approve", body=path)),
+        Tool("decline_join_requests", "Decline join requests.", obj({**cid, "user_ids": ids}, ["chat_id", "user_ids"]),
+             "decline_join_requests", rest("POST", "/groups/{chat_id}/join-requests/decline", body=path)),
+        Tool("delete_group", "Delete a group: owner only; confirm_title must equal the current title. "
+             "for_all=true deletes it for every member.",
+             obj({**cid, "confirm_title": {"type": "string"}, "for_all": {"type": "boolean", "default": True}},
+                 ["chat_id", "confirm_title"]),
+             "delete_group", rest("POST", "/groups/{chat_id}/delete", body=path)),
+    ])
+
+
+ACCOUNT_TOOLS = _account_tools() + _max_group_tools()
 RW_TOOLS = _rw_tools()
 OWNER_TOOLS = _owner_tools()
 BY_NAME = {t.name: t for t in (*ACCOUNT_TOOLS, *RW_TOOLS, *OWNER_TOOLS)}
