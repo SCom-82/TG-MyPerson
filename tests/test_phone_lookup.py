@@ -67,13 +67,14 @@ class FakeTelethon:
         self.users = users if users is not None else [TlUser(id=TG_PEER, access_hash=777, first_name="Сергей",
                                                              phone="79278975956")]
         self.error = error
+        self.retry: list[int] = []
         self.requests = []
 
     async def __call__(self, request):
         self.requests.append(request)
         if self.error is not None:
             raise self.error
-        return SimpleNamespace(users=self.users, imported=[])
+        return SimpleNamespace(users=self.users, imported=[], retry_contacts=self.retry)
 
 
 @pytest_asyncio.fixture
@@ -318,6 +319,17 @@ async def test_tg_not_found_and_flood_spend_the_slot(tg):
     resp = await tg.rw.http.post("/api/v1/contacts/by-phone", headers=tg.h, json={"phone": PHONE})
     assert resp.status_code == 502 and "FloodWait" in resp.text
     assert [e[0] for e in _events(tg.id)] == ["lookup", "lookup"]
+
+
+async def test_tg_import_limit_is_429_not_not_found(tg):
+    """review 14 R14-1: empty users + retry_contacts = Telegram's import limit, not 'no Telegram'."""
+    tg.client.users = []
+    tg.client.retry = [12345]
+    resp = await tg.rw.http.post("/api/v1/contacts/by-phone", headers=tg.h, json={"phone": PHONE})
+    assert resp.status_code == 429, resp.text
+    assert "Telegram import limit, retry later" in resp.json()["detail"]
+    assert "not registered" not in resp.text
+    assert [e[0] for e in _events(tg.id)] == ["lookup"]  # spent (Р-14)
 
 
 async def test_tg_lookups_limited_sends_not(tg):

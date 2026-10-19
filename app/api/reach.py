@@ -162,6 +162,9 @@ async def _messenger_lookup(conn, account: Account, req: ByPhoneRequest, e164: s
 
         try:
             return await tg_lookup.by_phone(conn, account.id, e164, req.first_name, req.last_name), {}
+        except tg_lookup.ImportLimited:
+            raise HTTPException(status_code=429, detail="Telegram import limit, retry later "
+                                                        "(the number was not checked; the lookup is spent)")
         except Exception as exc:  # noqa: BLE001 — FloodWait, RPC errors: the slot is spent anyway
             raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}")
 

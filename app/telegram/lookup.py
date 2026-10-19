@@ -13,12 +13,18 @@ from telethon.tl.types import InputPhoneContact
 from app.services import tg_store
 
 
+class ImportLimited(Exception):
+    """Telegram's contact import limit: the number was not checked (retry_contacts), not 'not found'."""
+
+
 async def by_phone(client, account_id: int, e164: str, first_name: str | None, last_name: str | None) -> int | None:
     """External user id, None: not registered (or hidden by privacy)."""
     result = await client(ImportContactsRequest([InputPhoneContact(
         client_id=random.getrandbits(63), phone=e164, first_name=first_name or e164, last_name=last_name or "",
     )]))
     if not result.users:
+        if getattr(result, "retry_contacts", None):
+            raise ImportLimited()  # review 14 R14-1: the lookup is spent, the answer is "later", not "no"
         return None
     user = result.users[0]
     if not getattr(user, "phone", None):
