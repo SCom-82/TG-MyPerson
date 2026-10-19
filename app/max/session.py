@@ -33,6 +33,12 @@ from typing import Any
 
 import pymax
 from pymax import ApiError, Client, ExtraConfig, PasswordAttemptsExceededError, SmsAuthFlow, WebClient
+from pymax.api.binding import bind_api_model
+from pymax.api.messages.payloads import ForwardLink, ForwardMessagePayload, ForwardMessagePayloadMessage
+from pymax.api.messages.service import MessageService
+from pymax.api.response import require_payload_model
+from pymax.protocol import Opcode
+from pymax.types.domain import Message
 from pymax.versions.catalog import VersionCatalog
 from sqlalchemy import update
 
@@ -100,6 +106,34 @@ guard_pymax_logger()
 FrameHook = Callable[[int, int, dict | None], Awaitable[None]]
 
 
+class NumericForwardMessages(MessageService):
+    """PyMax's MessageService with forward_message sending the message id as a NUMBER.
+
+    maxapi-python 2.4.1 builds link.messageId with str(message_id); the live MAX
+    rejects it — "Ошибка валидации Expected number at 61 [proto.payload]" (19.10,
+    POST /messages/forward into «Избранное» of max-work), the same as mark_read
+    with a str id before b92263c. Everything else is PyMax's own frame.
+    """
+
+    async def forward_message(self, chat_id: int, message_id: int | str, source_chat_id: int | None = None, *,
+                              notify: bool = True) -> Message:
+        source_chat_id = chat_id if source_chat_id is None else source_chat_id
+        payload = forward_payload(chat_id, message_id, source_chat_id, cid=-self._next_cid(), notify=notify)
+        response = await self.app.invoke(Opcode.MSG_SEND, payload)
+        return bind_api_model(self.app, require_payload_model(response, Message))
+
+
+def forward_payload(chat_id: int, message_id: int | str, source_chat_id: int, *, cid: int, notify: bool) -> dict:
+    payload = ForwardMessagePayload(
+        chat_id=chat_id,
+        message=ForwardMessagePayloadMessage(cid=cid, link=ForwardLink(message_id=str(message_id),
+                                                                       chat_id=source_chat_id)),
+        notify=notify,
+    ).to_payload()
+    payload["message"]["link"]["messageId"] = int(message_id)
+    return payload
+
+
 class _AdapterMixin:
     """Guards + a frame hook in front of PyMax's dispatcher.
 
@@ -126,6 +160,8 @@ class _AdapterMixin:
 
         app.connection.on_event = on_event
         media.install_uploads(app)
+        # Same instance, our class: forward ids as numbers (see NumericForwardMessages).
+        app.api.messages.__class__ = NumericForwardMessages
         return app
 
     async def _prepare_config(self):  # noqa: ANN202 — pymax ClientConfig
