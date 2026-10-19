@@ -48,6 +48,7 @@ _SITE = re.compile(r"^(?:https?://)?(?:www\.)?max\.ru/(?P<path>[^?#\s]+?)/?(?:[?
 _CODE = re.compile(r"^[A-Za-z0-9_-]+$")
 _NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$")
 LINK_FORMS = "https://max.ru/join/<code>, join/<code>, https://max.ru/<name> or @name"
+ALREADY_MEMBER_NOTE = "already_member comes from the stored chat; if the chat is not visible, tell the operator"
 
 
 def parse_target(target: str) -> tuple[str, str]:
@@ -103,7 +104,8 @@ async def _chat_answer(request: Request, session, chat: Any) -> dict:
 @router.post("/join", name="join_chat_endpoint")
 async def join_chat_endpoint(req: JoinChatRequest, request: Request):
     """Join by a link (chats_joined_per_day, 5 a day). Already a member → 200
-    already_member=true: no join frame, no slot."""
+    already_member=true: no join frame, no slot. already_member may come from the stored
+    chat (rows without raw.status count as active, review 17 R17-6): the answer says so."""
     kind, link = parse_target(req.target)
     session = await mx_groups.connected(request)
     try:
@@ -113,7 +115,7 @@ async def join_chat_endpoint(req: JoinChatRequest, request: Request):
         seen = None
     if seen is not None and await _is_joined(request, session, seen):
         await mx_groups.store_chat(session, seen)
-        return {**await _chat_answer(request, session, seen), "already_member": True}
+        return {**await _chat_answer(request, session, seen), "already_member": True, "note": ALREADY_MEMBER_NOTE}
     async with bundle_slot(request, "join_chat_endpoint", {CHAT_JOIN: 1}):
         join = session.client.join_group(link) if kind == "join" else session.client.join_channel(link)
         chat = await call_max(join, "the join may have been applied, check list_chats")

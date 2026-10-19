@@ -7,18 +7,22 @@ raw protocol lives here, so a PyMax upgrade has one place to look at.
 - poll_attach / poll_view: a poll to send (PyMax's Poll in attaches) and the
   poll of a message as the agent sees it (Р-44, Р-46);
 - link_info: LINK_INFO by a public https://max.ru/<name> (PyMax takes join/… only; Р-48);
-- sync_contacts: PyMax's import_contacts frame (SYNC), keeping the phones map
-  PyMax throws away — which number gave which user (Р-38).
+- sync_contacts / parse_sync: PyMax's import_contacts frame (SYNC), keeping the
+  phones map PyMax throws away — which number gave which user (Р-38);
+- vote / parse_vote: PyMax's vote_poll frame. Sending and parsing are apart
+  (review 17 R17-1): the write slot covers the frame only, an answer we cannot
+  parse does not give back a slot of a write that reached MAX.
 """
 
 import logging
 from typing import Any
 
+from pymax.api.messages.payloads import VotePollPayload
 from pymax.api.users.payloads import ImportContactsPayload
 from pymax.protocol import Opcode
 from pymax.types import Chat, User
 from pymax.types.domain.attachments.enums import PollFlags
-from pymax.types.domain.attachments.poll import Poll, PollAnswer, PollAttachment
+from pymax.types.domain.attachments.poll import Poll, PollAnswer, PollAttachment, PollState
 from pymax.types.domain.user import ContactInfo
 
 from app.max import groups
@@ -110,9 +114,31 @@ def sync_frame(contacts: list[tuple[str, str]]) -> dict:
         [ContactInfo(phone=phone, first_name=first) for phone, first in contacts]).to_payload()
 
 
-async def sync_contacts(client: Any, contacts: list[tuple[str, str]]) -> tuple[list[User], dict]:
-    """(users MAX found, its phones map {phone: user id}) for (phone, first name) pairs."""
+async def sync_contacts(client: Any, contacts: list[tuple[str, str]]) -> dict:
+    """The SYNC frame for (phone, first name) pairs; MAX's raw answer. Parsed apart
+    (parse_sync): the frame is out once this returns (review 17 R17-1)."""
     frame = await client._app.invoke(Opcode.SYNC, sync_frame(contacts))
-    payload = getattr(frame, "payload", None) or {}
+    return getattr(frame, "payload", None) or {}
+
+
+def parse_sync(payload: dict) -> tuple[list[User], dict]:
+    """(users MAX found, its phones map {phone: user id or MAX's number})."""
     users = [User.model_validate(u) for u in payload.get("contacts") or [] if u]
-    return users, dict(payload.get("phones") or {})
+    phones = payload.get("phones") or {}
+    if not isinstance(phones, dict):
+        raise ValueError(f"phones is a {type(phones).__name__}, not a map")
+    return users, dict(phones)
+
+
+# -- votes ---------------------------------------------------------------------
+
+async def vote(client: Any, chat_id: int, message_id: int, poll_id: int, answer_ids: list[int]) -> dict:
+    """PyMax's vote_poll frame (SEND_VOTE, answersIds) without its parsing: the raw answer (R17-1)."""
+    payload = VotePollPayload(chat_id=chat_id, message_id=message_id, poll_id=poll_id,
+                              answers_ids=answer_ids).to_payload()
+    frame = await client._app.invoke(Opcode.SEND_VOTE, payload)
+    return getattr(frame, "payload", None) or {}
+
+
+def parse_vote(payload: dict) -> PollState:
+    return PollState.model_validate(payload["state"])

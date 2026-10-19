@@ -35,10 +35,17 @@ def mask_phone(phone: str | int | None) -> str | None:
 
 
 def mask_phone_params(params):
-    """Call parameters with "phone" masked, for digests (a JSON object; anything else as is)."""
-    if isinstance(params, dict) and isinstance(params.get("phone"), (str, int)):
-        return {**params, "phone": mask_phone(params["phone"]) or "?"}
-    return params
+    """Call parameters with "phone" masked, for digests (a JSON object; anything else as is).
+
+    Also every contacts[].phone (import_contacts, review 17 R17-3)."""
+    if not isinstance(params, dict):
+        return params
+    out = dict(params)
+    if isinstance(out.get("phone"), (str, int)):
+        out["phone"] = mask_phone(out["phone"]) or "?"
+    if isinstance(out.get("contacts"), list):
+        out["contacts"] = [mask_phone_params(c) for c in out["contacts"]]
+    return out
 
 
 # A phone inside free text: 10-15 digits, optionally +, spaces, dashes, brackets.

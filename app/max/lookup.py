@@ -6,16 +6,16 @@ the chat id of a dialog is known before the first message (pymax
 UserService.get_chat_id). PyMax stays behind its client object here (no pymax
 import: test_s16_pymax_import_boundary).
 
-import_many (plan Р4 Р-38): a batch of numbers in one SYNC (app/max/frames.py),
-each found user stored the same way (store_found).
+store_import (plan Р4 Р-38): the answer of one SYNC for a batch of numbers
+(app/max/frames.py), each found user stored the same way (store_found).
 """
 
 import logging
 from dataclasses import dataclass
 
-from app.max import frames, normalize
+from app.max import normalize
 from app.max.store_new import NewMaxStore
-from app.utils.phone import normalize_phone
+from app.utils.phone import mask_phone, normalize_phone
 
 log = logging.getLogger(__name__)
 
@@ -93,11 +93,20 @@ def match_phones(numbers: list[str], users: list, phones: dict) -> dict[str, obj
     return found
 
 
-async def import_many(session, contacts: list[tuple[str, str]]) -> dict[str, tuple[int, int | None]]:
-    """(e164, first name) pairs → {e164: (user id, chat id)} of the numbers MAX found; stored as contacts."""
-    users, phones = await frames.sync_contacts(session.client, contacts)
+async def store_import(session, contacts: list[tuple[str, str]], users: list,
+                       phones: dict) -> tuple[dict[str, tuple[int, int | None]], list[str]]:
+    """The parsed SYNC answer stored: ({e164: (user id, chat id)} of the numbers MAX found,
+    warnings). A number that does not store is still found — MAX took it (review 17 R17-1)."""
     found = match_phones([e164 for e164, _ in contacts], users, phones)
     out: dict[str, tuple[int, int | None]] = {}
+    warnings: list[str] = []
     for e164, user in found.items():
-        out[e164] = (user.id, await store_found(session, user, e164, True))
-    return out
+        try:
+            chat_id = await store_found(session, user, e164, True)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("max[%s]: imported %s → %s not stored", session.alias, mask_phone(e164), user.id,
+                        exc_info=True)
+            warnings.append(f"user {user.id} not stored: {type(exc).__name__}")
+            chat_id = None
+        out[e164] = (user.id, chat_id)
+    return out, warnings

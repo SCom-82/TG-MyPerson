@@ -124,3 +124,46 @@ async def test_delete_dialog_only_a_private_chat_confirmed_by_the_peer(rw):
     row = await _chat_row(rw.id, dialog)
     assert row is not None and row.is_monitored is False  # the history stays
     assert [e[:2] for e in _events(rw.id)][-1] == ("action", "delete_dialog")
+
+
+async def test_sync_answer_not_understood_keeps_the_slots(rw):
+    """review 17 R17-1: the numbers went to MAX; an answer we cannot parse does not give the limit back."""
+    rw.env.server.sync_answer = {"contacts": [{"names": "not-a-list"}], "phones": {}}
+    resp = await _import(rw, ANNA, BORIS)
+    assert resp.status_code == 502 and "MAX took the numbers" in resp.text, resp.text
+    assert len(rw.env.server.sync_calls) == 1
+    assert [e[0] for e in _events(rw.id)] == ["contact_import", "contact_import"]
+    rw.env.server.sync_answer = {"contacts": [], "phones": ["+79001110001"]}
+    assert (await _import(rw, "+79001110009")).status_code == 502
+    assert len(_events(rw.id)) == 3
+
+
+async def test_a_number_that_does_not_store_is_still_found(rw, monkeypatch):
+    from app.max import lookup
+
+    _book(rw)
+    real = lookup.store_found
+
+    async def store_found(session, user, e164, is_contact):
+        if user.id == 6002:
+            raise RuntimeError("db down")
+        return await real(session, user, e164, is_contact)
+
+    monkeypatch.setattr(lookup, "store_found", store_found)
+    body = (await _import(rw, ANNA, BORIS)).json()
+    assert [(i["user_id"], i["found"]) for i in body["items"]] == [(6001, True), (6002, True)]
+    assert "user 6002 not stored: RuntimeError" in body["warning"]
+    assert len(_events(rw.id)) == 2
+
+
+def test_import_digest_is_over_masked_numbers():
+    """review 17 R17-3: params_digest of import_contacts does not depend on the hidden digits."""
+    import json
+
+    from app.authz.middleware import _digest
+
+    def body(phone: str) -> bytes:
+        return json.dumps({"contacts": [{"phone": phone, "first_name": "Анна"}]}).encode()
+
+    assert _digest(body("+79001110001")) == _digest(body("+79009990001"))
+    assert _digest(body("+79001110001")) != _digest(body("+79001110002"))

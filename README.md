@@ -419,7 +419,7 @@ MAX-only (★) для TG-алиаса → `501`. Состав на релизе 
 | Опрос (викторина → `501`), ★ голос в опросе `vote_poll`; опрос в ответе сообщения — поле `poll` с `poll_id` и `answer_id` | `send_poll`, `vote_poll` | `send` / `actions_per_hour` |
 | Закреп и открепление (сверка по свежему чату; «всё ещё закреплено» → `502`) | `pin_message`, `unpin_message` | `actions_per_hour` |
 | ★ Реакции сообщения (счётчики, своя реакция; кто поставил — MAX не отдаёт) | `get_reactions` | чтение |
-| Вступление и просмотр по ссылке: `https://max.ru/join/<код>`, `join/<код>`, `https://max.ru/<имя>`, `@имя` | `join_chat`, `resolve_chat` | `chats_joined_per_day` (5) |
+| Вступление и просмотр по ссылке: `https://max.ru/join/<код>`, `join/<код>`, `https://max.ru/<имя>`, `@имя`; `already_member` может прийти из сохранённого чата (поле `note`) | `join_chat`, `resolve_chat` | `chats_joined_per_day` (5) |
 | Группы и каналы: создать (только группу), участники, админы (у канала `post_message`/`edit_message`, по умолчанию 1792), профиль, настройки, ссылка, заявки, удалить (только группу), выйти | `create_group`, `add_group_members`, …, `leave_chat` | `groups_created_per_day` (3), `group_invites_per_day` (30, приглашения в каналы там же) |
 | Поиск по номеру; ★ импорт до 20 номеров за вызов | `contact_by_phone`, `import_contacts` | `phone_lookups_per_day` (20), `contacts_imported_per_day` (50, по каждому номеру, ушедшему в MAX) |
 | ★ Удалить контакт (человек остаётся в базе), ★ удалить личку (`confirm_user_id`, по умолчанию у себя) | `remove_contact`, `delete_dialog` | `actions_per_hour` |

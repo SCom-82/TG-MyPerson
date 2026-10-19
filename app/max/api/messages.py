@@ -491,8 +491,17 @@ async def vote_poll(chat_id: int, message_id: int, req: VoteRequest, request: Re
         raise HTTPException(status_code=422, detail="the poll takes one answer (no multiselect)")
     if view["closed"]:
         raise HTTPException(status_code=409, detail="the poll is closed")
+    # The slot covers the frame only: an answer we cannot parse does not give back the
+    # slot of a vote that reached MAX (review 17 R17-1).
     async with write_slot(request, ACTION, "vote_poll", chat_id):
-        state = await call_max(session.client.vote_poll(chat_id, message_id, view["poll_id"], answers), UNCERTAIN)
+        payload = await call_max(frames.vote(session.client, chat_id, message_id, view["poll_id"], answers),
+                                 UNCERTAIN)
+    try:
+        state = frames.parse_vote(payload)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("max[%s]: vote answer not understood: %s: %s", session.alias, type(exc).__name__, exc)
+        raise HTTPException(status_code=502, detail=f"MAX took the vote, its answer was not understood "
+                                                    f"({type(exc).__name__}); check get_message before retrying")
     return {"chat_id": chat_id, "message_id": message_id, "poll_id": view["poll_id"], "answer_ids": answers,
             "state": frames.poll_state(state)}
 

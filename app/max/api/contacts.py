@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from app.api.reach import _known, _rw_account
 from app.authz import write_limits
 from app.authz.write_limits import ACTION, CONTACT_IMPORT, bundle_slot, write_slot
-from app.max import lookup, normalize
+from app.max import frames, lookup, normalize
 from app.max.api.common import authorized_or_error, call_max
 from app.max.api.groups import connected
 from app.repo import users as users_repo
@@ -95,11 +95,23 @@ async def import_contacts(req: ImportContactsRequest, request: Request):
                 items[e164] = {"phone": e164, "found": True, "cached": True, **_item(known)}
     to_send = [(e164, numbers[e164].first_name) for e164 in numbers if e164 not in items]
 
+    warnings: list[str] = []
     if to_send:
         session = await connected(request)
+        # The slot covers the frame only: once SYNC is out, the numbers count whatever
+        # happens to its answer here (review 17 R17-1).
         async with bundle_slot(request, "import_contacts", {CONTACT_IMPORT: len(to_send)}):
-            found = await call_max(lookup.import_many(session, to_send),
-                                   "the import may have been applied, check list_contacts")
+            payload = await call_max(frames.sync_contacts(session.client, to_send),
+                                     "the import may have been applied, check list_contacts")
+        try:
+            users, phones = frames.parse_sync(payload)
+        except Exception as exc:  # noqa: BLE001 — the shape of SYNC's answer is not checked live
+            log.warning("import_contacts[%s]: SYNC answer not understood: %s: %s", account.alias,
+                        type(exc).__name__, exc)
+            raise HTTPException(status_code=502, detail=f"MAX took the numbers, its answer was not understood "
+                                                        f"({type(exc).__name__}); check list_contacts / "
+                                                        f"contact_by_phone before retrying")
+        found, warnings = await lookup.store_import(session, to_send, users, phones)
         for e164, _ in to_send:
             if e164 not in found:
                 items[e164] = {"phone": e164, "found": False, "cached": False, "user_id": None, "person_id": None,
@@ -114,11 +126,14 @@ async def import_contacts(req: ImportContactsRequest, request: Request):
     ordered = [items[e164] for e164 in numbers]
     first = next((i["user_id"] for i in ordered if i["found"]), None)
     request.state.audit_target_user_id = first
-    return {"items": ordered,
-            "found": sum(1 for i in ordered if i["found"]),
-            "not_found": sum(1 for i in ordered if not i["found"]),
-            "cached": sum(1 for i in ordered if i["cached"]),
-            "imports_left_today": await write_limits.window_left(account.id, "contacts_imported_per_day")}
+    out = {"items": ordered,
+           "found": sum(1 for i in ordered if i["found"]),
+           "not_found": sum(1 for i in ordered if not i["found"]),
+           "cached": sum(1 for i in ordered if i["cached"]),
+           "imports_left_today": await write_limits.window_left(account.id, "contacts_imported_per_day")}
+    if warnings:
+        out["warning"] = "; ".join(warnings)
+    return out
 
 
 def _item(known: dict) -> dict:

@@ -67,6 +67,7 @@ async def test_already_member_takes_no_frame_and_no_slot(rw):
     rw.env.server.groups[GROUP_ID]["participants"][str(ME)] = 1
     resp = await _post(rw, "/chats/join", {"target": "join/AbC"})
     assert resp.status_code == 200 and resp.json()["already_member"] is True, resp.text
+    assert "tell the operator" in resp.json()["note"]  # review 17 R17-6
     assert _calls(rw, "join_group") == [] and _events(rw.id) == []
 
 

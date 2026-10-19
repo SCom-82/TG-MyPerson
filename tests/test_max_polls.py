@@ -188,3 +188,20 @@ async def test_reactions_read_and_ro_sees_them(rw):
                        (f"/messages/{DIALOG}/6/unpin", {})):
         assert (await _post(rw, path, body)).status_code == 403
     assert _events(rw.id) == [] and rw.env.server.writes == []
+
+
+async def test_vote_frame_is_pymax_and_an_unparsed_answer_keeps_the_slot(rw, stub):  # noqa: F811
+    """review 17 R17-1: our SEND_VOTE is PyMax's frame; the vote reached MAX, its slot stays."""
+    stub.answer = {"state": STATE}
+    await stub.api.messages.vote_poll(5, 9001, 55, [1, 2])
+    await frames.vote(SimpleNamespace(_app=stub), 5, 9001, 55, [1, 2])
+    pymax_frame, ours = stub.sent(Opcode.SEND_VOTE)
+    assert ours == pymax_frame
+    assert frames.poll_state(frames.parse_vote({"state": STATE}))["total"] == 1
+
+    await _limits(rw, **OFF)
+    mid = (await _poll(rw)).json()["message_id"]
+    rw.env.server.vote_answer = {"state": {"result": "x"}}
+    resp = await _vote(rw, DIALOG, mid, answer_ids=[1])
+    assert resp.status_code == 502 and "MAX took the vote" in resp.text, resp.text
+    assert rw.env.server.votes and [e[1] for e in _events(rw.id) if e[0] == "action"] == ["vote_poll"]

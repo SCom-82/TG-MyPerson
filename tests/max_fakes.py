@@ -112,6 +112,7 @@ class FakeMaxServer:
         self.sync_calls: list[dict] = []
         self.folders: list[dict] = []
         self.removed_contacts: list[int] = []
+        self.vote_answer: dict | None = None  # SEND_VOTE's answer instead of the state (review 17 R17-1)
 
         self.factory_calls: list[dict] = []
         self.clients: list["FakePyMaxClient"] = []
@@ -365,6 +366,10 @@ class FakePyMaxClient:
             return SimpleNamespace(payload={"chat": self.server.groups[cid]} if cid is not None else {})
         if int(opcode) == 21:  # SYNC: import contacts
             return SimpleNamespace(payload=self._sync(payload["contactList"]))
+        if int(opcode) == 304:  # SEND_VOTE
+            state = await self.vote_poll(payload["chatId"], payload["messageId"], payload["pollId"],
+                                         payload["answersIds"])
+            return SimpleNamespace(payload=self.server.vote_answer or {"state": state.model_dump(by_alias=True)})
         g = self._group(payload["chatId"])
         if payload.get("type") == "ADMIN" and payload.get("operation") == "remove":
             g["admins"] = [a for a in g.get("admins", []) if a not in payload["userIds"]]

@@ -253,8 +253,8 @@ def test_tools_by_platform_and_mode():
     names = lambda platform, mode: {t.name for t in mcp_tools.visible(  # noqa: E731
         mcp_tools.Caller("account", 1, "x", platform, mode, "http://test"))}
     max_rw, max_ro, tg_rw, tg_ro = names("max", "rw"), names("max", "ro"), names("telegram", "rw"), names("telegram", "ro")
-    assert len(max_rw) == 46 and {"contact_by_phone", "send_to_person", "reachable_contacts"} <= max_rw
-    assert (len(max_ro), len(tg_rw), len(tg_ro)) == (21, 46, 21)  # + MAX groups (plan 2026-10-19 Р3)
+    assert len(max_rw) == 63 and {"contact_by_phone", "send_to_person", "reachable_contacts"} <= max_rw
+    assert (len(max_ro), len(tg_rw), len(tg_ro)) == (24, 46, 21)  # + MAX groups (Р3), + Р4 (review 17 R17-0)
     assert "contact_by_phone" in tg_rw and "contact_by_phone" not in max_ro | tg_ro
 
 
