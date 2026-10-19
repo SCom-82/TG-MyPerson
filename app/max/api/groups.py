@@ -15,6 +15,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
+from starlette.convertors import Convertor, register_url_convertor
 
 from app.authz.write_limits import ACTION, GROUP_CREATE, GROUP_INVITE, bundle_slot, write_slot
 from app.max import groups, normalize
@@ -26,6 +27,21 @@ from app.services.tg_store import new_mode
 from app.storage import account_db
 
 log = logging.getLogger(__name__)
+
+class SignedInt(Convertor):
+    """{chat_id:sint}: group ids are negative; a non-numeric id does not match the route,
+    so a Telegram alias gets the plain 404 of an unknown path, not 501 (QA-R3 N1)."""
+
+    regex = "-?[0-9]+"
+
+    def convert(self, value: str) -> int:
+        return int(value)
+
+    def to_string(self, value: int) -> str:
+        return str(value)
+
+
+register_url_convertor("sint", SignedInt())
 
 router = APIRouter(prefix="/groups", tags=["max-groups"])
 
@@ -198,7 +214,7 @@ async def create_group(req: CreateGroupRequest, request: Request):
     return summary(chat, me_of(session), message_id=getattr(msg, "id", None))
 
 
-@router.post("/{chat_id}/members", name="add_group_members")
+@router.post("/{chat_id:sint}/members", name="add_group_members")
 async def add_group_members(chat_id: int, req: MembersRequest, request: Request):
     await known_chat(request, chat_id)
     session = await connected(request)
@@ -214,7 +230,7 @@ async def add_group_members(chat_id: int, req: MembersRequest, request: Request)
     return summary(chat, me_of(session), chat_id=chat_id, added=ids)
 
 
-@router.post("/{chat_id}/members/remove", name="remove_group_members")
+@router.post("/{chat_id:sint}/members/remove", name="remove_group_members")
 async def remove_group_members(chat_id: int, req: UserIdsRequest, request: Request):
     await known_chat(request, chat_id)
     session = await connected(request)
@@ -226,7 +242,7 @@ async def remove_group_members(chat_id: int, req: UserIdsRequest, request: Reque
     return summary(chat, me_of(session), chat_id=chat_id, removed=req.user_ids)
 
 
-@router.post("/{chat_id}/admins", name="set_group_admin")
+@router.post("/{chat_id:sint}/admins", name="set_group_admin")
 async def set_group_admin(chat_id: int, req: AdminRequest, request: Request):
     await known_chat(request, chat_id)
     try:
@@ -242,7 +258,7 @@ async def set_group_admin(chat_id: int, req: AdminRequest, request: Request):
     return summary(chat, me_of(session), chat_id=chat_id, user_id=req.user_id, permissions=names)
 
 
-@router.post("/{chat_id}/admins/remove", name="remove_group_admin")
+@router.post("/{chat_id:sint}/admins/remove", name="remove_group_admin")
 async def remove_group_admin(chat_id: int, req: RemoveAdminRequest, request: Request):
     await known_chat(request, chat_id)
     session = await connected(request)
@@ -254,7 +270,7 @@ async def remove_group_admin(chat_id: int, req: RemoveAdminRequest, request: Req
     return summary(chat, me_of(session), chat_id=chat_id, user_id=req.user_id)
 
 
-@router.patch("/{chat_id}", name="update_group_profile")
+@router.patch("/{chat_id:sint}", name="update_group_profile")
 async def update_group_profile(chat_id: int, req: ProfileRequest, request: Request):
     await known_chat(request, chat_id)
     session = await connected(request)
@@ -264,7 +280,7 @@ async def update_group_profile(chat_id: int, req: ProfileRequest, request: Reque
     return summary(chat, me_of(session), chat_id=chat_id)
 
 
-@router.patch("/{chat_id}/settings", name="update_group_settings")
+@router.patch("/{chat_id:sint}/settings", name="update_group_settings")
 async def update_group_settings(chat_id: int, req: SettingsRequest, request: Request):
     await known_chat(request, chat_id)
     session = await connected(request)
@@ -275,7 +291,7 @@ async def update_group_settings(chat_id: int, req: SettingsRequest, request: Req
     return {"chat_id": chat_id, "changed": options, "options": getattr(chat, "options", None)}
 
 
-@router.get("/{chat_id}/invite-link", name="get_invite_link")
+@router.get("/{chat_id:sint}/invite-link", name="get_invite_link")
 async def get_invite_link(chat_id: int, request: Request):
     await known_chat(request, chat_id)
     session = await connected(request)
@@ -287,7 +303,7 @@ async def get_invite_link(chat_id: int, request: Request):
     return out
 
 
-@router.post("/{chat_id}/invite-link", name="reset_invite_link")
+@router.post("/{chat_id:sint}/invite-link", name="reset_invite_link")
 async def reset_invite_link(chat_id: int, request: Request):
     await known_chat(request, chat_id)
     session = await connected(request)
@@ -298,7 +314,7 @@ async def reset_invite_link(chat_id: int, request: Request):
             "warning": "the previous link is revoked: links already sent no longer work"}
 
 
-@router.get("/{chat_id}/join-requests", name="list_join_requests")
+@router.get("/{chat_id:sint}/join-requests", name="list_join_requests")
 async def list_join_requests(chat_id: int, request: Request, limit: int = Query(100, ge=1, le=100)):
     await known_chat(request, chat_id)
     session = await connected(request)
@@ -309,7 +325,7 @@ async def list_join_requests(chat_id: int, request: Request, limit: int = Query(
     return {"items": items, "total": len(items)}
 
 
-@router.post("/{chat_id}/join-requests/approve", name="approve_join_requests")
+@router.post("/{chat_id:sint}/join-requests/approve", name="approve_join_requests")
 async def approve_join_requests(chat_id: int, req: MembersRequest, request: Request):
     await known_chat(request, chat_id)
     session = await connected(request)
@@ -320,7 +336,7 @@ async def approve_join_requests(chat_id: int, req: MembersRequest, request: Requ
     return summary(chat, me_of(session), chat_id=chat_id, approved=req.user_ids)
 
 
-@router.post("/{chat_id}/join-requests/decline", name="decline_join_requests")
+@router.post("/{chat_id:sint}/join-requests/decline", name="decline_join_requests")
 async def decline_join_requests(chat_id: int, req: UserIdsRequest, request: Request):
     await known_chat(request, chat_id)
     session = await connected(request)
@@ -331,7 +347,7 @@ async def decline_join_requests(chat_id: int, req: UserIdsRequest, request: Requ
     return summary(chat, me_of(session), chat_id=chat_id, declined=req.user_ids)
 
 
-@router.post("/{chat_id}/delete", name="delete_group")
+@router.post("/{chat_id:sint}/delete", name="delete_group")
 async def delete_group(chat_id: int, req: DeleteGroupRequest, request: Request):
     """Only the account's own group, confirmed by its current title (Р-26). Local rows stay as history."""
     await known_chat(request, chat_id)

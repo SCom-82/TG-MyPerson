@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import and_, case, func, or_, select, text, update
+from sqlalchemy import Text, and_, case, cast, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -193,3 +193,50 @@ async def fill_dialog_titles(db: AsyncSession, account_id: int, chat_ids: list[i
         "ids": list(chat_ids) if chat_ids is not None else None,
     })
     return result.rowcount or 0
+
+
+# MAX chat statuses after which the account sees nothing new (plan R3.1): the owner
+# deleted the group (CLOSED), the account was removed or left (LEFT), MAX refuses
+# the chat (DENIED — our mark for chat.denied).
+INACTIVE_STATUSES = ("CLOSED", "LEFT", "REMOVED", "DENIED")
+
+
+def monitoring_after(old_status: str | None, new_status: str | None) -> bool | None:
+    """is_monitored a status change implies; None = keep it (it is also the owner's setting).
+
+    Inactive → off; ACTIVE after an inactive status (the account was added again) → on.
+    """
+    if new_status in INACTIVE_STATUSES:
+        return False
+    if new_status == "ACTIVE" and old_status in INACTIVE_STATUSES:
+        return True
+    return None
+
+
+async def statuses(db: AsyncSession, account_id: int, external_ids: list[int]) -> dict[int, str | None]:
+    ensure_scope(db, account_id)
+    if not external_ids:
+        return {}
+    rows = await db.execute(
+        select(Chat.external_id, Chat.raw["status"].astext)
+        .where(Chat.account_id == account_id, Chat.external_id.in_(external_ids))
+    )
+    return dict(rows.all())
+
+
+async def set_status(db: AsyncSession, account_id: int, external_id: int, status: str,
+                     old_status: str | None, *, store: bool = True) -> None:
+    """raw.status (store=False: the upsert wrote it already) and monitoring by monitoring_after()."""
+    ensure_scope(db, account_id)
+    t = Chat.__table__.c
+    values: dict = {}
+    if store:
+        base = case((func.jsonb_typeof(t.raw) == "object", t.raw), else_=text("'{}'::jsonb"))  # NULL or JSON null
+        values["raw"] = func.jsonb_set(base, text("'{status}'::text[]"), func.to_jsonb(cast(status, Text)))
+    monitored = monitoring_after(old_status, status)
+    if monitored is not None:
+        values["is_monitored"] = monitored
+    if values:
+        await db.execute(
+            update(Chat).where(Chat.account_id == account_id, Chat.external_id == external_id).values(**values)
+        )

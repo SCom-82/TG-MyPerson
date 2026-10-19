@@ -151,12 +151,26 @@ class MaxIngest:
 
     async def _on_message(self, payload: dict, received_at: datetime, *, is_edit: bool) -> str | None:
         msg = normalize.parse_message(payload)
+        await self._chat_status_of(payload)
         if str(getattr(msg.status, "value", msg.status)) == "REMOVED" and msg.chat_id is not None:
             return await self._on_delete(msg.chat_id, [msg.id], received_at)
         event = "edit" if is_edit or str(getattr(msg.status, "value", msg.status)) == "EDITED" else "message"
         row = await self.store_message(msg, received_at=received_at, is_edit=event == "edit")
         await self._broadcast(self._event_payload(event, row))
         return None
+
+    async def _chat_status_of(self, payload: dict) -> None:
+        """A message frame may carry its chat (MAX 19.10: the owner deleted the group → the
+        members get the control message with chat.status CLOSED). Only the status is taken:
+        that chat object can be partial (owner 0, no participants)."""
+        chat = payload.get("chat")
+        new = self.new
+        if new is None or not isinstance(chat, dict) or not chat.get("status") or chat.get("id") is None:
+            return
+        try:
+            await new.set_chat_status(int(chat["id"]), str(chat["status"]))
+        except Exception:  # noqa: BLE001 — the message itself is stored anyway
+            log.warning("max[%s]: chat status of a message frame not stored", self.session.alias, exc_info=True)
 
     async def store_message(self, msg: Any, *, received_at: datetime | None = None, is_edit: bool = False,
                             chat_id: int | None = None, advance_cursor: bool | None = None) -> dict:

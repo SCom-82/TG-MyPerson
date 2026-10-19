@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.max import normalize
 from app.models import Account
@@ -119,10 +119,26 @@ class NewMaxStore:
             )).scalar_one_or_none()
 
     async def upsert_chats(self, rows: list[dict]) -> None:
-        async with account_db(self.account_id) as db:
+        a = self.account_id
+        async with account_db(a) as db:
+            before = await chats.statuses(db, a, [row["id"] for row in rows])
             for row in rows:
-                await chats.upsert_chat(db, self.account_id, chat_row(row))
-            await chats.fill_dialog_titles(db, self.account_id)
+                await chats.upsert_chat(db, a, chat_row(row))
+                status = (row.get("raw_data") or {}).get("status")
+                if status:  # a deleted group / a removed member stops being monitored (plan R3.1)
+                    await chats.set_status(db, a, row["id"], status, before.get(row["id"]), store=False)
+            await chats.fill_dialog_titles(db, a)
+            await db.commit()
+
+    async def set_chat_status(self, chat_id: int, status: str) -> None:
+        """A status that came without the whole chat (a message frame's chat, chat.denied)."""
+        a = self.account_id
+        async with account_db(a) as db:
+            known = await chats.statuses(db, a, [chat_id])
+            if chat_id not in known or known[chat_id] == status:
+                return
+            old = known[chat_id]
+            await chats.set_status(db, a, chat_id, status, old)
             await db.commit()
 
     async def upsert_users(self, rows: list[dict], via: str, *, is_contact: bool | None = None) -> None:
@@ -293,7 +309,10 @@ class NewMaxStore:
                 select(ChatModel.external_id, ChatModel.last_message_at, SyncState)
                 .join(SyncState, (SyncState.account_id == ChatModel.account_id)
                       & (SyncState.chat_id == ChatModel.id), isouter=True)
-                .where(ChatModel.account_id == a)
+                .where(ChatModel.account_id == a,
+                       # chats the account lost access to: nothing to catch up (plan R3.1)
+                       or_(ChatModel.raw["status"].astext.is_(None),
+                           ChatModel.raw["status"].astext.not_in(chats.INACTIVE_STATUSES)))
                 .order_by(ChatModel.last_message_at.desc().nullslast())
             )).all()
         out = []

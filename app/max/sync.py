@@ -24,6 +24,7 @@ from sqlalchemy import select
 
 from app import database
 from app.max import normalize, repo
+from app.max.errors import is_chat_denied
 from app.max.store_new import Cursor, NewMaxStore
 from app.models import MaxChat, MaxSyncState
 from app.services.tg_store import new_mode, shadow
@@ -172,9 +173,23 @@ class MaxSync:
                 stored = await self._backward(chat_id, limit, days)
             log.info("max[%s]: backfill chat %s done, %s message(s)", self.session.alias, chat_id, stored)
             return stored
-        except Exception:  # noqa: BLE001
-            log.exception("max[%s]: backfill chat %s failed", self.session.alias, chat_id)
+        except Exception as exc:  # noqa: BLE001
+            if not await self._denied(chat_id, exc):
+                log.exception("max[%s]: backfill chat %s failed", self.session.alias, chat_id)
             return 0
+
+    async def _denied(self, chat_id: int, exc: BaseException) -> bool:
+        """chat.denied: the account lost the chat (a deleted group, removed from it) —
+        marked DENIED, unmonitored and left out of the catch-up (plan R3.1)."""
+        new = self.new
+        if not is_chat_denied(exc) or new is None:
+            return False
+        log.warning("max[%s]: chat %s denied by MAX — no longer monitored", self.session.alias, chat_id)
+        try:
+            await new.set_chat_status(chat_id, "DENIED")
+        except Exception:  # noqa: BLE001
+            log.warning("max[%s]: chat %s not marked denied", self.session.alias, chat_id, exc_info=True)
+        return True
 
     async def _backward(self, chat_id: int, limit: int, days: int | None) -> int:
         client = self._client()
@@ -336,7 +351,9 @@ class MaxSync:
                 self.session.caught_up.add(chat_id)
             except SessionUnavailable:
                 raise
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                if await self._denied(chat_id, exc):
+                    continue
                 # Not caught up: it stays a candidate (cursor not past its tail) and
                 # counts as backlog, so the next tick retries it.
                 failed += 1

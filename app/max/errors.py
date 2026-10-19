@@ -35,3 +35,8 @@ def is_banned(exc: BaseException) -> bool:
         return False
     words = set(_WORD_SPLIT.split(" ".join(_texts(exc)).lower()))
     return bool(words & _BAN_WORDS)
+
+
+def is_chat_denied(exc: BaseException) -> bool:
+    """The account has no access to the chat any more (deleted group, removed member): chat.denied."""
+    return is_api_error(exc) and any("chat.denied" in t for t in _texts(exc))

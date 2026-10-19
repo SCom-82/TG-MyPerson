@@ -87,7 +87,9 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent] | typ
     chat = args.get("chat_id", args.get("to_chat_id"))
     decision = await authorize(ctx, tool.route, chat_external_id=chat, is_write=tool.is_write)
     common = {"is_write": tool.is_write, "chat_id": chat if isinstance(chat, int) else None,
-              "target_user_id": args.get("user_id"),
+              # the first of user_ids too (groups), as the REST audit does (QA-R3 N2)
+              "target_user_id": args["user_id"] if args.get("user_id") is not None
+              else next(iter(args.get("user_ids") or []), None),
               "params_digest": _digest(args) if tool.is_write else None}
     if not decision.allowed:
         audit(ctx, tool.route, status="denied", error=f"HTTP {decision.status}", **common)
