@@ -92,7 +92,9 @@ def widen_ids(schema: dict) -> dict:
             prop["items"] = {**prop["items"], **ID_TYPE}
         else:
             prop.update(ID_TYPE)
-        prop["description"] = f"{prop['description']} {ID_NOTE}" if prop.get("description") else ID_NOTE
+        text = (prop.get("description") or "").rstrip()
+        sep = "" if not text else (" " if text.endswith((".", "!", "?")) else ". ")  # QA-R1-D2
+        prop["description"] = f"{text}{sep}{ID_NOTE}"
     return schema
 
 

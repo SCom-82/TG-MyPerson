@@ -67,7 +67,12 @@ def build_scope(
     query_string = urlencode({k: _q(v) for k, v in (query or {}).items() if v is not None}, doseq=True)
     scope = {
         "type": "http",
-        "asgi": {"version": "3.0"},
+        # spec_version 2.4 (QA-R1-D1): with an older one Starlette's StreamingResponse
+        # listens on receive() for a client disconnect — ours answers http.disconnect
+        # right after the body, the stream was cancelled before its first chunk and
+        # the signed file link (GET /files/{token}) answered 500. With 2.4 a gone
+        # client shows up as an error of the outer send(), as on any request.
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
         "http_version": "1.1",
         "method": method,
         "scheme": "http",

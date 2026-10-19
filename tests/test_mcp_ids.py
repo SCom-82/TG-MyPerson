@@ -95,12 +95,14 @@ def test_widen_ids_rules():
     }}
     wide = mcp_tools.widen_ids(schema)["properties"]
     assert wide["chat_id"] == {"type": ["string", "integer"], "pattern": r"^-?\d+$",
-                               "description": "Chat " + mcp_tools.ID_NOTE}
+                               "description": "Chat. " + mcp_tools.ID_NOTE}
     assert wide["message_ids"]["items"] == {"type": ["string", "integer"], "pattern": r"^-?\d+$"}
     assert wide["sticker_set_id"]["type"] == ["string", "integer"]  # any *_id
     assert wide["person_id"] == {"type": "integer"} and wide["from_id"] == {"type": "integer"}
     assert wide["limit"] == {"type": "integer"}
     assert schema["properties"]["chat_id"] == {"type": "integer", "description": "Chat"}  # a copy
+    ended = mcp_tools.widen_ids({"properties": {"user_id": {"type": "integer", "description": "User id."}}})
+    assert ended["properties"]["user_id"]["description"] == "User id. " + mcp_tools.ID_NOTE
 
     full = mcp_tools.widen_ids(schema)
     jsonschema.validate({"chat_id": str(BIG), "message_ids": ["1", 2]}, full)
