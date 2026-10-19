@@ -26,6 +26,7 @@ from pymax.types.domain import Message
 from pymax.types.domain.attachments.file import FileRequest
 from pymax.types.domain.attachments.video import VideoRequest
 from pymax.types.domain.attachments.poll import Poll, PollState
+from pymax.types.domain.folder import FolderList, FolderUpdate
 from pymax.types.domain.message import ReactionInfo
 from pymax.types.domain.profile import Profile
 from pymax.types.domain.sync import SyncState
@@ -104,6 +105,13 @@ class FakeMaxServer:
         self.votes: list[tuple] = []
         self.reactions: dict[tuple[int, int], dict] | None = {}
         self.next_poll_id = 7_000
+        # R4-2: link → chat id of server.groups (join/<code> and https://max.ru/<name>); the
+        # SYNC answer of an import (None: built from phone_book); folders; removed contacts
+        self.links: dict[str, int] = {}
+        self.sync_answer: dict | None = None
+        self.sync_calls: list[dict] = []
+        self.folders: list[dict] = []
+        self.removed_contacts: list[int] = []
 
         self.factory_calls: list[dict] = []
         self.clients: list["FakePyMaxClient"] = []
@@ -352,6 +360,11 @@ class FakePyMaxClient:
 
     async def _raw_frame(self, opcode, payload: dict):
         self._group_call("invoke", int(opcode), payload)
+        if int(opcode) == 89:  # LINK_INFO by a public URL
+            cid = self.server.links.get(payload["link"])
+            return SimpleNamespace(payload={"chat": self.server.groups[cid]} if cid is not None else {})
+        if int(opcode) == 21:  # SYNC: import contacts
+            return SimpleNamespace(payload=self._sync(payload["contactList"]))
         g = self._group(payload["chatId"])
         if payload.get("type") == "ADMIN" and payload.get("operation") == "remove":
             g["admins"] = [a for a in g.get("admins", []) if a not in payload["userIds"]]
@@ -502,6 +515,71 @@ class FakePyMaxClient:
         return {"_type": "FILE", "fileId": n, "name": getattr(a, "name", "f"), "size": 1, "token": "ft"}
 
     # -- release 4 (plan 2026-10-19 Р4) -----------------------------------------
+
+    def _sync(self, contact_list: dict) -> dict:
+        self.server.sync_calls.append(contact_list)
+        if self.server.sync_answer is not None:
+            return self.server.sync_answer
+        found = {p: self.server.phone_book[p] for p in contact_list if p in self.server.phone_book}
+        return {"contacts": list(found.values()), "phones": {p.lstrip("+"): u["id"] for p, u in found.items()}}
+
+    def _by_link(self, link: str) -> dict:
+        cid = self.server.links.get(link)
+        if cid is None:
+            raise ApiError(opcode=57, error="link.not.found", message="Link not found")
+        return self.server.groups[cid]
+
+    async def resolve_group_by_link(self, link: str):
+        self._group_call("resolve_group_by_link", link)
+        return Chat.model_validate(self._by_link(link))
+
+    async def join_group(self, link: str):
+        self._group_call("join_group", link)
+        g = self._by_link(link)
+        g["participants"][str(self.server.user_id)] = 1
+        return self._chat(g["id"])
+
+    async def join_channel(self, link: str):
+        self._group_call("join_channel", link)
+        g = self._by_link(link)
+        g["participants"][str(self.server.user_id)] = 1
+        return self._chat(g["id"])
+
+    async def invite_users_to_channel(self, chat_id: int, user_ids: list[int], show_history: bool = True):
+        self._group_call("invite_users_to_channel", chat_id, list(user_ids), show_history)
+        g = self._group(chat_id)
+        for u in user_ids:
+            g["participants"][str(u)] = 1
+        return self._chat(chat_id)
+
+    async def remove_contact(self, contact_id: int):
+        self._write("remove_contact", contact_id)
+        self.server.removed_contacts.append(contact_id)
+        return True
+
+    async def get_folders(self, folder_sync: int = 0):
+        self.calls.append("get_folders")
+        return FolderList.model_validate({"foldersOrder": [f["id"] for f in self.server.folders],
+                                          "folders": self.server.folders})
+
+    async def create_folder(self, title: str, chat_include: list[int], filters=None):
+        self._write("create_folder", title, list(chat_include))
+        folder = {"id": f"f-{len(self.server.folders) + 1}", "title": title, "include": list(chat_include),
+                  "filters": list(filters or []), "options": []}
+        self.server.folders.append(folder)
+        return FolderUpdate.model_validate({"folder": folder})
+
+    async def update_folder(self, folder_id: str, title: str, chat_include=None, filters=None, options=None):
+        self._write("update_folder", folder_id, title, chat_include, filters, options)
+        folder = next(f for f in self.server.folders if f["id"] == folder_id)
+        folder.update(title=title, include=list(chat_include or []), filters=list(filters or []),
+                      options=list(options or []))
+        return FolderUpdate.model_validate({"folder": folder})
+
+    async def delete_folder(self, folder_id: str):
+        self._write("delete_folder", folder_id)
+        self.server.folders = [f for f in self.server.folders if f["id"] != folder_id]
+        return FolderUpdate.model_validate({})
 
     async def pin_message(self, chat_id: int, message_id: int, notify_pin: bool) -> bool:
         self._group_call("pin_message", chat_id, message_id, notify_pin)

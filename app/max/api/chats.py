@@ -1,26 +1,143 @@
-"""MAX chats (API spec §3): same paths, names and schemas as app/api/chats.py."""
+"""MAX chats (API spec §3): same paths, names and schemas as app/api/chats.py.
+
+Release 4 (plan 2026-10-19 Р4 Р-42, Р-48): join_chat / resolve_chat by a MAX
+link (join/<code> or a public https://max.ru/<name>), MAX-only delete_dialog.
+"""
+
+import logging
+import re
+from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.authz.write_limits import ACTION, write_slot
+from app.authz.write_limits import ACTION, CHAT_JOIN, bundle_slot, write_slot
 from app.database import get_db
 from app.api import data_reads
-from app.max import groups, normalize, repo
+from app.max import frames, groups, normalize, repo
 from app.max.api import groups as mx_groups
 from app.max.api.common import authorized_or_error, call_max, call_max_read
+from app.repo import chats as chats_repo
 from app.services.tg_store import new_mode, shadow
+from app.storage import account_db
 from app.schemas import (
     ChatResponse,
     ChatUpdateRequest,
+    JoinChatRequest,
     LeaveChatRequest,
     MemberResponse,
     MyRightsResponse,
     PaginatedResponse,
+    ResolveRequest,
+    ResolveResponse,
 )
 
+log = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/chats", tags=["max-chats"])
+
+
+# ---------------------------------------------------------------------------
+# Join / resolve by a link (Р-48) — declared before /{chat_id}
+# ---------------------------------------------------------------------------
+
+_SITE = re.compile(r"^(?:https?://)?(?:www\.)?max\.ru/(?P<path>[^?#\s]+?)/?(?:[?#].*)?$", re.IGNORECASE)
+_CODE = re.compile(r"^[A-Za-z0-9_-]+$")
+_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$")
+LINK_FORMS = "https://max.ru/join/<code>, join/<code>, https://max.ru/<name> or @name"
+
+
+def parse_target(target: str) -> tuple[str, str]:
+    """('join', 'join/<code>') or ('public', 'https://max.ru/<name>'); anything else → 422."""
+    t = target.strip()
+    if t.startswith("@") and _NAME.fullmatch(t[1:]):
+        return "public", f"https://max.ru/{t[1:]}"
+    m = _SITE.match(t)
+    path = m["path"] if m else (t if t.lower().startswith("join/") else None)
+    if path is not None:
+        if path.lower().startswith("join/") and _CODE.fullmatch(path[5:]):
+            return "join", f"join/{path[5:]}"
+        if m and _NAME.fullmatch(path):
+            return "public", f"https://max.ru/{path}"
+    raise HTTPException(status_code=422, detail=f"target: {LINK_FORMS}")
+
+
+async def _resolve(client: Any, kind: str, link: str) -> Any:
+    if kind == "join":
+        return await client.resolve_group_by_link(link)
+    return await frames.link_info(client, link)
+
+
+async def _is_joined(request: Request, session, chat: Any) -> bool:
+    """The account is among its participants, or holds the chat as an active one."""
+    me = mx_groups.me_of(session)
+    if me is not None and me in {int(p) for p in (getattr(chat, "participants", None) or {})}:
+        return True
+    if not new_mode():
+        return False
+    account_id = getattr(request.state, "account_id", None)
+    async with account_db(account_id) as db:
+        row = await chats_repo.get_chat(db, account_id, chat.id)
+    if row is None:
+        return False
+    return (row.raw or {}).get("status") not in chats_repo.INACTIVE_STATUSES
+
+
+async def _chat_answer(request: Request, session, chat: Any) -> dict:
+    """ChatResponse as the TG join answers: the stored row, else from the chat itself."""
+    if new_mode():
+        try:
+            return (await data_reads.get_chat(request, chat.id)).model_dump(mode="json")
+        except HTTPException:
+            log.warning("max[%s]: joined chat %s is not stored", session.alias, chat.id)
+    row = normalize.normalize_chat(chat)
+    now = datetime.now(timezone.utc).isoformat()
+    return {"id": chat.id, "chat_type": row["chat_type"], "title": row["title"], "username": row["username"],
+            "description": getattr(chat, "description", None), "members_count": getattr(chat, "participants_count", None),
+            "is_monitored": True, "last_message_id": None, "last_message_at": None, "created_at": now, "updated_at": now}
+
+
+@router.post("/join", name="join_chat_endpoint")
+async def join_chat_endpoint(req: JoinChatRequest, request: Request):
+    """Join by a link (chats_joined_per_day, 5 a day). Already a member → 200
+    already_member=true: no join frame, no slot."""
+    kind, link = parse_target(req.target)
+    session = await mx_groups.connected(request)
+    try:
+        seen = await call_max_read(_resolve(session.client, kind, link))
+    except HTTPException as exc:  # the join itself says what is wrong with the link
+        log.info("max[%s]: link not resolved before join: %s", session.alias, exc.detail)
+        seen = None
+    if seen is not None and await _is_joined(request, session, seen):
+        await mx_groups.store_chat(session, seen)
+        return {**await _chat_answer(request, session, seen), "already_member": True}
+    async with bundle_slot(request, "join_chat_endpoint", {CHAT_JOIN: 1}):
+        join = session.client.join_group(link) if kind == "join" else session.client.join_channel(link)
+        chat = await call_max(join, "the join may have been applied, check list_chats")
+    await mx_groups.store_chat(session, chat)
+    return {**await _chat_answer(request, session, chat), "already_member": False}
+
+
+@router.post("/resolve", response_model=ResolveResponse, name="resolve_chat_endpoint")
+async def resolve_chat_endpoint(req: ResolveRequest, request: Request):
+    """What a link points to, without joining (a read: ro accounts too)."""
+    kind, link = parse_target(req.target)
+    session = await mx_groups.connected(request)
+    chat = await call_max_read(_resolve(session.client, kind, link))
+    if chat is None:
+        raise HTTPException(status_code=404, detail="MAX does not know this link")
+    return ResolveResponse(
+        id=chat.id,
+        type=normalize.normalize_chat(chat)["chat_type"],
+        title=chat.title,
+        username=link.rsplit("/", 1)[1] if kind == "public" else None,
+        members_count=chat.participants_count or len(chat.participants or {}) or None,
+        description=chat.description,
+        is_joined=await _is_joined(request, session, chat),
+    )
 
 
 @router.get("", response_model=PaginatedResponse, name="list_chats")
@@ -167,3 +284,31 @@ async def get_my_rights(chat_id: int, request: Request):
         can_change_info="change_chat_info" in names,
         raw=raw if isinstance(raw, dict) else None,
     )
+
+
+# ---------------------------------------------------------------------------
+# Delete a private dialog (Р-42), MAX-only
+# ---------------------------------------------------------------------------
+
+class DeleteDialogRequest(BaseModel):
+    confirm_user_id: int
+    for_all: bool = False
+
+
+@router.post("/{chat_id}/delete", name="delete_dialog")
+async def delete_dialog(chat_id: int, req: DeleteDialogRequest, request: Request):
+    """A private dialog only, confirmed by the peer's id (the dialog id is me XOR peer);
+    for_all=false by default: deleted for this account only. Local rows stay as history."""
+    if chat_id == 0:
+        raise HTTPException(status_code=422, detail="chat 0 is Saved messages, it is not deleted")
+    await mx_groups.known_chat(request, chat_id, kinds=("private",))
+    session = await mx_groups.connected(request)
+    me = mx_groups.me_of(session)
+    peer = chat_id ^ me if me is not None else None
+    if peer is None or req.confirm_user_id != peer:
+        raise HTTPException(status_code=409, detail="confirm_user_id is not the peer of this dialog")
+    request.state.audit_target_user_id = peer
+    async with write_slot(request, ACTION, "delete_dialog", chat_id):
+        await call_max(groups.delete(session.client, chat_id, req.for_all), mx_groups.UNCERTAIN)
+    await mx_groups.unmonitor(session, chat_id)
+    return {"chat_id": chat_id, "deleted": True, "for_all": req.for_all}

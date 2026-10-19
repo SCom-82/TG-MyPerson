@@ -473,14 +473,20 @@ async def lookup_slot(request: Request, tool: str) -> AsyncIterator[Slot | None]
 
 async def lookups_left(account_id: int) -> int | None:
     """phone_lookups_per_day minus the lookups of the last 24 h; None: no limit."""
+    return await window_left(account_id, LOOKUP_WINDOW.name)
+
+
+async def window_left(account_id: int, name: str) -> int | None:
+    """A window's limit minus its events now (contacts_imported_per_day, ...); None: no limit."""
+    w = next(w for w in WINDOWS if w.name == name)
     async with async_session() as db:
         eff = await effective(db, account_id)
         if eff is None:
             return None
-        limit = (eff.limits or NO_LIMITS).phone_lookups_per_day
+        limit = getattr(eff.limits or NO_LIMITS, name)
         if limit is None:
             return None
-        used = await _count(db, account_id, LOOKUP_WINDOW, _now())
+        used = await _count(db, account_id, w, _now())
     return max(0, limit - used)
 
 

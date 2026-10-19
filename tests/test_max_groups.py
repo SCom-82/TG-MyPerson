@@ -156,6 +156,8 @@ async def test_admins(rw):
     await _post(rw, f"/groups/{gid}/admins", {"user_id": B, "permissions": ["add_admin"]})
     assert _calls(rw, "add_admin")[-1] == ("add_admin", gid, B, 4)
     resp = await _post(rw, f"/groups/{gid}/admins", {"user_id": B, "permissions": ["post_message"]})
+    assert resp.status_code == 422 and "channel rights" in resp.text  # a channel right (Р4 Р-40)
+    resp = await _post(rw, f"/groups/{gid}/admins", {"user_id": B, "permissions": ["fly"]})
     assert resp.status_code == 422 and "unknown permissions" in resp.text
     assert (await _post(rw, f"/groups/{gid}/admins", {"user_id": ME})).status_code == 422
 
@@ -274,7 +276,13 @@ async def test_channel_leave_and_private_refused(rw):
     assert rights["can_post_messages"] is False  # review 15 R15-2: a channel member does not post
     assert (await _post(rw, "/chats/leave", {"chat_id": FOREIGN})).status_code == 200
     assert _calls(rw, "leave_channel") == [("leave_channel", FOREIGN)]
-    assert (await _post(rw, f"/groups/{FOREIGN}/members", {"user_ids": [A]})).status_code == 422  # not a group
+    # a channel takes the group routes since Р4 (Р-40); a private chat does not
+    dialog = ME ^ A
+    async with account_db(rw.id) as db:
+        await chats.upsert_chat(db, rw.id, ChatRow(dialog, "private", title="A"))
+        await db.commit()
+    resp = await _post(rw, f"/groups/{dialog}/members", {"user_ids": [B]})
+    assert resp.status_code == 422 and "not a group or channel" in resp.text
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +359,7 @@ async def test_mcp_tools_by_platform_and_mode(rw):
     names = lambda platform, mode: {t.name for t in mcp_tools.visible(  # noqa: E731
         mcp_tools.Caller("account", rw.id, rw.env.alias, platform, mode, "http://test"))}
     max_rw, max_ro, tg_rw, tg_ro = names("max", "rw"), names("max", "ro"), names("telegram", "rw"), names("telegram", "ro")
-    assert (len(max_rw), len(max_ro), len(tg_rw), len(tg_ro)) == (51, 21, 46, 21)
+    assert (len(max_rw), len(max_ro), len(tg_rw), len(tg_ro)) == (63, 24, 46, 21)
     assert {"create_group", "delete_group", "get_chat_members", "leave_chat", "get_my_rights"} <= max_rw
     assert {"get_chat_members", "get_my_rights", "get_invite_link", "list_join_requests"} <= max_ro
     assert not {"create_group", "leave_chat"} & max_ro and not {"create_group", "get_invite_link"} & tg_rw
@@ -407,3 +415,45 @@ def test_remove_admin_frame_mirrors_add_admin():
     with pytest.raises(groups.UnknownPermission):
         groups.permission_mask(["post_message"])
     assert write_limits.DEFAULT_LIMITS.groups_created_per_day == 3 and write_limits.NO_LIMITS.group_invites_per_day is None
+
+
+# ---------------------------------------------------------------------------
+# Channels: the same routes (plan 2026-10-19 Р4 Р-40, QA R4-9)
+# ---------------------------------------------------------------------------
+
+async def test_channel_takes_the_group_tools(rw):
+    await _foreign(rw, kind="channel", owner=ME)
+    resp = await _post(rw, f"/groups/{FOREIGN}/members", {"user_ids": [B, C]})
+    assert resp.status_code == 200, resp.text
+    assert _calls(rw, "invite_users_to_channel") == [("invite_users_to_channel", FOREIGN, [B, C], True)]
+    assert _calls(rw, "invite_users_to_group") == []
+    assert [e[0] for e in _events(rw.id)] == ["group_invite", "group_invite"]
+
+    resp = await _post(rw, f"/groups/{FOREIGN}/admins", {"user_id": A})
+    assert resp.status_code == 200 and resp.json()["permissions"] == ["delete_message", "post_message",
+                                                                      "edit_message"], resp.text
+    assert _calls(rw, "add_admin") == [("add_admin", FOREIGN, A, 1792)]
+    resp = await _post(rw, f"/groups/{FOREIGN}/admins", {"user_id": B, "permissions": ["post_message"]})
+    assert resp.status_code == 200 and _calls(rw, "add_admin")[-1] == ("add_admin", FOREIGN, B, 256)
+    for path, body in ((f"/groups/{FOREIGN}/members/remove", {"user_ids": [C]}),
+                       (f"/groups/{FOREIGN}/admins/remove", {"user_id": B}),
+                       (f"/groups/{FOREIGN}/invite-link", {}),
+                       (f"/groups/{FOREIGN}/join-requests/approve", {"user_ids": [C]}),
+                       (f"/groups/{FOREIGN}/join-requests/decline", {"user_ids": [C]})):
+        assert (await _post(rw, path, body)).status_code == 200, path
+    assert (await _patch(rw, f"/groups/{FOREIGN}", {"description": "канал"})).status_code == 200
+    assert (await _patch(rw, f"/groups/{FOREIGN}/settings", {"all_can_pin_message": False})).status_code == 200
+    assert (await _get(rw, f"/groups/{FOREIGN}/invite-link")).status_code == 200
+    assert (await _get(rw, f"/groups/{FOREIGN}/join-requests")).status_code == 200
+
+    resp = await _post(rw, f"/groups/{FOREIGN}/delete", {"confirm_title": "Чужая"})
+    assert resp.status_code == 422 and "not a group" in resp.text
+
+
+async def test_channel_rights_are_refused_for_a_group(rw):
+    gid = await _create(rw, user_ids=(A,))
+    resp = await _post(rw, f"/groups/{gid}/admins", {"user_id": A, "permissions": ["post_message"]})
+    assert resp.status_code == 422 and "channel rights" in resp.text
+    assert _calls(rw, "add_admin") == []
+    resp = await _post(rw, f"/groups/{gid}/admins", {"user_id": A})
+    assert _calls(rw, "add_admin") == [("add_admin", gid, A, 1050)]

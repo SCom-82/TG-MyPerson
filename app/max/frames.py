@@ -5,16 +5,21 @@ raw protocol lives here, so a PyMax upgrade has one place to look at.
 
 - unpin: no PyMax method; CHAT_UPDATE with pinMessageId 0 (Р-33, not checked live);
 - poll_attach / poll_view: a poll to send (PyMax's Poll in attaches) and the
-  poll of a message as the agent sees it (Р-44, Р-46).
-R4-2 adds LINK_INFO by a public URL and SYNC with the phones map.
+  poll of a message as the agent sees it (Р-44, Р-46);
+- link_info: LINK_INFO by a public https://max.ru/<name> (PyMax takes join/… only; Р-48);
+- sync_contacts: PyMax's import_contacts frame (SYNC), keeping the phones map
+  PyMax throws away — which number gave which user (Р-38).
 """
 
 import logging
 from typing import Any
 
+from pymax.api.users.payloads import ImportContactsPayload
 from pymax.protocol import Opcode
+from pymax.types import Chat, User
 from pymax.types.domain.attachments.enums import PollFlags
 from pymax.types.domain.attachments.poll import Poll, PollAnswer, PollAttachment
+from pymax.types.domain.user import ContactInfo
 
 from app.max import groups
 
@@ -88,3 +93,26 @@ def poll_view(poll: PollAttachment) -> dict:
         "closed": bool(settings & PollFlags.FLAG_SETTINGS_CLOSED),
         "quiz": bool(settings & PollFlags.FLAG_SETTINGS_QUIZ),
     }
+
+
+# -- links and contacts (R4-2) ------------------------------------------------
+
+async def link_info(client: Any, url: str) -> Chat | None:
+    """What a public link points to, without joining (webmaxsocket resolveLink; not checked live)."""
+    frame = await client._app.invoke(Opcode.LINK_INFO, {"link": url})
+    data = (getattr(frame, "payload", None) or {}).get("chat")
+    return Chat.model_validate(data) if data else None
+
+
+def sync_frame(contacts: list[tuple[str, str]]) -> dict:
+    """PyMax's ImportContactsPayload: {contactList: {phone: {firstName}}} (no last name in PyMax)."""
+    return ImportContactsPayload.from_contacts(
+        [ContactInfo(phone=phone, first_name=first) for phone, first in contacts]).to_payload()
+
+
+async def sync_contacts(client: Any, contacts: list[tuple[str, str]]) -> tuple[list[User], dict]:
+    """(users MAX found, its phones map {phone: user id}) for (phone, first name) pairs."""
+    frame = await client._app.invoke(Opcode.SYNC, sync_frame(contacts))
+    payload = getattr(frame, "payload", None) or {}
+    users = [User.model_validate(u) for u in payload.get("contacts") or [] if u]
+    return users, dict(payload.get("phones") or {})

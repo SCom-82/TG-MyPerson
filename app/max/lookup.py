@@ -5,13 +5,17 @@ ADD) → users/identities/people + the dialog stub me XOR peer with its title:
 the chat id of a dialog is known before the first message (pymax
 UserService.get_chat_id). PyMax stays behind its client object here (no pymax
 import: test_s16_pymax_import_boundary).
+
+import_many (plan Р4 Р-38): a batch of numbers in one SYNC (app/max/frames.py),
+each found user stored the same way (store_found).
 """
 
 import logging
 from dataclasses import dataclass
 
-from app.max import normalize
+from app.max import frames, normalize
 from app.max.store_new import NewMaxStore
+from app.utils.phone import normalize_phone
 
 log = logging.getLogger(__name__)
 
@@ -51,12 +55,49 @@ async def by_phone(session, e164: str, masked: str) -> Found:
         is_contact, warning = False, f"add_contact failed: {type(exc).__name__}: {exc}"
         log.warning("max[%s]: %s found as %s, %s", session.alias, masked, user.id, warning)
 
+    chat_id = await store_found(session, user, e164, is_contact)
+    return Found(user.id, chat_id, is_contact, warning)
+
+
+async def store_found(session, user, e164: str, is_contact: bool) -> int | None:
+    """users/identities/people with the number, and the dialog stub me XOR peer; its chat id."""
     row = normalize.normalize_user(user)
     row["phone"] = row["phone"] or e164
     store = NewMaxStore(session.account_id)
     await store.upsert_users([row], "contact", is_contact=is_contact)
-    me = getattr(getattr(getattr(client, "me", None), "contact", None), "id", None)
+    me = getattr(getattr(getattr(session.client, "me", None), "contact", None), "id", None)
     chat_id = me ^ user.id if me is not None else None
     if chat_id is not None:
         await store.ensure_dialog(chat_id)
-    return Found(user.id, chat_id, is_contact, warning)
+    return chat_id
+
+
+def match_phones(numbers: list[str], users: list, phones: dict) -> dict[str, object]:
+    """e164 → the user MAX found for it. By the phones map (its values: a user id, or the
+    number as MAX knows it); a number missing there — by the user's own phone."""
+    by_id = {u.id: u for u in users}
+    by_phone = {normalize_phone(str(u.phone)): u for u in users if getattr(u, "phone", None)}
+    found: dict[str, object] = {}
+    for key, value in phones.items():
+        e164 = normalize_phone(str(key))
+        user = None
+        if isinstance(value, int) or (isinstance(value, str) and value.isdigit() and int(value) in by_id):
+            user = by_id.get(int(value))
+        if user is None and value is not None:
+            user = by_phone.get(normalize_phone(str(value)))
+        if e164 in numbers and user is not None:
+            found[e164] = user
+    for e164 in numbers:
+        if e164 not in found and e164 in by_phone:
+            found[e164] = by_phone[e164]
+    return found
+
+
+async def import_many(session, contacts: list[tuple[str, str]]) -> dict[str, tuple[int, int | None]]:
+    """(e164, first name) pairs → {e164: (user id, chat id)} of the numbers MAX found; stored as contacts."""
+    users, phones = await frames.sync_contacts(session.client, contacts)
+    found = match_phones([e164 for e164, _ in contacts], users, phones)
+    out: dict[str, tuple[int, int | None]] = {}
+    for e164, user in found.items():
+        out[e164] = (user.id, await store_found(session, user, e164, True))
+    return out

@@ -31,8 +31,11 @@ GROUP_WRITE_TOOLS = (
 )
 GROUP_READ_TOOLS = ("get_invite_link", "list_join_requests")
 # MAX release 4 without a TG counterpart (plan 2026-10-19 Р4 Р-32): MAX router only.
-MAX_R4_WRITE_TOOLS = ("send_video_note", "vote_poll")
-MAX_R4_READ_TOOLS = ("get_reactions",)
+MAX_R4_WRITE_TOOLS = (
+    "send_video_note", "vote_poll", "import_contacts", "remove_contact", "delete_dialog",
+    "create_folder", "update_folder", "delete_folder",
+)
+MAX_R4_READ_TOOLS = ("get_reactions", "list_folders")
 
 # ---------------------------------------------------------------------------
 # Category 1: writes to the external messenger — blocked on ro

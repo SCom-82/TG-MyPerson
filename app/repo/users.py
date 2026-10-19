@@ -81,6 +81,13 @@ async def get_user(db: AsyncSession, account_id: int, external_id: int) -> User 
     )).scalar_one_or_none()
 
 
+async def set_contact(db: AsyncSession, account_id: int, external_id: int, value: bool) -> None:
+    ensure_scope(db, account_id)
+    user = await get_user(db, account_id, external_id)
+    if user is not None:
+        user.is_contact = value
+
+
 async def list_users(
     db: AsyncSession, account_id: int, *, search: str | None = None, limit: int = 50, offset: int = 0
 ) -> tuple[list[User], int]:

@@ -292,7 +292,9 @@ automatically in-process. It exists only as a manual escape hatch.
 - **Тул, не реализованный для MAX, → 501** `{"error","tool","platform":"max","alias"}`; запись на ro → 403
   раньше 501. MAX-only тулы (`/auth/qr*`) для TG-алиаса → 501.
 - **Адаптер `app/max/`.** `import pymax` разрешён только в `session.py`, `store.py`, `auth.py`,
-  `normalize.py`, `media.py` (сторож `test_s16_pymax_import_boundary`).
+  `normalize.py`, `media.py`, `groups.py`, `frames.py` (сторож `test_s16_pymax_import_boundary`).
+  `frames.py` — кадры, которых в PyMax нет или которые он портит (открепление, `LINK_INFO` по
+  публичной ссылке, `SYNC` с картой `phones`): при обновлении PyMax смотреть сюда.
   - `session.py` — клиент PyMax с жёстко зашитыми `relogin=False`, `telemetry=False`, `interactive=False`,
     без `RegistrationConfig`, с прокси и нашим хранилищем; машина состояний и supervisor
     (backoff 5 с → 10 мин). Отозванный токен → `unauthorized`, признаки бана → `banned`: повторных входов нет.
@@ -401,6 +403,41 @@ WHERE a.alias = 'max-work' AND s.is_active;
 
 JSON сохранить в `secrets.env.age`. Восстановление — `POST /auth/session {"session_string":"<JSON>"}`:
 сессия сначала логинится в MAX и только при успехе пишется в БД; при ошибке прежняя сессия не трогается.
+
+### MAX: что умеет rw-аккаунт
+
+Запись — только у `rw` (`max-work`), в пределах write-limits (`/accounts/{id}/write-limits`); `ro`
+(`max-personal-ro`) видит только чтения. Тулы с TG-двойником работают под теми же путями и именами;
+MAX-only (★) для TG-алиаса → `501`. Состав на релизе 4 (план `…-max-r4-plan.md`): MCP у `max-work` 63 тула,
+у `max-personal-ro` 24.
+
+| Что | Тул | Лимит |
+|---|---|---|
+| Текст, фото, файл, пересылка, правка, удаление, реакция, «прочитано» | `send_message`, `send_photo`, `send_file`, `forward_message`, `edit_message`, `delete_message`, `react_to_message`, `mark_chat_read` | `send` / `actions_per_hour` |
+| Видео (`.mp4/.mov/.m4v` в `send_file`; `force_document` — файлом), голос (`send_voice`, `send_file voice_note`), ★ кружок `send_video_note` | | `send`; длительность читается до слота (нечитаемый файл → `422`) |
+| Альбом 2–10 файлов — одно сообщение MAX | `send_album` | `send` × 1 |
+| Опрос (викторина → `501`), ★ голос в опросе `vote_poll`; опрос в ответе сообщения — поле `poll` с `poll_id` и `answer_id` | `send_poll`, `vote_poll` | `send` / `actions_per_hour` |
+| Закреп и открепление (сверка по свежему чату; «всё ещё закреплено» → `502`) | `pin_message`, `unpin_message` | `actions_per_hour` |
+| ★ Реакции сообщения (счётчики, своя реакция; кто поставил — MAX не отдаёт) | `get_reactions` | чтение |
+| Вступление и просмотр по ссылке: `https://max.ru/join/<код>`, `join/<код>`, `https://max.ru/<имя>`, `@имя` | `join_chat`, `resolve_chat` | `chats_joined_per_day` (5) |
+| Группы и каналы: создать (только группу), участники, админы (у канала `post_message`/`edit_message`, по умолчанию 1792), профиль, настройки, ссылка, заявки, удалить (только группу), выйти | `create_group`, `add_group_members`, …, `leave_chat` | `groups_created_per_day` (3), `group_invites_per_day` (30, приглашения в каналы там же) |
+| Поиск по номеру; ★ импорт до 20 номеров за вызов | `contact_by_phone`, `import_contacts` | `phone_lookups_per_day` (20), `contacts_imported_per_day` (50, по каждому номеру, ушедшему в MAX) |
+| ★ Удалить контакт (человек остаётся в базе), ★ удалить личку (`confirm_user_id`, по умолчанию у себя) | `remove_contact`, `delete_dialog` | `actions_per_hour` |
+| ★ Папки чатов (изменение сохраняет то, что не передано; удаление — с `confirm_title`) | `list_folders`, `create_folder`, `update_folder`, `delete_folder` | `actions_per_hour` |
+
+Выключить без рестарта: `PATCH /api/v1/accounts/{id}/write-limits` с `{"chats_joined_per_day":0}`,
+`{"contacts_imported_per_day":0}`, `{"group_invites_per_day":0}` или `{"enabled":false}`.
+
+**Не проверено живьём на момент релиза 4** (сверено по коду PyMax и сторонним описаниям протокола; после
+живой проверки вычеркнуть): загрузка голоса, видео и кружка через наш прокси и `wave` голоса на web-транспорте;
+несколько вложений в одном `MSG_SEND`; создание опроса (`_type: POLL`) и `SEND_VOTE` с `answersIds`;
+закреп `pinMessageId` и открепление `pinMessageId: 0` (свой кадр); `MSG_GET_REACTIONS`; `LINK_INFO` по
+`join/…` и по публичному URL (свой кадр), `CHAT_JOIN` по публичному URL; `SYNC`-импорт с картой `phones`
+(и не заменяет ли он адресную книгу); `CONTACT_UPDATE REMOVE`; `CHAT_DELETE` лички с `forAll:false`;
+папки (272/274/276); кадр 77 и права 256/512 на канале.
+
+**Не делается:** профиль, приватность, сессии, пароль и 2FA аккаунта; блокировка, отложенные, архив,
+создание и удаление канала (PyMax 2.4.1 не умеет или это не задача агентов) → `501`.
 
 ### Ограничения фазы 1
 

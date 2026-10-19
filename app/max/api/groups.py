@@ -1,5 +1,11 @@
 """MAX groups (plan 2026-10-19 Р3 §3 PR-G2): /api/v1/groups/..., MAX-only routes.
 
+Channels (plan Р4 Р-40) use the same routes: a channel in MAX is the same Chat
+with the same frames. Only create_group and delete_group stay groups-only
+(PyMax cannot create a channel; deleting one loses its audience). Inviting to
+a channel counts in group_invites_per_day like a group; post_message /
+edit_message are channel admin rights (1792 by default for a channel).
+
 Writes are rw only (WRITE_MESSENGER_TOOLS → 403 for ro in the middleware),
 within the account's write limits: create_group takes 1 group + 1 invite per
 initial member, add_group_members 1 invite per person, the rest are actions.
@@ -46,6 +52,7 @@ register_url_convertor("sint", SignedInt())
 router = APIRouter(prefix="/groups", tags=["max-groups"])
 
 MAX_IDS = 20
+GROUP_OR_CHANNEL = ("group", "channel")
 UNCERTAIN = "the change may have been applied, check get_chat / get_chat_members"
 _IDS = Field(min_length=1, max_length=MAX_IDS)
 
@@ -67,7 +74,8 @@ class UserIdsRequest(BaseModel):
 
 class AdminRequest(BaseModel):
     user_id: int
-    permissions: list[str] | None = Field(default=None, description=f"of {sorted(groups.PERMISSIONS)}")
+    permissions: list[str] | None = Field(default=None, description=f"of {sorted(groups.PERMISSIONS)}; "
+                                                                    f"post_message, edit_message: a channel only")
 
 
 class RemoveAdminRequest(BaseModel):
@@ -216,13 +224,14 @@ async def create_group(req: CreateGroupRequest, request: Request):
 
 @router.post("/{chat_id:sint}/members", name="add_group_members")
 async def add_group_members(chat_id: int, req: MembersRequest, request: Request):
-    await known_chat(request, chat_id)
+    chat_row = await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
     session = await connected(request)
     not_me(session, req.user_ids)
     _target(request, req.user_ids)
     ids = list(dict.fromkeys(req.user_ids))
     async with bundle_slot(request, "add_group_members", {GROUP_INVITE: len(ids)}, chat_id):
-        chat = await call_max(groups.invite(session.client, chat_id, ids, req.show_history), UNCERTAIN)
+        chat = await call_max(groups.invite(session.client, chat_id, ids, req.show_history, chat_row.chat_type),
+                              UNCERTAIN)
     if chat is not None:
         await store_chat(session, chat)
     else:
@@ -232,7 +241,7 @@ async def add_group_members(chat_id: int, req: MembersRequest, request: Request)
 
 @router.post("/{chat_id:sint}/members/remove", name="remove_group_members")
 async def remove_group_members(chat_id: int, req: UserIdsRequest, request: Request):
-    await known_chat(request, chat_id)
+    await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
     session = await connected(request)
     not_me(session, req.user_ids)
     _target(request, req.user_ids)
@@ -244,23 +253,25 @@ async def remove_group_members(chat_id: int, req: UserIdsRequest, request: Reque
 
 @router.post("/{chat_id:sint}/admins", name="set_group_admin")
 async def set_group_admin(chat_id: int, req: AdminRequest, request: Request):
-    await known_chat(request, chat_id)
+    chat_row = await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
+    channel = chat_row.chat_type == "channel"
     try:
-        names = groups.permission_names(groups.permission_mask(req.permissions))
+        names = groups.permission_names(groups.permission_mask(req.permissions, channel=channel))
     except groups.UnknownPermission as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     session = await connected(request)
     not_me(session, [req.user_id])
     _target(request, [req.user_id])
     async with write_slot(request, ACTION, "set_group_admin", chat_id):
-        await call_max(groups.set_admin(session.client, chat_id, req.user_id, req.permissions), UNCERTAIN)
+        await call_max(groups.set_admin(session.client, chat_id, req.user_id, req.permissions, channel=channel),
+                       UNCERTAIN)
     chat = await refresh(session, chat_id)
     return summary(chat, me_of(session), chat_id=chat_id, user_id=req.user_id, permissions=names)
 
 
 @router.post("/{chat_id:sint}/admins/remove", name="remove_group_admin")
 async def remove_group_admin(chat_id: int, req: RemoveAdminRequest, request: Request):
-    await known_chat(request, chat_id)
+    await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
     session = await connected(request)
     not_me(session, [req.user_id])
     _target(request, [req.user_id])
@@ -272,7 +283,7 @@ async def remove_group_admin(chat_id: int, req: RemoveAdminRequest, request: Req
 
 @router.patch("/{chat_id:sint}", name="update_group_profile")
 async def update_group_profile(chat_id: int, req: ProfileRequest, request: Request):
-    await known_chat(request, chat_id)
+    await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
     session = await connected(request)
     async with write_slot(request, ACTION, "update_group_profile", chat_id):
         await call_max(groups.profile(session.client, chat_id, req.title, req.description), UNCERTAIN)
@@ -282,7 +293,7 @@ async def update_group_profile(chat_id: int, req: ProfileRequest, request: Reque
 
 @router.patch("/{chat_id:sint}/settings", name="update_group_settings")
 async def update_group_settings(chat_id: int, req: SettingsRequest, request: Request):
-    await known_chat(request, chat_id)
+    await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
     session = await connected(request)
     options = req.model_dump(exclude_none=True)
     async with write_slot(request, ACTION, "update_group_settings", chat_id):
@@ -293,7 +304,7 @@ async def update_group_settings(chat_id: int, req: SettingsRequest, request: Req
 
 @router.get("/{chat_id:sint}/invite-link", name="get_invite_link")
 async def get_invite_link(chat_id: int, request: Request):
-    await known_chat(request, chat_id)
+    await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
     session = await connected(request)
     chat = await call_max_read(groups.fresh_chat(session.client, chat_id))
     await store_chat(session, chat)
@@ -305,7 +316,7 @@ async def get_invite_link(chat_id: int, request: Request):
 
 @router.post("/{chat_id:sint}/invite-link", name="reset_invite_link")
 async def reset_invite_link(chat_id: int, request: Request):
-    await known_chat(request, chat_id)
+    await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
     session = await connected(request)
     async with write_slot(request, ACTION, "reset_invite_link", chat_id):
         chat = await call_max(groups.reset_link(session.client, chat_id), UNCERTAIN)
@@ -316,7 +327,7 @@ async def reset_invite_link(chat_id: int, request: Request):
 
 @router.get("/{chat_id:sint}/join-requests", name="list_join_requests")
 async def list_join_requests(chat_id: int, request: Request, limit: int = Query(100, ge=1, le=100)):
-    await known_chat(request, chat_id)
+    await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
     session = await connected(request)
     found = await call_max_read(groups.join_requests(session.client, chat_id, limit))
     users = [m.contact for m in found if getattr(m, "contact", None) is not None]
@@ -327,7 +338,7 @@ async def list_join_requests(chat_id: int, request: Request, limit: int = Query(
 
 @router.post("/{chat_id:sint}/join-requests/approve", name="approve_join_requests")
 async def approve_join_requests(chat_id: int, req: MembersRequest, request: Request):
-    await known_chat(request, chat_id)
+    await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
     session = await connected(request)
     _target(request, req.user_ids)
     async with write_slot(request, ACTION, "approve_join_requests", chat_id):
@@ -338,7 +349,7 @@ async def approve_join_requests(chat_id: int, req: MembersRequest, request: Requ
 
 @router.post("/{chat_id:sint}/join-requests/decline", name="decline_join_requests")
 async def decline_join_requests(chat_id: int, req: UserIdsRequest, request: Request):
-    await known_chat(request, chat_id)
+    await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
     session = await connected(request)
     _target(request, req.user_ids)
     async with write_slot(request, ACTION, "decline_join_requests", chat_id):

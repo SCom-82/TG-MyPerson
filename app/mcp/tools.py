@@ -67,6 +67,7 @@ MAX_SAFE_INT = 2**53 - 1
 ID_KEYS = frozenset({
     "chat_id", "message_id", "message_ids", "reply_to_message_id", "from_user_id", "user_id",
     "to_chat_id", "from_chat_id", "forward_from_chat_id", "forward_from_message_id", "user_ids",
+    "chat_ids", "answer_ids",  # folders, votes (plan 2026-10-19 Р4)
 })
 # Internal ids of the contacts base: small, stay plain integers.
 SMALL_IDS = frozenset({"person_id", "identity_id", "from_id", "to_id"})
@@ -221,6 +222,13 @@ async def send_voice(caller: Caller, args: dict) -> Any:
     return await _rest(caller, "POST", "/messages/send-voice", multipart=parts)
 
 
+async def send_video_note(caller: Caller, args: dict) -> Any:
+    name, data = await _file(caller, args)
+    parts = [("chat_id", args["chat_id"]), ("file", (name, data, None))]
+    parts += _form(args, ("reply_to_message_id", "duration_ms"))
+    return await _rest(caller, "POST", "/messages/send-video-note", multipart=parts)
+
+
 async def send_album(caller: Caller, args: dict) -> Any:
     sources = args.get("upload_ids") or []
     urls = args.get("file_urls") or []
@@ -298,6 +306,7 @@ def _file_schema(base: dict, *, drop: str, required_extra: tuple[str, ...] = ())
 
 send_file.rest_route = ("POST", "/messages/send-file")
 send_voice.rest_route = ("POST", "/messages/send-voice")
+send_video_note.rest_route = ("POST", "/messages/send-video-note")
 send_album.rest_route = ("POST", "/messages/album")
 download_media.rest_route = ("GET", "/messages/{chat_id}/{message_id}")
 
@@ -473,17 +482,20 @@ def _widened(tools: list[Tool]) -> list[Tool]:
 
 
 def _max_group_tools() -> list[Tool]:
-    """MAX groups (plan 2026-10-19 Р3): routes only in the MAX router — visible() hides
-    them from TG, the writes from ro."""
-    cid = {"chat_id": {"type": "integer", "description": "group chat id"}}
+    """MAX groups and channels (plan 2026-10-19 Р3; Р4 Р-40): routes only in the MAX router —
+    visible() hides them from TG, the writes from ro."""
+    cid = {"chat_id": {"type": "integer", "description": "group or channel chat id"}}
     ids = {"type": "array", "items": {"type": "integer"}, "minItems": 1, "maxItems": 20,
            "description": "user ids, ≤ 20"}
     obj = lambda props, req=("chat_id",): {"type": "object", "properties": props, "required": list(req)}  # noqa: E731
     path = lambda a: {k: v for k, v in a.items() if k != "chat_id" and v is not None}  # noqa: E731
     perms = {"type": "array", "items": {"type": "string", "enum": ["add_remove_member", "add_admin",
                                                                   "change_chat_info", "pin_message",
-                                                                  "delete_message"]},
-             "description": "default: add_remove_member, change_chat_info, pin_message, delete_message"}
+                                                                  "delete_message", "post_message",
+                                                                  "edit_message"]},
+             "description": "default for a group: add_remove_member, change_chat_info, pin_message, "
+                            "delete_message; for a channel: post_message, edit_message, delete_message "
+                            "(post_message / edit_message: channels only)"}
     flag = {"type": "boolean"}
     return _widened([
         Tool("create_group", "Create a MAX group with this account as owner; user_ids are invited at once. "
@@ -491,32 +503,32 @@ def _max_group_tools() -> list[Tool]:
              obj({"title": {"type": "string"}, "user_ids": {**ids, "minItems": 0},
                   "notify": {"type": "boolean", "default": True}}, ["title"]),
              "create_group", rest("POST", "/groups", body=ALL)),
-        Tool("add_group_members", "Add people to a group (each counts in the 30 invites a day).",
+        Tool("add_group_members", "Add people to a group or channel (each counts in the 30 invites a day).",
              obj({**cid, "user_ids": ids, "show_history": {"type": "boolean", "default": True}},
                  ["chat_id", "user_ids"]),
              "add_group_members", rest("POST", "/groups/{chat_id}/members", body=path)),
-        Tool("remove_group_members", "Remove people from a group (their messages stay).",
+        Tool("remove_group_members", "Remove people from a group or channel (their messages stay).",
              obj({**cid, "user_ids": ids}, ["chat_id", "user_ids"]),
              "remove_group_members", rest("POST", "/groups/{chat_id}/members/remove", body=path)),
-        Tool("set_group_admin", "Make a member an admin of the group.",
+        Tool("set_group_admin", "Make a member an admin of the group or channel.",
              obj({**cid, "user_id": {"type": "integer"}, "permissions": perms}, ["chat_id", "user_id"]),
              "set_group_admin", rest("POST", "/groups/{chat_id}/admins", body=path)),
         Tool("remove_group_admin", "Take admin rights from a member.",
              obj({**cid, "user_id": {"type": "integer"}}, ["chat_id", "user_id"]),
              "remove_group_admin", rest("POST", "/groups/{chat_id}/admins/remove", body=path)),
-        Tool("update_group_profile", "Change the group's title and/or description.",
+        Tool("update_group_profile", "Change the title and/or description of a group or channel.",
              obj({**cid, "title": {"type": "string"}, "description": {"type": "string"}}),
              "update_group_profile", rest("PATCH", "/groups/{chat_id}", body=path)),
-        Tool("update_group_settings", "Change group settings (only the ones passed).",
+        Tool("update_group_settings", "Change settings of a group or channel (only the ones passed).",
              obj({**cid, "all_can_pin_message": flag, "only_owner_can_change_icon_title": flag,
                   "only_admin_can_add_member": flag, "only_admin_can_call": flag,
                   "members_can_see_private_link": flag}),
              "update_group_settings", rest("PATCH", "/groups/{chat_id}/settings", body=path)),
-        Tool("get_invite_link", "The group's current invite link (null if it has none).", obj(cid),
+        Tool("get_invite_link", "The current invite link of a group or channel (null if it has none).", obj(cid),
              "get_invite_link", rest("GET", "/groups/{chat_id}/invite-link")),
         Tool("reset_invite_link", "Make a new invite link; the previous one stops working.", obj(cid),
              "reset_invite_link", rest("POST", "/groups/{chat_id}/invite-link")),
-        Tool("list_join_requests", "People asking to join the group.",
+        Tool("list_join_requests", "People asking to join the group or channel.",
              obj({**cid, "limit": {"type": "integer", "default": 100, "maximum": 100}}),
              "list_join_requests", rest("GET", "/groups/{chat_id}/join-requests", query=path)),
         Tool("approve_join_requests", "Let people who asked in.",
@@ -533,7 +545,62 @@ def _max_group_tools() -> list[Tool]:
     ])
 
 
-ACCOUNT_TOOLS = _account_tools() + _max_group_tools()
+def _max_r4_tools() -> list[Tool]:
+    """MAX release 4 without a TG counterpart (plan 2026-10-19 Р4 Р-32): routes only in
+    the MAX router; the TG ones it serves (pin_message, join_chat, ...) need no entry here."""
+    obj = lambda props, req=(): {"type": "object", "properties": props, "required": list(req)}  # noqa: E731
+    path = lambda *keys: (lambda a: {k: v for k, v in a.items() if k not in keys and v is not None})  # noqa: E731
+    msg = {"chat_id": {"type": "integer"}, "message_id": {"type": "integer"}}
+    note_schema = obj({"chat_id": {"type": "integer"}, "reply_to_message_id": {"type": "integer"},
+                       "duration_ms": {"type": "integer", "description": "milliseconds; default: read from the file"},
+                       **FILE_SOURCE}, ["chat_id"])
+    chat_ids = {"type": "array", "items": {"type": "integer"}, "maxItems": 100,
+                "description": "chats of this account, ≤ 100"}
+    folder = {"folder_id": {"type": "string"}}
+    return _widened([
+        Tool("send_video_note", "Send a round video message (.mp4, square, up to 60 s). The file comes from "
+             "file_url or upload_id (create_upload).", note_schema, "send_video_note", send_video_note),
+        Tool("vote_poll", "Vote in the poll of a message: answer_ids from the message's poll.answers "
+             "(get_message / list_messages). Returns the poll's current counts.",
+             obj({**msg, "answer_ids": {"type": "array", "items": {"type": "integer"}, "minItems": 1, "maxItems": 10},
+                  "poll_id": {"type": "integer"}}, ["chat_id", "message_id", "answer_ids"]),
+             "vote_poll", rest("POST", "/messages/{chat_id}/{message_id}/vote",
+                               body=path("chat_id", "message_id"))),
+        Tool("get_reactions", "Reactions of a message: counts per reaction and this account's own "
+             "(MAX does not say who reacted).", obj(msg, ["chat_id", "message_id"]),
+             "get_reactions", rest("GET", "/messages/{chat_id}/{message_id}/reactions")),
+        Tool("import_contacts", "Add up to 20 numbers to the address book and the contacts base in one call; "
+             "per number: found, user_id, person_id, chat_id. Limit 50 numbers/day; known numbers answer from "
+             "the base (refresh=true sends them anyway).",
+             obj({"contacts": {"type": "array", "minItems": 1, "maxItems": 20, "items": {
+                     "type": "object", "required": ["phone", "first_name"],
+                     "properties": {"phone": {"type": "string"}, "first_name": {"type": "string"},
+                                    "last_name": {"type": "string"}}}},
+                  "refresh": {"type": "boolean", "default": False}}, ["contacts"]),
+             "import_contacts", rest("POST", "/contacts/import", body=ALL)),
+        Tool("remove_contact", "Remove a user from this account's MAX address book (the person stays in the "
+             "contacts base).", obj({"user_id": {"type": "integer"}}, ["user_id"]),
+             "remove_contact", rest("POST", "/contacts/{user_id}/remove")),
+        Tool("delete_dialog", "Delete a private dialog: confirm_user_id must be the peer; for_all=false (default) "
+             "deletes it for this account only. Groups: delete_group.",
+             obj({"chat_id": {"type": "integer"}, "confirm_user_id": {"type": "integer"},
+                  "for_all": {"type": "boolean", "default": False}}, ["chat_id", "confirm_user_id"]),
+             "delete_dialog", rest("POST", "/chats/{chat_id}/delete", body=path("chat_id"))),
+        Tool("list_folders", "Chat folders of the account: folder_id, title, chat_ids.", obj({}),
+             "list_folders", rest("GET", "/folders")),
+        Tool("create_folder", "Create a chat folder.",
+             obj({"title": {"type": "string"}, "chat_ids": chat_ids}, ["title"]),
+             "create_folder", rest("POST", "/folders", body=ALL)),
+        Tool("update_folder", "Rename a folder and/or replace its chats; what is not passed stays.",
+             obj({**folder, "title": {"type": "string"}, "chat_ids": chat_ids}, ["folder_id"]),
+             "update_folder", rest("PATCH", "/folders/{folder_id}", body=path("folder_id"))),
+        Tool("delete_folder", "Delete a folder (its chats stay): confirm_title must equal its current title.",
+             obj({**folder, "confirm_title": {"type": "string"}}, ["folder_id", "confirm_title"]),
+             "delete_folder", rest("POST", "/folders/{folder_id}/delete", body=path("folder_id"))),
+    ])
+
+
+ACCOUNT_TOOLS = _account_tools() + _max_group_tools() + _max_r4_tools()
 RW_TOOLS = _rw_tools()
 OWNER_TOOLS = _owner_tools()
 BY_NAME = {t.name: t for t in (*ACCOUNT_TOOLS, *RW_TOOLS, *OWNER_TOOLS)}

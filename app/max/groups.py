@@ -1,4 +1,4 @@
-"""MAX groups through PyMax 2.4.1 (plan 2026-10-19 Р3 §3 PR-G2, Р-24…Р-27).
+"""MAX groups and channels through PyMax 2.4.1 (plan 2026-10-19 Р3 §3 PR-G2, Р-24…Р-27; Р4 Р-40).
 
 The one place the group protocol lives: the routes (app/max/api/groups.py)
 call these functions with the session's client and never touch PyMax. Sixth
@@ -23,10 +23,15 @@ PERMISSIONS = {
     "change_chat_info": ChannelPermissions.CHANGE_CHAT_INFO,
     "pin_message": ChannelPermissions.PIN_MESSAGE,
     "delete_message": ChannelPermissions.DELETE_MESSAGE,
+    # channel rights (plan Р4 Р-40): refused for a group
+    "post_message": ChannelPermissions.POST_MESSAGE,
+    "edit_message": ChannelPermissions.EDIT_MESSAGE,
 }
-# Р-25: no add_admin by default (an admin who appoints admins is an escalation);
-# post_message / edit_message are channel rights, not offered for a group.
+CHANNEL_ONLY = ("post_message", "edit_message")
+# Р-25: no add_admin by default (an admin who appoints admins is an escalation).
 DEFAULT_PERMISSIONS = ("add_remove_member", "change_chat_info", "pin_message", "delete_message")
+# Р-40: a channel admin posts, edits and deletes posts (1792).
+CHANNEL_DEFAULT_PERMISSIONS = ("post_message", "edit_message", "delete_message")
 MEMBERS_PAGE = 100
 
 
@@ -34,16 +39,18 @@ class UnknownPermission(ValueError):
     pass
 
 
-def permission_values(names: list[str] | None) -> list[ChannelPermissions]:
-    names = list(names) if names else list(DEFAULT_PERMISSIONS)
+def permission_values(names: list[str] | None, *, channel: bool = False) -> list[ChannelPermissions]:
+    names = list(names) if names else list(CHANNEL_DEFAULT_PERMISSIONS if channel else DEFAULT_PERMISSIONS)
     unknown = [n for n in names if n not in PERMISSIONS]
     if unknown:
         raise UnknownPermission(f"unknown permissions {unknown}; allowed: {sorted(PERMISSIONS)}")
+    if not channel and set(names) & set(CHANNEL_ONLY):
+        raise UnknownPermission(f"{sorted(set(names) & set(CHANNEL_ONLY))} are channel rights, not for a group")
     return [PERMISSIONS[n] for n in names]
 
 
-def permission_mask(names: list[str] | None) -> int:
-    return reduce(or_, (int(p) for p in permission_values(names)))
+def permission_mask(names: list[str] | None, *, channel: bool = False) -> int:
+    return reduce(or_, (int(p) for p in permission_values(names, channel=channel)))
 
 
 def permission_names(mask: int | None) -> list[str]:
@@ -87,7 +94,9 @@ async def create(client: Any, title: str, user_ids: list[int], notify: bool) -> 
     return await client.create_group(title, participant_ids=user_ids or None, notify=notify)
 
 
-async def invite(client: Any, chat_id: int, user_ids: list[int], show_history: bool) -> Any:
+async def invite(client: Any, chat_id: int, user_ids: list[int], show_history: bool, chat_type: str = "group") -> Any:
+    if chat_type == "channel":
+        return await client.invite_users_to_channel(chat_id, user_ids, show_history=show_history)
     return await client.invite_users_to_group(chat_id, user_ids, show_history=show_history)
 
 
@@ -96,8 +105,8 @@ async def remove(client: Any, chat_id: int, user_ids: list[int]) -> None:
     await client.remove_users_from_group(chat_id, user_ids, clean_msg_period=0)
 
 
-async def set_admin(client: Any, chat_id: int, user_id: int, names: list[str] | None) -> None:
-    await client.add_admin(chat_id, user_id, permission_values(names))
+async def set_admin(client: Any, chat_id: int, user_id: int, names: list[str] | None, *, channel: bool = False) -> None:
+    await client.add_admin(chat_id, user_id, permission_values(names, channel=channel))
 
 
 def remove_admin_frame(chat_id: int, user_id: int) -> dict:
