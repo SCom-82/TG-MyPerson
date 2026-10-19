@@ -6,8 +6,10 @@
 - list_tools depends on the caller: owner → contacts tools; ro account →
   no messenger writes; rw → everything + reachable_contacts, send_to_person,
   create_upload.
-- call_tool → authorize() → the REST route in-process → audit(): the same
-  decision and the same audit row as the REST API.
+- call_tool → ids to int (strings accepted: MAX ids exceed 2^53) → schema
+  check → authorize() → the REST route in-process → audit(): the same
+  decision and the same audit row as the REST API. Integers beyond 2^53 in
+  the result are strings.
 - stateless + JSON responses: any worker, no session affinity.
 """
 
@@ -17,6 +19,7 @@ import json
 import logging
 from typing import Any
 
+import jsonschema
 from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
@@ -27,7 +30,7 @@ from starlette.responses import JSONResponse
 from app.authz import keys
 from app.authz.policy import AuthContext, audit, authorize
 from app.database import async_session
-from app.mcp.tools import BY_NAME, Caller, ToolError, visible
+from app.mcp.tools import BY_NAME, Caller, ToolError, coerce_ids, safe_ints, visible
 from app.models import Account
 
 log = logging.getLogger(__name__)
@@ -57,8 +60,11 @@ def _digest(args: dict) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
-@server.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+# Input validation is ours, not the SDK's (validate_input=False): an id that is
+# not digits must reach the audit like any refused call (plan 2026-10-19 R1-3),
+# and ids given as strings are made ints before authorize() and the REST call.
+@server.call_tool(validate_input=False)
+async def call_tool(name: str, arguments: dict) -> list[types.TextContent] | types.CallToolResult:
     caller = _caller()
     args = arguments or {}
     tool = BY_NAME.get(name)
@@ -70,6 +76,13 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         audit(ctx, tool.route if tool else name, status="denied", is_write=bool(tool and tool.is_write),
               error="tool not available for this key")
         return _text(f"Error: tool '{name}' is not available for this key")
+    try:
+        args = coerce_ids(args, tool.schema)
+        jsonschema.validate(instance=args, schema=tool.schema)
+    except (ToolError, jsonschema.ValidationError) as exc:
+        error = str(exc) if isinstance(exc, ToolError) else f"Input validation error: {exc.message}"
+        audit(ctx, tool.route, status="error", is_write=tool.is_write, error=error[:500])
+        return types.CallToolResult(content=_text(error), isError=True)
     chat = args.get("chat_id", args.get("to_chat_id"))
     decision = await authorize(ctx, tool.route, chat_external_id=chat, is_write=tool.is_write)
     common = {"is_write": tool.is_write, "chat_id": chat if isinstance(chat, int) else None,
@@ -89,7 +102,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         audit(ctx, tool.route, status="error", error=f"{type(exc).__name__}: {exc}"[:500], **common)
         return _text(f"Error: {exc}")
     audit(ctx, tool.route, status="ok", **common)
-    return _text(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    return _text(json.dumps(safe_ints(result), ensure_ascii=False, indent=2, default=str))
 
 
 def _text(text: str) -> list[types.TextContent]:

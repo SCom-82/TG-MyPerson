@@ -24,7 +24,7 @@ from app.config import settings
 from app.mcp import files
 from app.mcp import server as mcp_server
 from app.mcp.stdio_catalog import STDIO_TOOLS
-from app.mcp.tools import ACCOUNT_TOOLS
+from app.mcp.tools import ACCOUNT_TOOLS, widen_ids
 from app.repo import chats, messages, users
 from app.repo.rows import ChatRow, MediaRow, MessageRow, UserRow
 from app.storage import account_db
@@ -135,7 +135,8 @@ async def test_tool_schemas_match_the_stdio_wrapper(app, mcp_keys):
         if spec["name"] in file_tools:
             continue
         assert listed[spec["name"]].description == spec["description"], spec["name"]
-        assert listed[spec["name"]].inputSchema == spec["inputSchema"], spec["name"]
+        # the wrapper's schema with ids widened to string|integer (plan 2026-10-19 Р-1)
+        assert listed[spec["name"]].inputSchema == widen_ids(spec["inputSchema"]), spec["name"]
 
 
 async def test_reads_are_per_account_and_audited(app, accounts, mcp_keys):

@@ -8,6 +8,7 @@ denied and logged identically.
 
 import copy
 import functools
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -53,6 +54,85 @@ class Tool:
 
 class ToolError(Exception):
     """Shown to the agent as the tool result text."""
+
+
+# ---------------------------------------------------------------------------
+# Ids (plan 2026-10-19 Р-1, Р-2): MAX ids are ~1.2e17 > 2^53, a JSON client
+# that parses numbers as doubles rounds them (…689 → …700) and gets a 404.
+# Inputs take a string or a number, the server makes it an int; outputs carry
+# such ids as strings. TG ids stay below 2^53: TG answers do not change.
+# ---------------------------------------------------------------------------
+
+MAX_SAFE_INT = 2**53 - 1
+ID_KEYS = frozenset({
+    "chat_id", "message_id", "message_ids", "reply_to_message_id", "from_user_id", "user_id",
+    "to_chat_id", "from_chat_id", "forward_from_chat_id", "forward_from_message_id",
+})
+# Internal ids of the contacts base: small, stay plain integers.
+SMALL_IDS = frozenset({"person_id", "identity_id", "from_id", "to_id"})
+ID_NOTE = "MAX ids exceed 2^53: pass them as strings."
+ID_TYPE = {"type": ["string", "integer"], "pattern": r"^-?\d+$"}
+
+
+def _is_id(name: str, prop: dict) -> bool:
+    if name in SMALL_IDS:
+        return False
+    if prop.get("type") == "array":
+        return name in ID_KEYS and (prop.get("items") or {}).get("type") == "integer"
+    return prop.get("type") == "integer" and (name in ID_KEYS or name.endswith("_id"))
+
+
+def widen_ids(schema: dict) -> dict:
+    """integer id properties → string or integer (digits only)."""
+    schema = copy.deepcopy(schema)
+    for name, prop in (schema.get("properties") or {}).items():
+        if not _is_id(name, prop):
+            continue
+        if prop["type"] == "array":
+            prop["items"] = {**prop["items"], **ID_TYPE}
+        else:
+            prop.update(ID_TYPE)
+        prop["description"] = f"{prop['description']} {ID_NOTE}" if prop.get("description") else ID_NOTE
+    return schema
+
+
+def _to_id(key: str, value: Any) -> int:
+    if isinstance(value, bool):
+        raise ToolError(f"Error: {key} must be an integer id")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer() and abs(value) <= MAX_SAFE_INT:
+        return int(value)
+    if isinstance(value, str) and re.fullmatch(r"-?\d+", value):
+        return int(value)
+    raise ToolError(f"Error: {key} must be an integer id")
+
+
+def coerce_ids(args: dict, schema: dict) -> dict:
+    """Id arguments of a widened schema → int; anything but digits → ToolError (REST is not called)."""
+    out = dict(args)
+    for name, prop in (schema.get("properties") or {}).items():
+        value = out.get(name)
+        if value is None:
+            continue
+        if prop.get("type") == ID_TYPE["type"]:
+            out[name] = _to_id(name, value)
+        elif prop.get("type") == "array" and (prop.get("items") or {}).get("type") == ID_TYPE["type"]:
+            if not isinstance(value, list):
+                raise ToolError(f"Error: {name} must be a list of integer ids")
+            out[name] = [_to_id(name, v) for v in value]
+    return out
+
+
+def safe_ints(obj: Any) -> Any:
+    """Integers beyond 2^53 → strings, everywhere in a tool result (Р-2)."""
+    if isinstance(obj, dict):
+        return {k: safe_ints(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [safe_ints(v) for v in obj]
+    if isinstance(obj, int) and not isinstance(obj, bool) and abs(obj) > MAX_SAFE_INT:
+        return str(obj)
+    return obj
 
 
 def _clean(args: dict, *drop: str) -> dict:
@@ -287,7 +367,7 @@ def _account_tools() -> list[Tool]:
             schema["properties"]["index"] = {"type": "integer", "default": 0, "description": "attachment number"}
             description = ("Link to download media of a message: {url, expires_at, file_name, file_size, "
                            "mime_type, curl} (signed, 15 minutes).")
-        out.append(Tool(name, description, schema, route, handler))
+        out.append(Tool(name, description, widen_ids(schema), route, handler))
     return out
 
 
@@ -299,7 +379,7 @@ def _owner_tools() -> list[Tool]:
         person = await _rest(caller, "GET", f"/people/{args['person_id']}")
         return {"person_id": person["id"], "accounts": person.get("accounts", [])}
 
-    return [
+    return _widened([
         Tool("find_person", "Find people in the contacts base by name, username, phone or external id.",
              obj({"q": {"type": "string"}, "tag": {"type": "string"},
                   "platform": {"type": "string", "enum": ["telegram", "max"]},
@@ -329,11 +409,11 @@ def _owner_tools() -> list[Tool]:
         Tool("split_person", "Move one identity to a new person (pinned, logged).",
              obj({"identity_id": {"type": "integer"}, "reason": {"type": "string"}}, ["identity_id"]),
              "split_person", rest("POST", "/people/split", body=ALL), "owner"),
-    ]
+    ])
 
 
 def _rw_tools() -> list[Tool]:
-    return [
+    return _widened([
         Tool("reachable_contacts", "People from the shared contacts base this account can write to, and how "
              "(direct / username / phone).",
              {"type": "object", "properties": {"q": {"type": "string"},
@@ -348,7 +428,13 @@ def _rw_tools() -> list[Tool]:
         Tool("create_upload", "Get a URL to PUT a local file to (curl -T), then pass upload_id to send_file / "
              "send_photo / send_voice / send_album. Valid 15 minutes, ≤ 50 MB.",
              {"type": "object", "properties": {}}, "send_file", create_upload, "rw"),
-    ]
+    ])
+
+
+def _widened(tools: list[Tool]) -> list[Tool]:
+    for t in tools:
+        t.schema = widen_ids(t.schema)
+    return tools
 
 
 ACCOUNT_TOOLS = _account_tools()
