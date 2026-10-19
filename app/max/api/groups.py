@@ -185,7 +185,13 @@ async def create_group(req: CreateGroupRequest, request: Request):
     async with bundle_slot(request, "create_group", {GROUP_CREATE: 1, GROUP_INVITE: len(ids)}):
         result = await call_max(groups.create(session.client, req.title, ids, req.notify), UNCERTAIN)
         if result is None:
-            raise HTTPException(status_code=502, detail="MAX answered without the new group")
+            # MAX accepted the frame but sent no chat back: the group (and its invites) is
+            # most likely made — the slots stay, a retry must not create a second one
+            # unchecked (review 15 R15-1), as with a 504.
+            error = HTTPException(status_code=502, detail="MAX answered without the new group; it may have "
+                                                          "been created, check list_chats before retrying")
+            error.keep_write_slot = True
+            raise error
     chat, msg = result
     await store_chat(session, chat)
     await store_sent(session, msg, chat.id)

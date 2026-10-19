@@ -149,6 +149,8 @@ async def get_my_rights(chat_id: int, request: Request):
     creator = me is not None and chat.owner == me
     admin = creator or me in (chat.admins or [])
     raw = (chat.admin_participants or {}).get(me) if me is not None else None
+    options = chat.options if isinstance(chat.options, dict) else {}  # PyMax annotates dict | int
+    channel = str(getattr(chat.type, "value", chat.type)) == "CHANNEL"
     mask = raw.get("permissions") if isinstance(raw, dict) else None
     names = set(groups.PERMISSIONS) if creator else set(groups.permission_names(mask))
     return MyRightsResponse(
@@ -156,12 +158,12 @@ async def get_my_rights(chat_id: int, request: Request):
         is_member=creator or me in {int(p) for p in (chat.participants or {})},
         is_admin=admin,
         is_creator=creator,
-        can_post_messages=True,
+        can_post_messages=admin if channel else True,  # a channel: admins post (review 15 R15-2)
         can_edit_messages=admin,
         can_delete_messages="delete_message" in names,
-        can_pin_messages="pin_message" in names or bool((chat.options or {}).get("ALL_CAN_PIN_MESSAGE")),
+        can_pin_messages="pin_message" in names or bool(options.get("ALL_CAN_PIN_MESSAGE")),
         can_add_admins="add_admin" in names,
-        can_invite_users="add_remove_member" in names or not (chat.options or {}).get("ONLY_ADMIN_CAN_ADD_MEMBER"),
+        can_invite_users="add_remove_member" in names or not options.get("ONLY_ADMIN_CAN_ADD_MEMBER"),
         can_change_info="change_chat_info" in names,
         raw=raw if isinstance(raw, dict) else None,
     )

@@ -85,6 +85,18 @@ async def test_create_group_stores_chat_message_and_counts(rw):
     assert sorted(e[0] for e in _events(rw.id)) == ["group_create", "group_invite", "group_invite"]
 
 
+async def test_create_group_without_a_chat_in_the_answer_keeps_the_slots(rw):
+    """review 15 R15-1: MAX took the frame, answered without the chat — the group likely exists."""
+    async def no_chat(name, participant_ids=None, notify=True):
+        rw.env.server.group_calls.append(("create_group", name))
+        return None
+
+    rw.client.create_group = no_chat
+    resp = await _post(rw, "/groups", {"title": "x", "user_ids": [A, B]})
+    assert resp.status_code == 502 and "may have been created, check list_chats" in resp.text
+    assert sorted(e[0] for e in _events(rw.id)) == ["group_create", "group_invite", "group_invite"]
+
+
 async def test_create_group_limits(rw):
     await _limits(rw, group_invites_per_day=3)
     resp = await _post(rw, "/groups", {"title": "x", "user_ids": [A, B, C, 5004, 5005]})
@@ -234,6 +246,7 @@ async def test_leave_members_rights(rw):
 
     rights = (await _get(rw, f"/chats/{FOREIGN}/my_rights")).json()
     assert (rights["is_member"], rights["is_admin"], rights["is_creator"]) == (True, False, False)
+    assert rights["can_post_messages"] is True  # a group member writes
     gid = await _create(rw, user_ids=(A,))
     mine = (await _get(rw, f"/chats/{gid}/my_rights")).json()
     assert (mine["is_creator"], mine["is_admin"], mine["can_add_admins"]) == (True, True, True)
@@ -257,6 +270,8 @@ async def test_my_rights_of_an_admin_by_mask(rw):
 
 async def test_channel_leave_and_private_refused(rw):
     await _foreign(rw, kind="channel")
+    rights = (await _get(rw, f"/chats/{FOREIGN}/my_rights")).json()
+    assert rights["can_post_messages"] is False  # review 15 R15-2: a channel member does not post
     assert (await _post(rw, "/chats/leave", {"chat_id": FOREIGN})).status_code == 200
     assert _calls(rw, "leave_channel") == [("leave_channel", FOREIGN)]
     assert (await _post(rw, f"/groups/{FOREIGN}/members", {"user_ids": [A]})).status_code == 422  # not a group
