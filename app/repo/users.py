@@ -97,3 +97,13 @@ async def list_users(
         .limit(limit).offset(offset)
     )).scalars().all()
     return list(rows), total
+
+
+async def by_external_ids(db: AsyncSession, account_id: int, external_ids: set[int]) -> dict[int, User]:
+    ensure_scope(db, account_id)
+    if not external_ids:
+        return {}
+    rows = (await db.execute(
+        select(User).where(User.account_id == account_id, User.external_id.in_(external_ids))
+    )).scalars()
+    return {u.external_id: u for u in rows}

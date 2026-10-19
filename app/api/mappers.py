@@ -40,8 +40,10 @@ def user_response(u: User) -> UserResponse:
     )
 
 
-def media_response(m: Media) -> MediaResponse:
-    return MediaResponse(
+def media_response(m: Media, cls: type[MediaResponse] = MediaResponse) -> MediaResponse:
+    extra = {"attach_index": m.attach_index} if "attach_index" in cls.model_fields else {}
+    return cls(
+        **extra,
         id=m.id,
         file_id=m.file_external_id,
         file_unique_id=m.file_unique_id,
@@ -52,8 +54,11 @@ def media_response(m: Media) -> MediaResponse:
     )
 
 
-def message_response(m: Message, chat_external_id: int, cls: type[MessageResponse] = MessageResponse):
+def message_response(m: Message, chat_external_id: int, cls: type[MessageResponse] = MessageResponse,
+                     people: dict | None = None):
+    """people: external user id → users row, for the extras cls reads from raw (MAX)."""
     return cls(
+        **cls.raw_extras(m.raw, people or {}),
         id=m.id,
         message_id=m.external_id,
         chat_id=chat_external_id,
@@ -71,7 +76,7 @@ def message_response(m: Message, chat_external_id: int, cls: type[MessageRespons
         is_edited=m.is_edited,
         edit_date=m.edited_at,
         views=m.views,
-        media=[media_response(x) for x in m.media],
+        media=[media_response(x, cls.media_cls) for x in m.media],
         created_at=m.created_at,
         deleted_at=m.deleted_at,
     )

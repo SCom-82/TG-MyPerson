@@ -128,13 +128,13 @@ async def download_media(
         raw = media.message_from_client(fetched)
     raw.pop("_pymax", None)
     try:
-        attachment = media.attachment_at(raw, index)
+        ref = media.attachment_ref(raw, index)  # own attachments, then a forwarded message's (Р-6)
     except media.MediaNotFound:
         raise HTTPException(status_code=404, detail="Message has no media")
 
     # 2. Its URL.
     try:
-        resolved = await media.resolve(client, chat_id, message_id, attachment, None)
+        resolved = await media.resolve(client, chat_id, message_id, ref.attachment, None, origin=ref.origin)
     except media.MediaNotFound:
         raise HTTPException(status_code=404, detail="No downloadable media")
     except media.MediaUpstreamError as exc:

@@ -240,14 +240,13 @@ async def send_album(caller: Caller, args: dict) -> Any:
 async def download_media(caller: Caller, args: dict) -> Any:
     msg = await _rest(caller, "GET", f"/messages/{args['chat_id']}/{args['message_id']}")
     media = (msg or {}).get("media") or []
-    index = int(args.get("index") or 0)
     if not media:
         raise ToolError("HTTP 404: message has no stored media")
+    item, index = _media_item(media, args.get("index"))
     try:
         link = files.file_link(caller.base_url, caller.account_id, args["chat_id"], args["message_id"], index)
     except files.LinkError as exc:
         raise ToolError(str(exc))
-    item = media[min(index, len(media) - 1)]
     target = args.get("save_to") or item.get("file_name") or f"media_{args['message_id']}"
     return {
         **link,
@@ -258,6 +257,26 @@ async def download_media(caller: Caller, args: dict) -> Any:
         "note": "the server cannot write to your disk: download with the curl command"
                 + (f" (save_to '{args['save_to']}' is not used)" if args.get("save_to") else ""),
     }
+
+
+def _media_item(media: list[dict], index: Any) -> tuple[dict, int]:
+    """The media item and the index for GET …/media (plan 2026-10-19, PR-C).
+
+    MAX items carry attach_index — the number of the attachment in the message,
+    which the REST ?index= takes; an [INLINE_KEYBOARD, PHOTO] message has its
+    photo at 1, a forwarded file after the own attachments. No index → the
+    first item. TG items have no attach_index: index is the position, as before.
+    """
+    if media[0].get("attach_index") is None:
+        index = int(index or 0)
+        return media[min(index, len(media) - 1)], index
+    if index is None:
+        return media[0], media[0]["attach_index"]
+    for item in media:
+        if item["attach_index"] == int(index):
+            return item, item["attach_index"]
+    raise ToolError(f"HTTP 404: no media with attach_index {index}; the message has "
+                    f"{[m['attach_index'] for m in media]}")
 
 
 async def create_upload(caller: Caller, args: dict) -> Any:
@@ -364,7 +383,11 @@ def _account_tools() -> list[Tool]:
         elif name == "download_media":
             schema["required"] = ["chat_id", "message_id"]
             schema["properties"]["save_to"]["description"] = "ignored: the server returns a link to download"
-            schema["properties"]["index"] = {"type": "integer", "default": 0, "description": "attachment number"}
+            schema["properties"]["index"] = {
+                "type": "integer",
+                "description": "attachment number: media[].attach_index of the message (MAX); "
+                               "TG: position in media. Default: the first media item",
+            }
             description = ("Link to download media of a message: {url, expires_at, file_name, file_size, "
                            "mime_type, curl} (signed, 15 minutes).")
         out.append(Tool(name, description, widen_ids(schema), route, handler))

@@ -84,7 +84,8 @@ async def list_messages(
             limit=limit, offset=offset,
         )
         ext = await chats.external_ids(db, a, {m.chat_id for m in rows})
-        items = [message_response(m, ext[m.chat_id], cls) for m in rows]
+        people = await _people(db, a, cls, rows)
+        items = [message_response(m, ext[m.chat_id], cls, people) for m in rows]
     return PaginatedResponse(items=items, total=total, limit=limit, offset=offset)
 
 
@@ -94,7 +95,13 @@ async def get_message(request: Request, chat_id: int, message_id: int, cls: type
         msg = await messages.get_message(db, a, chat_id, message_id)
         if msg is None:
             raise HTTPException(status_code=404, detail="Message not found")
-        return message_response(msg, chat_id, cls)
+        return message_response(msg, chat_id, cls, await _people(db, a, cls, [msg]))
+
+
+async def _people(db, a: int, cls: type[MessageResponse], rows) -> dict:
+    """Users the response extras need (MAX: forward authors, contact cards): one query per page."""
+    ids = set().union(*(cls.raw_user_ids(m.raw) for m in rows)) if rows else set()
+    return await users.by_external_ids(db, a, ids) if ids else {}
 
 
 async def stored_raw(request: Request, chat_id: int, message_id: int) -> dict | None:

@@ -6,6 +6,7 @@ matches; anything PyMax does not recognize becomes 'unknown' with the whole
 payload kept in raw_data.
 """
 
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -16,7 +17,8 @@ from pymax.types.domain import Message
 from pymax.types.domain.attachments.enums import AttachmentType
 from pymax.types.domain.enums import ChatType, LinkType, MessageStatus
 
-from app.utils.raw import model_raw
+from app.utils.phone import normalize_phone
+from app.utils.raw import model_raw, strip_bytes_markers
 
 PYMAX_VERSION = pymax.__version__
 
@@ -72,9 +74,30 @@ def _attachment_kind(att: Any) -> str | None:
     return _TYPE_BY_ATTACHMENT.get(kind, "unknown")
 
 
+def forward_link(msg: Message) -> Any:
+    link = msg.link
+    if link is not None and _value(link.type) == LinkType.FORWARD.value and link.message is not None:
+        return link
+    return None
+
+
+def all_attaches(msg: Message) -> list[tuple[int, Any, bool]]:
+    """(attach_index, attachment, forwarded) of a message (plan 2026-10-19 Р-6).
+
+    Own attachments 0..n-1, then those of a forwarded message n..n+m-1: one
+    numbering for media rows, the message type and GET …/media?index=.
+    """
+    own = list(msg.attaches or [])
+    out = [(i, att, False) for i, att in enumerate(own)]
+    link = forward_link(msg)
+    if link is not None:
+        out += [(len(own) + j, att, True) for j, att in enumerate(link.message.attaches or [])]
+    return out
+
+
 def message_type(msg: Message) -> str:
-    """By the first attachment that defines a type; no attachments → text."""
-    for att in msg.attaches:
+    """By the first attachment that defines a type (own first, then forwarded); none → text."""
+    for _, att, _ in all_attaches(msg):
         kind = _attachment_kind(att)
         if kind is not None:
             return kind
@@ -83,7 +106,7 @@ def message_type(msg: Message) -> str:
 
 def media_rows(msg: Message) -> list[dict]:
     rows = []
-    for index, att in enumerate(msg.attaches):
+    for index, att, _ in all_attaches(msg):
         kind = _attachment_kind(att)
         if kind not in _MEDIA_TYPES:
             continue
@@ -104,6 +127,37 @@ def media_rows(msg: Message) -> list[dict]:
             "mime_type": None,  # MAX attachments carry no MIME type
         })
     return rows
+
+
+def contact_cards(msg: Message, phone_of: Callable[[int], str | None] | None = None) -> list[dict]:
+    """Contact cards of a message, own and forwarded (Р-8).
+
+    PyMax's ContactAttachment has no phone field, but its model keeps extra
+    keys (extra="allow"): MAX sends phone as '79…' on some cards. Without it,
+    phone_of(contactId) may give the phone the account knows (users.phone).
+    """
+    cards = []
+    for _, att, forwarded in all_attaches(msg):
+        if _value(getattr(att, "type", None)) != AttachmentType.CONTACT.value:
+            continue
+        first, last = getattr(att, "first_name", None), getattr(att, "last_name", None)
+        name = getattr(att, "name", None) or " ".join(p for p in (first, last) if p) or None
+        user_id = getattr(att, "contact_id", None)
+        phone = normalize_phone(getattr(att, "phone", None))
+        if phone is None and phone_of is not None and user_id is not None:
+            phone = phone_of(user_id)
+        cards.append({"user_id": user_id, "name": name, "first_name": first, "last_name": last,
+                      "phone": phone, "forwarded": forwarded})
+    return cards
+
+
+def cards_text(cards: list[dict]) -> str | None:
+    """«Контакт: Имя, +7…» per card: the card is found by name and phone and shows in text-only output."""
+    parts = []
+    for c in cards:
+        label = c["name"] or (str(c["user_id"]) if c["user_id"] is not None else "?")
+        parts.append(f"Контакт: {label}, {c['phone']}" if c["phone"] else f"Контакт: {label}")
+    return "; ".join(parts) or None
 
 
 def is_channel_post(msg: Message, chat_type: str | None = None) -> bool:
@@ -148,6 +202,13 @@ def normalize_message(
             forward_msg = link.message.id
             if not text:
                 text = link.message.text or None  # keep forwards searchable
+    kind = message_type(msg)
+    media = media_rows(msg)
+    if not text:
+        # Only the card's own phone here: ingest does no DB lookups (users.phone is added on read).
+        text = cards_text(contact_cards(msg))
+        if text and not media:
+            kind = "contact"
 
     status = _value(msg.status)
     edited = is_edit or status == MessageStatus.EDITED.value
@@ -164,7 +225,7 @@ def normalize_message(
         "reply_to_message_id": reply_to,
         "forward_from_chat_id": forward_chat,
         "forward_from_message_id": forward_msg,
-        "message_type": message_type(msg),
+        "message_type": kind,
         "text": text,
         "text_html": None,  # phase 1: markup stays in raw_data.elements
         "tg_date": ms_to_dt(msg.time),
@@ -175,7 +236,7 @@ def normalize_message(
         "raw_data": raw,
         "deleted_at": received_at if status == MessageStatus.REMOVED.value else None,
     }
-    return row, media_rows(msg)
+    return row, media
 
 
 def normalize_chat(chat: Chat) -> dict:
@@ -252,6 +313,15 @@ def frame_chat_id(opcode: int, payload: dict) -> int | None:
 def parse_message(payload: dict) -> Message:
     """NOTIF_MESSAGE / MSG_EDIT payload → Message (raises pydantic ValidationError)."""
     return Message.model_validate(payload)
+
+
+def parse_stored(raw: dict) -> Message:
+    """A stored raw message → Message: without _pymax, binary markers {"_bytes": n} removed (R7-1).
+
+    The one place the API, media and scripts parse a stored raw (PyMax stays
+    behind the modules of test_s16_pymax_import_boundary, review 13 R13-1).
+    """
+    return parse_message(strip_bytes_markers({k: v for k, v in raw.items() if k != "_pymax"}))
 
 
 def parse_delete(payload: dict) -> tuple[int, list[int]]:

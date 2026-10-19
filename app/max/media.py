@@ -18,6 +18,7 @@ from typing import Any
 import aiohttp
 from aiohttp_socks import ProxyConnector
 from pydantic import ValidationError
+from pymax import ApiError
 from pymax.api.response import payload_item
 from pymax.api.session.enums import DeviceType
 from pymax.api.session.payloads import DEFAULT_WEB_HEADER_USER_AGENT
@@ -27,9 +28,9 @@ from pymax.api.uploads.service import UploadService
 from pymax.exceptions import UploadError
 from pymax.files import File, Photo
 from pymax.protocol import Opcode
-from pymax.types.domain import Message
 
-from app.utils.raw import model_raw, strip_bytes_markers
+from app.max.normalize import all_attaches, parse_stored
+from app.utils.raw import model_raw
 
 log = logging.getLogger(__name__)
 
@@ -55,27 +56,59 @@ class ResolvedMedia:
     size: int | None
 
 
+@dataclass
+class Attachment:
+    """One attachment of a stored message by its attach_index (normalize.all_attaches)."""
+
+    attachment: Any
+    forwarded: bool
+    # The original of a forwarded message, when MAX names its chat (link.chatId ≠ 0).
+    origin: tuple[int, int] | None = None
+
+
+def attachment_ref(raw_message: dict, index: int) -> Attachment:
+    msg = parse_stored(raw_message)  # stored raw: no bytes (R7-1)
+    for i, att, forwarded in all_attaches(msg):
+        if i == index:
+            origin = None
+            if forwarded and msg.link.chat_id:
+                origin = (msg.link.chat_id, msg.link.message.id)
+            return Attachment(att, forwarded, origin)
+    raise MediaNotFound(f"no attachment #{index}")
+
+
 def attachment_at(raw_message: dict, index: int) -> Any:
-    msg = Message.model_validate(strip_bytes_markers(raw_message))  # stored raw: no bytes (R7-1)
-    if index < 0 or index >= len(msg.attaches):
-        raise MediaNotFound(f"no attachment #{index}")
-    return msg.attaches[index]
+    return attachment_ref(raw_message, index).attachment
 
 
 def message_from_client(message: Any) -> dict:
     return model_raw(message)
 
 
-async def resolve(client: Any, chat_id: int, message_id: int, attachment: Any, kind: str | None) -> ResolvedMedia:
+async def _by_id(fetch, chat_id: int, message_id: int, item_id: int, origin: tuple[int, int] | None) -> Any:
+    """FILE/VIDEO URL by the message we have; a forwarded one, if MAX refuses, by
+    its original — only when MAX named the original's chat (plan Р-7)."""
+    try:
+        return await fetch(chat_id, message_id, item_id)
+    except ApiError as exc:
+        if origin is None:
+            raise
+        log.info("max media: %s by the forward (%s) failed, trying the original: %s",
+                 getattr(fetch, "__name__", "fetch"), message_id, f"{type(exc).__name__}: {exc}")
+        return await fetch(origin[0], origin[1], item_id)
+
+
+async def resolve(client: Any, chat_id: int, message_id: int, attachment: Any, kind: str | None,
+                  *, origin: tuple[int, int] | None = None) -> ResolvedMedia:
     att_type = str(getattr(getattr(attachment, "type", None), "value", getattr(attachment, "type", "")))
     try:
         if att_type == "PHOTO":
             url, file_type, size, name = attachment.base_url, "photo", None, None
         elif att_type == "FILE":
-            req = await client.get_file_by_id(chat_id, message_id, attachment.file_id)
+            req = await _by_id(client.get_file_by_id, chat_id, message_id, attachment.file_id, origin)
             url, file_type, size, name = getattr(req, "url", None), "document", attachment.size, attachment.name
         elif att_type == "VIDEO":
-            req = await client.get_video_by_id(chat_id, message_id, attachment.video_id)
+            req = await _by_id(client.get_video_by_id, chat_id, message_id, attachment.video_id, origin)
             url, file_type, size, name = getattr(req, "url", None), "video", None, None
         elif att_type == "AUDIO":
             url, file_type, size, name = attachment.url, "voice", None, None

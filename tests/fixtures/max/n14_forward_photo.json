@@ -1,0 +1,87 @@
+{
+  "description": "forwarded photo, source hidden (link.chatId=0): media from link.message.attaches (plan Р-6)",
+  "source": "shape of prod raw 2026-10-19 (keys and types from max-personal-ro, read-only SELECT); values synthesized",
+  "me_id": 100,
+  "chat_type": null,
+  "frame": {
+    "opcode": 128,
+    "cmd": 0,
+    "payload": {
+      "chatId": 100500,
+      "message": {
+        "id": "14",
+        "time": 1791398400000,
+        "type": "USER",
+        "text": "",
+        "attaches": [],
+        "sender": 200,
+        "link": {
+          "type": "FORWARD",
+          "message": {
+            "id": "117465863381610294",
+            "time": 1791398000000,
+            "type": "USER",
+            "text": "визитка",
+            "attaches": [
+              {
+                "_type": "PHOTO",
+                "baseUrl": "https://i.oneme.ru/i?r=FWDPHOTO",
+                "height": 1280,
+                "width": 960,
+                "photoId": 9101,
+                "photoToken": "ptok-f"
+              }
+            ],
+            "sender": 300,
+            "chatId": 0,
+            "cid": 0,
+            "elements": [],
+            "options": 0,
+            "status": null,
+            "link": null,
+            "reactionInfo": null,
+            "stats": null,
+            "ttl": null,
+            "unread": null,
+            "delayedAttributes": null,
+            "mark": null,
+            "prevMessageId": null
+          },
+          "chatId": 0,
+          "chatName": null,
+          "chatLink": null,
+          "chatAccessType": null,
+          "chatIconUrl": null
+        }
+      }
+    }
+  },
+  "expect": {
+    "sender_chat_id": null,
+    "reply_to_message_id": null,
+    "text_html": null,
+    "tg_date": "2026-10-07T18:40:00+00:00",
+    "is_outgoing": false,
+    "is_edited": false,
+    "views": null,
+    "deleted_at": null,
+    "from_user_id": 200,
+    "forward_from_chat_id": 0,
+    "forward_from_message_id": 117465863381610294,
+    "message_id": 14,
+    "chat_id": 100500,
+    "message_type": "photo",
+    "text": "визитка"
+  },
+  "expect_media": [
+    {
+      "attach_index": 0,
+      "file_type": "photo",
+      "file_id": "9101",
+      "file_unique_id": null,
+      "file_name": null,
+      "file_size": null,
+      "mime_type": null
+    }
+  ]
+}

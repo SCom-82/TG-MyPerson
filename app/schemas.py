@@ -136,6 +136,18 @@ class MessageResponse(BaseModel):
     # Subclasses whose responses carry from_user (MAX, plan 2026-10-19 Р-3). TG keeps
     # null while the legacy rollback window is open: golden legacy == new byte for byte.
     fill_from_user: ClassVar[bool] = False
+    # Platform extras read from the stored raw (MAX: forward, contacts, plan Р-8/Р-9).
+    media_cls: ClassVar[type[MediaResponse]] = MediaResponse
+
+    @classmethod
+    def raw_user_ids(cls, raw: dict | None) -> set[int]:
+        """Users the extras of this raw need (looked up per page in one query)."""
+        return set()
+
+    @classmethod
+    def raw_extras(cls, raw: dict | None, people: dict) -> dict:
+        """Fields from the stored raw; people: external user id → users row."""
+        return {}
 
     @model_serializer(mode="wrap")
     def _omit_empty_deleted_at(self, handler):

@@ -1,5 +1,5 @@
 {
-  "description": "N-7 contact",
+  "description": "N-7 contact: empty text gets «Контакт: <name>[, phone]» (plan 2026-10-19 Р-8)",
   "source": "synthesized from pymax 2.4.1 model fields (camelCase wire aliases); replace with live frames after PR-6",
   "me_id": 100,
   "chat_type": null,
@@ -40,7 +40,7 @@
     "message_id": 72,
     "chat_id": 100500,
     "message_type": "contact",
-    "text": null
+    "text": "Контакт: Иван"
   },
   "expect_media": []
 }

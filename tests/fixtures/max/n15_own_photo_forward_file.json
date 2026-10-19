@@ -1,0 +1,104 @@
+{
+  "description": "own photo + forwarded file from a named chat: indexes 0 (own) and 1 (forwarded)",
+  "source": "shape of prod raw 2026-10-19 (keys and types from max-personal-ro, read-only SELECT); values synthesized",
+  "me_id": 100,
+  "chat_type": null,
+  "frame": {
+    "opcode": 128,
+    "cmd": 0,
+    "payload": {
+      "chatId": 100500,
+      "message": {
+        "id": "15",
+        "time": 1791398400000,
+        "type": "USER",
+        "text": "смотри",
+        "attaches": [
+          {
+            "_type": "PHOTO",
+            "baseUrl": "https://i.oneme.ru/i?r=OWN",
+            "height": 10,
+            "width": 10,
+            "photoId": 9001,
+            "photoToken": "ptok"
+          }
+        ],
+        "sender": 200,
+        "link": {
+          "type": "FORWARD",
+          "message": {
+            "id": "116641336752745999",
+            "time": 1791398000000,
+            "type": "USER",
+            "text": "",
+            "attaches": [
+              {
+                "_type": "FILE",
+                "fileId": 9201,
+                "name": "договор.pdf",
+                "size": 34567,
+                "token": "ftok"
+              }
+            ],
+            "sender": 301,
+            "chatId": -75183661482741,
+            "cid": 0,
+            "elements": [],
+            "options": 0,
+            "status": null,
+            "link": null,
+            "reactionInfo": null,
+            "stats": null,
+            "ttl": null,
+            "unread": null,
+            "delayedAttributes": null,
+            "mark": null,
+            "prevMessageId": null
+          },
+          "chatId": -75183661482741,
+          "chatName": "Поставщики",
+          "chatLink": null,
+          "chatAccessType": "PRIVATE",
+          "chatIconUrl": null
+        }
+      }
+    }
+  },
+  "expect": {
+    "sender_chat_id": null,
+    "reply_to_message_id": null,
+    "text_html": null,
+    "tg_date": "2026-10-07T18:40:00+00:00",
+    "is_outgoing": false,
+    "is_edited": false,
+    "views": null,
+    "deleted_at": null,
+    "from_user_id": 200,
+    "forward_from_chat_id": -75183661482741,
+    "forward_from_message_id": 116641336752745999,
+    "message_id": 15,
+    "chat_id": 100500,
+    "message_type": "photo",
+    "text": "смотри"
+  },
+  "expect_media": [
+    {
+      "attach_index": 0,
+      "file_type": "photo",
+      "file_id": "9001",
+      "file_unique_id": null,
+      "file_name": null,
+      "file_size": null,
+      "mime_type": null
+    },
+    {
+      "attach_index": 1,
+      "file_type": "document",
+      "file_id": "9201",
+      "file_unique_id": null,
+      "file_name": "договор.pdf",
+      "file_size": 34567,
+      "mime_type": null
+    }
+  ]
+}
