@@ -93,14 +93,23 @@ _API_PREFIX = "/api/v1"
 MAX_INTERNAL_PREFIX = "/api/v1/_max"
 MAX_UNSUPPORTED_PATH = MAX_INTERNAL_PREFIX + "/_unsupported"
 
-# MAX-only endpoints: (method, path) → tool name. The routes themselves exist only
-# in the MAX router (PR-3); a Telegram alias gets 501 for them (API spec §2.3).
-_MAX_ONLY_PATHS: dict[tuple[str, str], str] = {
-    ("POST", "/api/v1/auth/qr"): "auth_qr_start",
-    ("GET", "/api/v1/auth/qr"): "auth_qr_status",
-    ("GET", "/api/v1/auth/qr.png"): "auth_qr_status",
-}
-assert set(_MAX_ONLY_PATHS.values()) <= MAX_ONLY_TOOLS
+# MAX-only endpoints (QR login, groups — plan 2026-10-19 Р-21) live only in the
+# MAX router; they are found by the route table under the internal prefix and
+# accepted only if their name is in MAX_ONLY_TOOLS. A Telegram alias gets 501.
+
+
+def _max_only_tool(request: Request) -> str | None:
+    """Name of the MAX-only route this /api/v1/... path is, else None.
+
+    By the route table (path templates like /groups/{chat_id}/members), not by
+    exact paths. Only MAX_ONLY_TOOLS names count: a path that the MAX router
+    shares with Telegram is resolved against the Telegram routes as before.
+    """
+    table = getattr(request.app.state, "route_table", None)
+    if table is None:
+        return None
+    name = table.resolve(request.method, MAX_INTERNAL_PREFIX + request.url.path[len(_API_PREFIX):])
+    return name if name in MAX_ONLY_TOOLS else None
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +327,7 @@ async def platform_dispatch_middleware(request: Request, call_next):
 
     - External request to /api/v1/_max... → 404 (internal router, reachable only
       through the rewrite below).
-    - telegram: no-op, except MAX-only paths (/auth/qr*) → 501.
+    - telegram: no-op, except MAX-only routes (/auth/qr*, /groups/...) → 501.
     - max: the tool name is resolved against the Telegram routes first and put
       into request.state.forced_tool_name, so tool_authz (ro check, policy) and
       audit see the real tool. Then scope["path"] is rewritten to the internal
@@ -338,7 +347,7 @@ async def platform_dispatch_middleware(request: Request, call_next):
         return await call_next(request)
 
     platform = getattr(request.state, "platform", _DEFAULT_PLATFORM)
-    max_only_tool = _MAX_ONLY_PATHS.get((request.method, path))
+    max_only_tool = _max_only_tool(request)
 
     if platform != "max":
         if max_only_tool is not None:

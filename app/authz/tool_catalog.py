@@ -23,6 +23,14 @@ Authz decision for ro accounts:
   - READ_ONLY_TOOLS → pass
 """
 
+# MAX groups (plan 2026-10-19 Р-20…Р-22): routes only in the MAX router.
+GROUP_WRITE_TOOLS = (
+    "create_group", "add_group_members", "remove_group_members", "set_group_admin", "remove_group_admin",
+    "update_group_profile", "update_group_settings", "reset_invite_link", "approve_join_requests",
+    "decline_join_requests", "delete_group",
+)
+GROUP_READ_TOOLS = ("get_invite_link", "list_join_requests")
+
 # ---------------------------------------------------------------------------
 # Category 1: writes to the external messenger — blocked on ro
 # ---------------------------------------------------------------------------
@@ -54,6 +62,8 @@ WRITE_MESSENGER_TOOLS: frozenset[str] = frozenset({
     "send_to_person",
     # find by phone + add to the address book (plan 2026-10-19 Р-13): ro → 403
     "contact_by_phone",
+    # MAX groups (plan 2026-10-19 Р-22): rw only
+    *GROUP_WRITE_TOOLS,
 })
 
 # Backward-compatible name: same object, so `in` checks and imports keep working.
@@ -95,6 +105,9 @@ MANAGE_SESSION_TOOLS: frozenset[str] = frozenset({
 MAX_ONLY_TOOLS: frozenset[str] = frozenset({
     "auth_qr_start",
     "auth_qr_status",
+    # groups (plan 2026-10-19 Р-20, Р-21): /api/v1/groups/... only in the MAX router
+    *GROUP_WRITE_TOOLS,
+    *GROUP_READ_TOOLS,
 })
 
 # ---------------------------------------------------------------------------
@@ -139,6 +152,8 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "person_messages",
     "person_chats",
     "reachable_contacts",
+    # MAX groups, reads (plan 2026-10-19 Р-22): ro sees them
+    *GROUP_READ_TOOLS,
 })
 
 # ---------------------------------------------------------------------------

@@ -29,7 +29,7 @@ _CHAT_ID = -990_000_000_009
 _USER_ID = 990_000_000_009
 
 # Alembic head of the repo (010 account isolation, 011 mig_* tables).
-_HEAD = "013"
+_HEAD = "014"
 
 _MAX_TABLES = (
     "max_users",

@@ -402,6 +402,9 @@ class AccountWriteLimits(Base):
     actions_per_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # migration 013: lookups by phone in 24 h (contact_by_phone)
     phone_lookups_per_day: Mapped[int | None] = mapped_column(Integer, server_default="20", nullable=True)
+    # migration 014: MAX groups created / persons invited in 24 h
+    groups_created_per_day: Mapped[int | None] = mapped_column(Integer, server_default="3", nullable=True)
+    group_invites_per_day: Mapped[int | None] = mapped_column(Integer, server_default="30", nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -414,7 +417,7 @@ class WriteEvent(Base):
     account_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
     )
-    kind: Mapped[str] = mapped_column(Text, nullable=False)  # 'send' | 'action' | 'lookup' (013)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)  # 'send' | 'action' | 'lookup' (013) | 'group_create' | 'group_invite' (014)
     tool: Mapped[str] = mapped_column(Text, nullable=False)
     chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # external chat id
     new_dialog: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)

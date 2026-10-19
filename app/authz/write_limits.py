@@ -15,6 +15,10 @@ write: a change through the admin API applies to the next call.
   once per chat) and
   min_interval_sec + random 0..jitter_sec between sends;
 - actions (edit, delete, react, mark_read): actions_per_hour;
+- MAX groups (plan 2026-10-19 Р-23): groups_created_per_day (3) and
+  group_invites_per_day (30, one event per person added — the initial members
+  of create_group too); one call reserves all its events at once
+  (reserve_bundle / bundle_slot), the rest of a group's changes are actions;
 - lookups by phone (contact_by_phone, plan 2026-10-19 Р-14):
   phone_lookups_per_day, 20 by default on every platform — Telegram too,
   whose writes have no limits. A lookup that reached the messenger keeps its
@@ -54,6 +58,8 @@ SEND = "send"
 ACTION = "action"
 LOOKUP = "lookup"
 LOOKUP_DEFAULT = 20
+GROUP_CREATE = "group_create"
+GROUP_INVITE = "group_invite"
 
 MAX_WAIT_SEC = 15
 RETENTION = timedelta(hours=25)
@@ -71,6 +77,9 @@ class Limits:
     jitter_sec: int | None = 2
     actions_per_hour: int | None = 60
     phone_lookups_per_day: int | None = LOOKUP_DEFAULT
+    # MAX groups (plan 2026-10-19 Р-23); invites count per added person
+    groups_created_per_day: int | None = 3
+    group_invites_per_day: int | None = 30
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -101,8 +110,10 @@ WINDOWS = (
     Window("new_dialogs_per_day", SEND, 86400, new_dialogs_only=True, noun="new dialogs"),
     Window("actions_per_hour", ACTION, 3600, noun="actions"),
     Window("phone_lookups_per_day", LOOKUP, 86400, noun="phone lookups"),
+    Window("groups_created_per_day", GROUP_CREATE, 86400, noun="groups created"),
+    Window("group_invites_per_day", GROUP_INVITE, 86400, noun="group invites"),
 )
-LOOKUP_WINDOW = WINDOWS[-1]
+LOOKUP_WINDOW = next(w for w in WINDOWS if w.kind == LOOKUP)
 _SPAN = {60: "minute", 3600: "hour", 86400: "24 hours"}
 
 
@@ -179,7 +190,9 @@ async def set_limits(account_id: int, changes: dict[str, Any]) -> None:
         values = replace(base, **changes).as_dict()
         own = await db.get(AccountWriteLimits, account_id)
         if own is None:
-            db.add(AccountWriteLimits(account_id=account_id, **values))
+            # Core INSERT: an explicit NULL (limit off) must not become the column's
+            # server DEFAULT (013/014: 20, 3, 30), which the ORM would let it.
+            await db.execute(insert(AccountWriteLimits).values(account_id=account_id, **values))
         else:
             for k, v in values.items():
                 setattr(own, k, v)
@@ -213,13 +226,13 @@ async def _count(db, account_id: int, w: Window, now: datetime) -> int:
     )).scalar_one()
 
 
-async def _retry_after(db, account_id: int, w: Window, now: datetime, used: int, limit: int) -> int:
-    """Seconds until the window holds limit - 1 events: the (used - limit + 1)-th oldest leaves it."""
+async def _retry_after(db, account_id: int, w: Window, now: datetime, used: int, limit: int, n: int = 1) -> int:
+    """Seconds until the window holds limit - n events: the (used - limit + n)-th oldest leaves it."""
     since = now - timedelta(seconds=w.seconds)
     at = (await db.execute(
         select(WriteEvent.at)
         .where(*_events(account_id, w.kind, since, new_dialogs_only=w.new_dialogs_only))
-        .order_by(WriteEvent.at).offset(used - limit).limit(1)
+        .order_by(WriteEvent.at).offset(used - limit + n - 1).limit(1)
     )).scalar_one_or_none()
     if at is None:  # cannot happen for limit ≥ 1 (the window holds ≥ limit events); be conservative
         return w.seconds
@@ -261,14 +274,20 @@ async def _has_history(eff: Effective, chat_id: int) -> bool:
 
 
 def _refusal(eff: Effective, tool: str, w: Window, limit: int, used: int, retry_after: int | None,
-             also: list[str]) -> WriteLimited:
+             also: list[str], n: int = 1) -> WriteLimited:
     """429 for the window that decides; also = the other windows that are full too.
 
     limit 0 (QA PR-7 W-D2): the kind of write is off — no Retry-After, nothing to wait for.
+    n > limit (a bundle that never fits): no Retry-After either.
     """
     span = _SPAN[w.seconds]
     if limit == 0:
         message = f"{w.noun} of account '{eff.alias}' are off: {w.name} = 0"
+    elif retry_after is None:
+        message = f"{n} {w.noun} never fit write limit {w.name} = {limit} of account '{eff.alias}'"
+    elif n > 1:
+        message = (f"write limit {w.name} of account '{eff.alias}': {used} of {limit} {w.noun} in the last "
+                   f"{span}, {n} more do not fit; retry in {retry_after} s")
     else:
         message = (f"write limit {w.name} of account '{eff.alias}' reached: {used} of {limit} {w.noun} "
                    f"in the last {span}; retry in {retry_after} s")
@@ -278,6 +297,7 @@ def _refusal(eff: Effective, tool: str, w: Window, limit: int, used: int, retry_
         "max": limit,
         "used": used,
         "remaining": max(0, limit - used),
+        "requested": n,
         "retry_after": retry_after,
         "also": also,
         "tool": tool,
@@ -293,16 +313,36 @@ def _refusal(eff: Effective, tool: str, w: Window, limit: int, used: int, retry_
 
 @dataclass
 class Slot:
-    event_id: int
+    event_ids: list[int]
     account_id: int
 
     async def release(self) -> None:
         try:
             async with async_session() as db:
-                await db.execute(delete(WriteEvent).where(WriteEvent.id == self.event_id))
+                await db.execute(delete(WriteEvent).where(WriteEvent.id.in_(self.event_ids)))
                 await db.commit()
-        except Exception:  # noqa: BLE001 — the counter stays one too high, the call's error wins
-            log.exception("write limits: failed to release slot %s", self.event_id)
+        except Exception:  # noqa: BLE001 — the counter stays too high, the call's error wins
+            log.exception("write limits: failed to release slot %s", self.event_ids)
+
+
+async def _check_windows(db, eff: Effective, tool: str, needs: dict[str, int], now: datetime,
+                         new_dialog: bool = False) -> None:
+    """Every window of the kinds needed, n events each (QA PR-7 W-D1): the refusal names
+    the window a retry has to wait for longest, so a retry after Retry-After passes them
+    all; a window with limit 0 (or one the bundle can never fit) decides over any wait."""
+    full = []
+    for w in WINDOWS:
+        limit = getattr(eff.limits, w.name)
+        n = needs.get(w.kind, 0)
+        if limit is None or not n or (w.new_dialogs_only and not new_dialog):
+            continue
+        used = await _count(db, eff.account_id, w, now)
+        if used + n > limit:
+            wait_for = None if n > limit else await _retry_after(db, eff.account_id, w, now, used, limit, n)
+            full.append((w, limit, used, wait_for, n))
+    if full:
+        w, limit, used, wait_for, n = max(full, key=lambda f: math.inf if f[3] is None else f[3])
+        raise _refusal(eff, tool, w, limit, used, wait_for, [f[0].name for f in full if f[0] is not w], n)
 
 
 async def reserve(account_id: int, kind: str, tool: str, chat_id: int | None = None) -> Slot | None:
@@ -324,14 +364,7 @@ async def reserve(account_id: int, kind: str, tool: str, chat_id: int | None = N
         sent_before = kind == SEND and chat_id is not None and await _sent_to(db, account_id, chat_id)
     limits = eff.limits
     if not limits.enabled:
-        raise WriteLimited(403, {
-            "error": "writes disabled",
-            "reason": "write limits: enabled = false",
-            "tool": tool,
-            "alias": eff.alias,
-            "platform": eff.platform,
-            "message": f"writes of account '{eff.alias}' are stopped (write limits enabled = false)",
-        })
+        raise _disabled(eff, tool)
     history = kind == SEND and chat_id is not None and not sent_before and await _has_history(eff, chat_id)
 
     async with async_session() as db:
@@ -343,21 +376,7 @@ async def reserve(account_id: int, kind: str, tool: str, chat_id: int | None = N
         new_dialog = (kind == SEND and chat_id is not None and not history
                       and not await _sent_to(db, account_id, chat_id))
 
-        # Every window is checked (QA PR-7 W-D1): the refusal names the one a retry
-        # has to wait for longest, so a retry after Retry-After passes them all;
-        # a window with limit 0 decides over any wait.
-        full = []
-        for w in WINDOWS:
-            limit = getattr(limits, w.name)
-            if limit is None or w.kind != kind or (w.new_dialogs_only and not new_dialog):
-                continue
-            used = await _count(db, account_id, w, now)
-            if used >= limit:
-                wait_for = None if limit == 0 else await _retry_after(db, account_id, w, now, used, limit)
-                full.append((w, limit, used, wait_for))
-        if full:
-            w, limit, used, wait_for = max(full, key=lambda f: math.inf if f[3] is None else f[3])
-            raise _refusal(eff, tool, w, limit, used, wait_for, [f[0].name for f in full if f[0] is not w])
+        await _check_windows(db, eff, tool, {kind: 1}, now, new_dialog)
 
         at = now
         if kind == SEND and limits.min_interval_sec:
@@ -390,7 +409,48 @@ async def reserve(account_id: int, kind: str, tool: str, chat_id: int | None = N
         await db.commit()
     if wait > 0:
         await _sleep(wait)
-    return Slot(event_id, account_id)
+    return Slot([event_id], account_id)
+
+
+def _disabled(eff: Effective, tool: str) -> WriteLimited:
+    return WriteLimited(403, {
+        "error": "writes disabled",
+        "reason": "write limits: enabled = false",
+        "tool": tool,
+        "alias": eff.alias,
+        "platform": eff.platform,
+        "message": f"writes of account '{eff.alias}' are stopped (write limits enabled = false)",
+    })
+
+
+BUNDLE_KINDS = (ACTION, GROUP_CREATE, GROUP_INVITE)
+
+
+async def reserve_bundle(account_id: int, tool: str, needs: dict[str, int], chat_id: int | None = None) -> Slot | None:
+    """Several events of one call under one lock (create_group: 1 group + n invites):
+    all fit or none is taken. No min_interval and no new-dialog logic (those are sends).
+    None: no limits for the account."""
+    assert set(needs) <= set(BUNDLE_KINDS), needs
+    async with async_session() as db:
+        eff = await effective(db, account_id)
+    if eff is None or eff.limits is None:
+        return None
+    if not eff.limits.enabled:
+        raise _disabled(eff, tool)
+    rows = [{"account_id": account_id, "kind": kind, "tool": tool, "chat_id": chat_id, "new_dialog": False}
+            for kind, n in needs.items() for _ in range(n)]
+    async with async_session() as db:
+        await db.execute(text("SELECT pg_advisory_xact_lock(:ns, :a)"), {"ns": _LOCK_NS, "a": account_id})
+        now = _now()
+        await db.execute(delete(WriteEvent).where(
+            WriteEvent.account_id == account_id, WriteEvent.at < now - RETENTION
+        ))
+        await _check_windows(db, eff, tool, needs, now)
+        ids = list((await db.execute(
+            insert(WriteEvent).values([{**r, "at": now} for r in rows]).returning(WriteEvent.id)
+        )).scalars()) if rows else []
+        await db.commit()
+    return Slot(ids, account_id)
 
 
 @asynccontextmanager
@@ -412,6 +472,21 @@ async def lookups_left(account_id: int) -> int | None:
             return None
         used = await _count(db, account_id, LOOKUP_WINDOW, _now())
     return max(0, limit - used)
+
+
+@asynccontextmanager
+async def bundle_slot(request: Request, tool: str, needs: dict[str, int],
+                      chat_id: int | None = None) -> AsyncIterator[Slot | None]:
+    """reserve_bundle for the request's account; given back like write_slot."""
+    account_id = getattr(request.state, "account_id", None)
+    slot = await reserve_bundle(account_id, tool, needs, chat_id) if account_id is not None else None
+    try:
+        yield slot
+    except BaseException as exc:
+        uncertain = isinstance(exc, asyncio.CancelledError) or getattr(exc, "keep_write_slot", False)
+        if slot is not None and not uncertain:
+            await slot.release()
+        raise
 
 
 @asynccontextmanager
@@ -470,6 +545,8 @@ async def status(account_id: int) -> dict | None:
             "new_dialogs_last_day": used["new_dialogs_per_day"],
             "actions_last_hour": used["actions_per_hour"],
             "lookups_last_day": used["phone_lookups_per_day"],
+            "groups_created_last_day": used["groups_created_per_day"],
+            "group_invites_last_day": used["group_invites_per_day"],
             "last_send_at": last.isoformat() if last else None,
             "next_send_at": next_send.isoformat() if next_send else None,
         },

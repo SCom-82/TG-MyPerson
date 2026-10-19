@@ -37,6 +37,8 @@ class WriteLimitsPatch(BaseModel):
     jitter_sec: int | None = _SECONDS
     actions_per_hour: int | None = _COUNT
     phone_lookups_per_day: int | None = _COUNT
+    groups_created_per_day: int | None = _COUNT
+    group_invites_per_day: int | None = _COUNT
 
 
 async def _status_or_404(account_id: int) -> dict:

@@ -4,7 +4,7 @@ import psycopg2
 import pytest
 
 from tests.isolation_env import app_role_url, create_account, ensure_app_role, sql
-from tests.test_max_migration import _alembic
+from tests.test_max_migration import _HEAD, _alembic
 
 ALIAS = "mig013-acc"
 
@@ -37,13 +37,13 @@ def account():
     try:
         yield account_id
     finally:
-        if _revision() != "013":
+        if _revision() != _HEAD:
             _alembic("upgrade", "head")
         sql("DELETE FROM accounts WHERE id = %s", (account_id,))
 
 
 def test_013_roundtrip(account):
-    assert _revision() == "013"
+    assert _revision() == _HEAD
     for _ in range(2):
         _alembic("downgrade", "012")
         assert _column_default() is None
@@ -70,4 +70,4 @@ def test_013_roundtrip(account):
     assert sql("SELECT count(*) FROM write_events WHERE account_id = %s AND kind = 'lookup'", (account,),
                fetch=True) == [(0,)]
     _alembic("upgrade", "head")
-    assert _revision() == "013"
+    assert _revision() == _HEAD

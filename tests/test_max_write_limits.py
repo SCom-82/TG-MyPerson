@@ -408,6 +408,11 @@ async def test_admin_write_limits_api(rw, aliases):  # noqa: F811
     resp = await rw.http.delete(f"/api/v1/accounts/{rw.id}/write-limits", headers=ADMIN_KEY)
     assert resp.json()["source"] == "default" and resp.json()["limits"]["per_hour"] == 20
 
+    # The first PATCH of an account turning a limit off: NULL, not the column DEFAULT (013/014).
+    off = {"phone_lookups_per_day": None, "groups_created_per_day": None, "group_invites_per_day": None}
+    status = await _limits(rw, **off)
+    assert {k: status["limits"][k] for k in off} == off
+
 
 # ---------------------------------------------------------------------------
 # Telegram: the same limits, off unless set
@@ -515,6 +520,77 @@ async def test_wd3_empty_chat_404_gives_the_slot_back(rw):
     resp = await rw.http.post("/api/v1/chats/424242/read", headers=rw.env.h())
     assert resp.status_code == 404 and resp.json()["detail"] == "Chat has no messages"
     assert _events(rw.id) == []
+
+
+# ---------------------------------------------------------------------------
+# Bundles: create_group = 1 group + n invites under one lock (plan 2026-10-19 Р3 PR-G1, Р-23)
+# ---------------------------------------------------------------------------
+
+G, I = write_limits.GROUP_CREATE, write_limits.GROUP_INVITE
+
+
+async def test_bundle_all_or_nothing(rw):
+    await _limits(rw, group_invites_per_day=3)
+    with pytest.raises(write_limits.WriteLimited) as exc:
+        await write_limits.reserve_bundle(rw.id, "create_group", {G: 1, I: 5}, -1)
+    body = exc.value.body
+    assert (exc.value.status, body["limit"], body["used"], body["requested"]) == (429, "group_invites_per_day", 0, 5)
+    assert body["retry_after"] is None and "never fit" in body["message"]  # 5 > 3: waiting does not help
+    assert _events(rw.id) == []
+
+    await _limits(rw, group_invites_per_day=30)
+    slot = await write_limits.reserve_bundle(rw.id, "create_group", {G: 1, I: 5}, -1)
+    assert sorted(e[0] for e in _events(rw.id)) == [G] + [I] * 5
+    status = (await _status(rw))["counters"]
+    assert (status["groups_created_last_day"], status["group_invites_last_day"]) == (1, 5)
+    await slot.release()
+    assert _events(rw.id) == []
+
+
+async def test_bundle_waits_for_the_oldest_that_frees_enough(rw):
+    await _limits(rw, group_invites_per_day=6)
+    for i in range(3):
+        rw.clock.at(i * 100)
+        await write_limits.reserve_bundle(rw.id, "add_group_members", {I: 2}, -1)
+    rw.clock.at(1000)
+    with pytest.raises(write_limits.WriteLimited) as exc:
+        await write_limits.reserve_bundle(rw.id, "add_group_members", {I: 3}, -1)
+    # 6 used, 3 more need 3 to leave: the 3rd oldest (t=100) leaves at 86500
+    assert exc.value.retry_after == 86400 + 100 - 1000 and exc.value.body["requested"] == 3
+
+
+async def test_parallel_group_creations_take_exactly_the_limit(rw):
+    results = await asyncio.gather(*(write_limits.reserve_bundle(rw.id, "create_group", {G: 1}, -i)
+                                     for i in range(10)), return_exceptions=True)
+    assert sum(isinstance(r, write_limits.Slot) for r in results) == 3
+    assert all(isinstance(r, write_limits.WriteLimited) for r in results if not isinstance(r, write_limits.Slot))
+    assert [e[0] for e in _events(rw.id)] == [G] * 3
+
+
+async def test_group_limits_zero_null_delete_disabled(rw):
+    await _limits(rw, groups_created_per_day=0)
+    with pytest.raises(write_limits.WriteLimited) as exc:
+        await write_limits.reserve_bundle(rw.id, "create_group", {G: 1}, -1)
+    assert exc.value.retry_after is None and exc.value.response().headers.get("retry-after") is None
+    assert exc.value.body["message"] == f"groups created of account '{rw.env.alias}' are off: groups_created_per_day = 0"
+
+    await _limits(rw, groups_created_per_day=None, group_invites_per_day=None)
+    for _ in range(5):
+        await write_limits.reserve_bundle(rw.id, "create_group", {G: 1, I: 20}, -1)
+    await rw.http.delete(f"/api/v1/accounts/{rw.id}/write-limits", headers=ADMIN_KEY)
+    limits = (await _status(rw))["limits"]
+    assert (limits["groups_created_per_day"], limits["group_invites_per_day"]) == (3, 30)
+
+    await _limits(rw, enabled=False)
+    with pytest.raises(write_limits.WriteLimited) as exc:
+        await write_limits.reserve_bundle(rw.id, "remove_group_members", {write_limits.ACTION: 1}, -1)
+    assert exc.value.status == 403
+
+
+async def test_bundle_for_telegram_is_unlimited(rw, aliases):  # noqa: F811
+    _, tg_id = aliases("tgb", platform="telegram", mode="rw")
+    assert await write_limits.reserve_bundle(tg_id, "create_group", {G: 1, I: 20}) is None
+    assert _events(tg_id) == []
 
 
 async def _status_of(w, account_id: int) -> dict:
