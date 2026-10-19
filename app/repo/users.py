@@ -99,6 +99,21 @@ async def list_users(
     return list(rows), total
 
 
+async def list_contacts(
+    db: AsyncSession, account_id: int, *, limit: int = 200, offset: int = 0
+) -> tuple[list[User], int]:
+    """The account's address book as stored (users.is_contact), by name."""
+    ensure_scope(db, account_id)
+    flt = [User.account_id == account_id, User.is_contact.is_(True)]
+    total = (await db.execute(select(func.count()).select_from(User).where(*flt))).scalar_one()
+    rows = (await db.execute(
+        select(User).where(*flt)
+        .order_by(func.lower(func.coalesce(User.first_name, User.username, "")), User.external_id)
+        .limit(limit).offset(offset)
+    )).scalars().all()
+    return list(rows), total
+
+
 async def by_external_ids(db: AsyncSession, account_id: int, external_ids: set[int]) -> dict[int, User]:
     ensure_scope(db, account_id)
     if not external_ids:
