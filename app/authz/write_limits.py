@@ -19,6 +19,9 @@ write: a change through the admin API applies to the next call.
   group_invites_per_day (30, one event per person added — the initial members
   of create_group too); one call reserves all its events at once
   (reserve_bundle / bundle_slot), the rest of a group's changes are actions;
+- MAX joins and imports (plan 2026-10-19 Р4 Р-39): chats_joined_per_day (5,
+  one per join by link) and contacts_imported_per_day (50, one per number that
+  went to MAX); invites to a channel count in group_invites_per_day;
 - lookups by phone (contact_by_phone, plan 2026-10-19 Р-14):
   phone_lookups_per_day, 20 by default on every platform — Telegram too,
   whose writes have no limits. A lookup that reached the messenger keeps its
@@ -60,6 +63,8 @@ LOOKUP = "lookup"
 LOOKUP_DEFAULT = 20
 GROUP_CREATE = "group_create"
 GROUP_INVITE = "group_invite"
+CHAT_JOIN = "chat_join"
+CONTACT_IMPORT = "contact_import"
 
 MAX_WAIT_SEC = 15
 RETENTION = timedelta(hours=25)
@@ -80,6 +85,9 @@ class Limits:
     # MAX groups (plan 2026-10-19 Р-23); invites count per added person
     groups_created_per_day: int | None = 3
     group_invites_per_day: int | None = 30
+    # MAX joins by link and numbers imported (plan 2026-10-19 Р4 Р-39)
+    chats_joined_per_day: int | None = 5
+    contacts_imported_per_day: int | None = 50
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -112,6 +120,8 @@ WINDOWS = (
     Window("phone_lookups_per_day", LOOKUP, 86400, noun="phone lookups"),
     Window("groups_created_per_day", GROUP_CREATE, 86400, noun="groups created"),
     Window("group_invites_per_day", GROUP_INVITE, 86400, noun="group invites"),
+    Window("chats_joined_per_day", CHAT_JOIN, 86400, noun="chats joined"),
+    Window("contacts_imported_per_day", CONTACT_IMPORT, 86400, noun="contacts imported"),
 )
 LOOKUP_WINDOW = next(w for w in WINDOWS if w.kind == LOOKUP)
 _SPAN = {60: "minute", 3600: "hour", 86400: "24 hours"}
@@ -191,7 +201,7 @@ async def set_limits(account_id: int, changes: dict[str, Any]) -> None:
         own = await db.get(AccountWriteLimits, account_id)
         if own is None:
             # Core INSERT: an explicit NULL (limit off) must not become the column's
-            # server DEFAULT (013/014: 20, 3, 30), which the ORM would let it.
+            # server DEFAULT (013/014/015: 20, 3, 30, 5, 50), which the ORM would let it.
             await db.execute(insert(AccountWriteLimits).values(account_id=account_id, **values))
         else:
             for k, v in values.items():
@@ -423,7 +433,7 @@ def _disabled(eff: Effective, tool: str) -> WriteLimited:
     })
 
 
-BUNDLE_KINDS = (ACTION, GROUP_CREATE, GROUP_INVITE)
+BUNDLE_KINDS = (ACTION, GROUP_CREATE, GROUP_INVITE, CHAT_JOIN, CONTACT_IMPORT)
 
 
 async def reserve_bundle(account_id: int, tool: str, needs: dict[str, int], chat_id: int | None = None) -> Slot | None:
@@ -547,6 +557,8 @@ async def status(account_id: int) -> dict | None:
             "lookups_last_day": used["phone_lookups_per_day"],
             "groups_created_last_day": used["groups_created_per_day"],
             "group_invites_last_day": used["group_invites_per_day"],
+            "chats_joined_last_day": used["chats_joined_per_day"],
+            "contacts_imported_last_day": used["contacts_imported_per_day"],
             "last_send_at": last.isoformat() if last else None,
             "next_send_at": next_send.isoformat() if next_send else None,
         },

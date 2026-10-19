@@ -39,6 +39,8 @@ class WriteLimitsPatch(BaseModel):
     phone_lookups_per_day: int | None = _COUNT
     groups_created_per_day: int | None = _COUNT
     group_invites_per_day: int | None = _COUNT
+    chats_joined_per_day: int | None = _COUNT
+    contacts_imported_per_day: int | None = _COUNT
 
 
 async def _status_or_404(account_id: int) -> dict:

@@ -30,6 +30,9 @@ GROUP_WRITE_TOOLS = (
     "decline_join_requests", "delete_group",
 )
 GROUP_READ_TOOLS = ("get_invite_link", "list_join_requests")
+# MAX release 4 without a TG counterpart (plan 2026-10-19 Р4 Р-32): MAX router only.
+MAX_R4_WRITE_TOOLS = ("send_video_note", "vote_poll")
+MAX_R4_READ_TOOLS = ("get_reactions",)
 
 # ---------------------------------------------------------------------------
 # Category 1: writes to the external messenger — blocked on ro
@@ -64,6 +67,8 @@ WRITE_MESSENGER_TOOLS: frozenset[str] = frozenset({
     "contact_by_phone",
     # MAX groups (plan 2026-10-19 Р-22): rw only
     *GROUP_WRITE_TOOLS,
+    # MAX release 4 (plan 2026-10-19 Р4): rw only
+    *MAX_R4_WRITE_TOOLS,
 })
 
 # Backward-compatible name: same object, so `in` checks and imports keep working.
@@ -108,6 +113,9 @@ MAX_ONLY_TOOLS: frozenset[str] = frozenset({
     # groups (plan 2026-10-19 Р-20, Р-21): /api/v1/groups/... only in the MAX router
     *GROUP_WRITE_TOOLS,
     *GROUP_READ_TOOLS,
+    # release 4 (plan 2026-10-19 Р4 Р-32)
+    *MAX_R4_WRITE_TOOLS,
+    *MAX_R4_READ_TOOLS,
 })
 
 # ---------------------------------------------------------------------------
@@ -154,6 +162,8 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "reachable_contacts",
     # MAX groups, reads (plan 2026-10-19 Р-22): ro sees them
     *GROUP_READ_TOOLS,
+    # MAX release 4, reads (plan 2026-10-19 Р4 Р-47)
+    *MAX_R4_READ_TOOLS,
 })
 
 # ---------------------------------------------------------------------------

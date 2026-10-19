@@ -8,6 +8,8 @@ PROXY as the MAX connection, 256 KiB chunks, with `Range: bytes=N-` resume.
 """
 
 import asyncio
+import base64
+import io
 import logging
 import re
 import urllib.parse
@@ -22,12 +24,20 @@ from pymax import ApiError
 from pymax.api.response import payload_item
 from pymax.api.session.enums import DeviceType
 from pymax.api.session.payloads import DEFAULT_WEB_HEADER_USER_AGENT
-from pymax.api.uploads.models import FileUploadResponse, PhotoUploadResponse
-from pymax.api.uploads.payloads import AttachFilePayload, AttachPhotoPayload, UploadPayload
+from pymax.api.uploads.models import FileUploadResponse, PhotoUploadResponse, VideoUploadResponse
+from pymax.api.uploads.payloads import (
+    AttachFilePayload,
+    AttachPhotoPayload,
+    UploadPayload,
+    VideoAttachPayload,
+    VideoNoteAttachPayload,
+    VoiceAttachPayload,
+)
 from pymax.api.uploads.service import UploadService
 from pymax.exceptions import UploadError
-from pymax.files import File, Photo
+from pymax.files import File, Photo, Video, VideoNote, Voice
 from pymax.protocol import Opcode
+from tinytag import TinyTag
 
 from app.max.normalize import all_attaches, parse_stored
 from app.utils.raw import model_raw
@@ -303,16 +313,70 @@ class RangeNotSatisfiable(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Upload (send_file, PR-7)
+# Upload (send_file PR-7; voice, video, video note, album — plan 2026-10-19 Р4 Р-34…Р-37)
 # ---------------------------------------------------------------------------
 
-def upload_attachment(data: bytes, name: str, *, force_document: bool = False) -> Any:
-    """A file to send: Photo for the image extensions PyMax accepts, File otherwise."""
+VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".m4v"})
+# Voice and video note: MAX's ready signal is awaited this long after the POST,
+# then the message goes anyway (PyMax's send_message waits out attachment.not.ready).
+READY_WAIT_SEC = 30
+# Video: no ready signal in this time → UploadError (PyMax waits the same).
+VIDEO_READY_SEC = 60
+
+
+class DurationUnknown(ValueError):
+    """The duration of a voice / video note file cannot be read (→ 422, nothing sent)."""
+
+
+def duration_of(data: bytes, name: str) -> int:
+    """Duration in milliseconds (MAX's unit), read by tinytag as PyMax would — but
+    before the write slot, so a bad file costs nothing (Р-35)."""
+    try:
+        seconds = TinyTag.get(filename=name, file_obj=io.BytesIO(data), tags=False, duration=True).duration
+    except Exception as exc:  # noqa: BLE001 — tinytag: unsupported format, a broken file
+        log.info("max upload: no duration of %s: %s: %s", PurePosixPath(name).suffix, type(exc).__name__, exc)
+        seconds = None
+    if not seconds or seconds <= 0:
+        raise DurationUnknown(f"cannot read the duration of {PurePosixPath(name).suffix or name!r}: send "
+                              f".ogg/.opus/.m4a/.mp3 (voice) or .mp4 (video note)")
+    return round(seconds * 1000)
+
+
+def upload_attachment(data: bytes, name: str, *, force_document: bool = False, voice: bool = False,
+                      video_note: bool = False, duration_ms: int | None = None) -> Any:
+    """A file to send: Voice / VideoNote when asked (duration_ms or read from the file);
+    Photo for the image extensions PyMax accepts and Video for .mp4/.mov/.m4v unless
+    force_document; File otherwise."""
     from pymax.files.static import ALLOWED_EXTENSIONS
 
-    if not force_document and PurePosixPath(name).suffix.lower() in ALLOWED_EXTENSIONS:
+    if voice:
+        return Voice(raw=data, name=name, duration=duration_ms or duration_of(data, name))
+    if video_note:
+        return VideoNote(raw=data, name=name, duration=duration_ms or duration_of(data, name))
+    suffix = PurePosixPath(name).suffix.lower()
+    if not force_document and suffix in ALLOWED_EXTENSIONS:
         return Photo(raw=data, name=name)
+    if not force_document and suffix in VIDEO_EXTENSIONS:
+        return Video(raw=data, name=name)
     return File(raw=data, name=name)
+
+
+def _app_user_agent(app: Any) -> str | None:
+    """PyMax's User-Agent of a voice upload (OKMessages/…), None if the config lacks a part."""
+    try:
+        ua = app.config.device.user_agent
+        return f"OKMessages/{app.config.app_version} ({ua.os_version}; {ua.device_name}; {ua.screen})"
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _ready(future: asyncio.Future, seconds: float, what: str, item_id: int) -> bool:
+    try:
+        await asyncio.wait_for(asyncio.shield(future), seconds)
+        return True
+    except TimeoutError:
+        log.info("max upload: no ready signal for %s %s in %s s", what, item_id, seconds)
+        return False
 
 
 class ProxiedUploads(UploadService):
@@ -326,7 +390,9 @@ class ProxiedUploads(UploadService):
     - it takes the photo id from `photoIds` in the upload URL, which MAX no
       longer sends (upstream issue #108; dev/2.5.0 reads `photos`, PR #107
       takes the only entry). Here: photoIds, then photos, then the only entry.
-    Video and voice stay PyMax's: send_file sends video as a document, voice is 501.
+    Voice, video and video notes (plan Р4 Р-34) go the same way: PyMax's frames,
+    headers and attach payloads, the POST through http_session(). The ready
+    waiter is registered BEFORE the POST: MAX may signal before the body ends.
     """
 
     def _post_session(self) -> tuple[aiohttp.ClientSession, dict]:
@@ -392,6 +458,86 @@ class ProxiedUploads(UploadService):
         finally:
             self.file_upload_waiters.pop(info.file_id, None)
         return AttachFilePayload(file_id=info.file_id)
+
+
+    async def _video_slot(self, payload: dict, what: str) -> Any:
+        """VIDEO_UPLOAD (82): the URL, id and token of one voice / video upload."""
+        try:
+            frame = await self.app.invoke(Opcode.VIDEO_UPLOAD, payload=payload)
+            return VideoUploadResponse.model_validate(frame.payload).info[0]
+        except Exception as exc:  # noqa: BLE001
+            raise UploadError(f"Failed to request {what} upload URL: {type(exc).__name__}: {exc}") from exc
+
+    async def _post_media(self, url: str, headers: dict, media: Any, what: str, item_id: int,
+                          *, want_json: bool = False) -> Any:
+        session, kwargs = self._post_session()
+        try:
+            async with session, session.post(url, headers=headers, data=media.iter_chunks(1024 * 1024),
+                                             **kwargs) as response:
+                if response.status != 200:
+                    raise UploadError(f"{what.capitalize()} upload failed with status {response.status} "
+                                      f"id={item_id}")
+                return await response.json(content_type=None) if want_json else None
+        except UploadError:
+            raise
+        except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
+            raise UploadError(f"HTTP error during {what} upload id={item_id}: {type(exc).__name__}: {exc}") from exc
+
+    @staticmethod
+    def _range_headers(name: str, size: int) -> dict:
+        return {
+            "Content-Disposition": f"attachment; filename={urllib.parse.quote(str(name))}",
+            "Content-Range": f"bytes 0-{size - 1}/{size}",
+            "Content-Length": str(size),
+        }
+
+    async def upload_voice(self, voice: Voice) -> VoiceAttachPayload:
+        info = await self._video_slot(UploadPayload(type=2, uploader_type=1).to_payload(), "voice")
+        duration = await voice.get_duration()
+        headers = {**self._range_headers(voice.name, await voice.size()), "Content-Type": "application/octet-stream"}
+        if ua := _app_user_agent(self.app):
+            headers["User-Agent"] = urllib.parse.quote(ua)
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        self.voice_upload_waiters[info.video_id] = future
+        try:
+            await self._post_media(info.url, headers, voice, "voice", info.video_id)
+            await _ready(future, READY_WAIT_SEC, "voice", info.video_id)
+        finally:
+            self.voice_upload_waiters.pop(info.video_id, None)
+        return VoiceAttachPayload(video_id=info.video_id, token=info.token, duration=duration, wave=b"\x00" * 80)
+
+    async def upload_video(self, video: Video | VideoNote) -> VideoAttachPayload | VideoNoteAttachPayload:
+        note = isinstance(video, VideoNote)
+        payload = UploadPayload(type=1, uploader_type=1) if note else UploadPayload()
+        what = "video note" if note else "video"
+        info = await self._video_slot(payload.to_payload(), what)
+        duration = await video.get_duration() if note else None
+        headers = self._range_headers(video.name, await video.size())
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        self.video_upload_waiters[info.video_id] = future
+        try:
+            result = await self._post_media(info.url, headers, video, what, info.video_id, want_json=note)
+            if note:
+                await _ready(future, READY_WAIT_SEC, what, info.video_id)
+                return VideoNoteAttachPayload(video_id=info.video_id, token=info.token,
+                                              thumbhash=_thumbhash(result), duration=duration)
+            if not await _ready(future, VIDEO_READY_SEC, what, info.video_id):
+                raise UploadError(f"Timed out waiting for video processing video_id={info.video_id}")
+        finally:
+            self.video_upload_waiters.pop(info.video_id, None)
+        return VideoAttachPayload(video_id=info.video_id, token=info.token)
+
+
+def _thumbhash(result: Any) -> bytes | None:
+    """The video note's thumbhash of the POST answer (base64, padding restored as PyMax does)."""
+    value = result.get("thumbhash") if isinstance(result, dict) else None
+    if not value:
+        return None
+    try:
+        return base64.b64decode(value + "=" * (-len(value) % 4))
+    except ValueError:
+        log.info("max upload: video note thumbhash is not base64, sent without it")
+        return None
 
 
 def photo_token(url: str, result: Any) -> str:

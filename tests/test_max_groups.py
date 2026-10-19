@@ -351,7 +351,7 @@ async def test_mcp_tools_by_platform_and_mode(rw):
     names = lambda platform, mode: {t.name for t in mcp_tools.visible(  # noqa: E731
         mcp_tools.Caller("account", rw.id, rw.env.alias, platform, mode, "http://test"))}
     max_rw, max_ro, tg_rw, tg_ro = names("max", "rw"), names("max", "ro"), names("telegram", "rw"), names("telegram", "ro")
-    assert (len(max_rw), len(max_ro), len(tg_rw), len(tg_ro)) == (46, 21, 46, 21)
+    assert (len(max_rw), len(max_ro), len(tg_rw), len(tg_ro)) == (51, 21, 46, 21)
     assert {"create_group", "delete_group", "get_chat_members", "leave_chat", "get_my_rights"} <= max_rw
     assert {"get_chat_members", "get_my_rights", "get_invite_link", "list_join_requests"} <= max_ro
     assert not {"create_group", "leave_chat"} & max_ro and not {"create_group", "get_invite_link"} & tg_rw

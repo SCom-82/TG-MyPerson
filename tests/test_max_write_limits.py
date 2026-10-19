@@ -121,15 +121,15 @@ async def test_parameters_without_max_counterpart_501(rw):
     resp = await _send(rw, schedule_date="2026-10-18T10:00:00Z")
     assert resp.status_code == 501 and resp.json()["parameter"] == "schedule_date", resp.text
     resp = await rw.http.post("/api/v1/messages/send-file", headers=rw.env.h(),
-                              data={"chat_id": str(DIALOG), "voice_note": "true"},
+                              data={"chat_id": str(DIALOG), "schedule_date": "2026-10-18T10:00:00Z"},
                               files={"file": ("v.ogg", b"OggS", "audio/ogg")})
-    assert resp.status_code == 501 and resp.json()["parameter"] == "voice_note", resp.text
+    assert resp.status_code == 501 and resp.json()["parameter"] == "schedule_date", resp.text
     resp = await rw.http.post("/api/v1/messages/edit", headers=rw.env.h(),
                               json={"chat_id": DIALOG, "message_id": 1, "text": "x", "scheduled": True})
     assert resp.status_code == 501 and resp.json()["parameter"] == "scheduled", resp.text
-    resp = await rw.http.post("/api/v1/messages/album", headers=rw.env.h(),
-                              data={"chat_id": str(DIALOG)}, files=[("files", ("a.png", b"1", "image/png"))] * 2)
-    assert resp.status_code == 501 and resp.json()["tool"] == "send_album", resp.text
+    resp = await rw.http.post("/api/v1/messages/poll", headers=rw.env.h(),
+                              json={"chat_id": DIALOG, "question": "q", "options": ["a", "b"], "quiz_correct_option": 1})
+    assert resp.status_code == 501 and resp.json()["parameter"] == "quiz_correct_option", resp.text
     assert rw.env.server.writes == [] and _events(rw.id) == []
 
 
@@ -617,12 +617,13 @@ async def test_mcp_send_and_limit_text(rw):
     assert "retry in 60 s" in text and '"retry_after": 60' in text
 
 
-MAX_501_TOOLS = {"send_album", "send_voice", "send_poll", "pin_message", "unpin_message", "join_chat",
-                 "resolve_chat", "archive_chat",
+MAX_501_TOOLS = {"join_chat", "resolve_chat", "archive_chat",
                  "list_scheduled", "cancel_scheduled", "send_scheduled_now", "block_user", "unblock_user"}
 MAX_WRITES = {"send_message", "send_photo", "send_file", "create_upload", "forward_message", "edit_message",
               "delete_message", "react_to_message", "mark_chat_read", "contact_by_phone", "send_to_person",
-              "leave_chat"}
+              "leave_chat",
+              # release 4 (plan 2026-10-19 Р4 Р-32): the TG tools served by MAX routes
+              "send_album", "send_voice", "send_poll", "pin_message", "unpin_message"}
 
 
 async def test_mcp_tools_depend_on_platform(rw):
@@ -632,7 +633,7 @@ async def test_mcp_tools_depend_on_platform(rw):
     assert not MAX_WRITES & max_ro and not MAX_501_TOOLS & max_ro and "list_messages" in max_ro
     tg_rw = names(_caller(rw, platform="telegram"))
     assert len(tg_rw) == 46 and MAX_501_TOOLS | MAX_WRITES <= tg_rw
-    assert len(max_rw) == 46 and "reachable_contacts" in max_rw  # reach (Р-17) + groups (Р3) on MAX
+    assert len(max_rw) == 51 and "reachable_contacts" in max_rw  # reach (Р-17) + groups (Р3) + Р4 on MAX
 
     # Every tool shown to a MAX account has its route on MAX (no 501 by construction).
     for name in max_rw:
@@ -670,3 +671,26 @@ async def test_session_stop_waits_for_cancelled_jobs(new_env):  # noqa: F811
     await asyncio.sleep(0)
     await session.stop()
     assert cleaned == [True]
+
+
+async def test_join_and_import_windows(rw):
+    """Р4 Р-39: chats_joined_per_day 5 and contacts_imported_per_day 50, own counters; 0 switches them off."""
+    status = await _status(rw)
+    assert (status["limits"]["chats_joined_per_day"], status["limits"]["contacts_imported_per_day"]) == (5, 50)
+    assert (status["counters"]["chats_joined_last_day"], status["counters"]["contacts_imported_last_day"]) == (0, 0)
+    await write_limits.reserve_bundle(rw.id, "join_chat", {write_limits.CHAT_JOIN: 1})
+    await write_limits.reserve_bundle(rw.id, "import_contacts", {write_limits.CONTACT_IMPORT: 48})
+    with pytest.raises(write_limits.WriteLimited) as exc:
+        await write_limits.reserve_bundle(rw.id, "import_contacts", {write_limits.CONTACT_IMPORT: 3})
+    assert exc.value.body["limit"] == "contacts_imported_per_day" and exc.value.body["remaining"] == 2
+    status = await _status(rw)
+    assert (status["counters"]["chats_joined_last_day"], status["counters"]["contacts_imported_last_day"]) == (1, 48)
+    assert status["remaining"]["chats_joined_per_day"] == 4
+
+    await _limits(rw, chats_joined_per_day=0)
+    with pytest.raises(write_limits.WriteLimited) as exc:
+        await write_limits.reserve_bundle(rw.id, "join_chat", {write_limits.CHAT_JOIN: 1})
+    assert exc.value.status == 429 and exc.value.retry_after is None and "chats joined" in exc.value.body["message"]
+    rw.clock.at(86_401)
+    assert (await _status(rw))["counters"]["contacts_imported_last_day"] == 0
+    assert write_limits.NO_LIMITS.chats_joined_per_day is None and write_limits.NO_LIMITS.contacts_imported_per_day is None

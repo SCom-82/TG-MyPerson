@@ -1021,6 +1021,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/42/f6/78e8c997cbdd6ff58096305472e308167e91ab9f5f901705a58a02bad783/maxapi_python-2.4.1-py3-none-any.whl", hash = "sha256:49c996cebebdcd490b8fc1424c84faad3c33d0b75eff4bb86cf1de9d968d76ea", size = 163480, upload-time = "2026-08-24T19:50:59.602Z" },
 ]
 
+[package.optional-dependencies]
+video = [
+    { name = "tinytag" },
+]
+
 [[package]]
 name = "mcp"
 version = "1.30.0"
@@ -2032,7 +2037,7 @@ dependencies = [
     { name = "asyncpg" },
     { name = "cryptg" },
     { name = "fastapi" },
-    { name = "maxapi-python" },
+    { name = "maxapi-python", extra = ["video"] },
     { name = "mcp" },
     { name = "psycopg2-binary" },
     { name = "pydantic-settings" },
@@ -2060,7 +2065,7 @@ requires-dist = [
     { name = "cryptg", specifier = ">=0.4" },
     { name = "fastapi", specifier = ">=0.115,<0.137" },
     { name = "httpx", marker = "extra == 'dev'" },
-    { name = "maxapi-python", specifier = "==2.4.1" },
+    { name = "maxapi-python", extras = ["video"], specifier = "==2.4.1" },
     { name = "mcp", specifier = ">=1.30,<2" },
     { name = "psycopg2-binary", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.7" },
@@ -2074,6 +2079,15 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34" },
 ]
 provides-extras = ["dev"]
+
+[[package]]
+name = "tinytag"
+version = "2.3.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/38/0f/fae085b7f19fe0c67b68e6d70098ac6cd046cc498f253f5ee56a3dd03bbc/tinytag-2.3.2.tar.gz", hash = "sha256:021d711cdbdbf840d3b67b976cb34dadc58d2fcfd490eb74ef9602b37b991414", size = 47353, upload-time = "2026-09-07T17:46:08.886Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6b/54/d378858d14e5c5c7b921cb9ffccf27be3d34f3d6d010c57404ddd634685d/tinytag-2.3.2-py3-none-any.whl", hash = "sha256:ebaf957915266b9c20414a10f8c5170a345aa039a794650d39d66e7d6b96199f", size = 37171, upload-time = "2026-09-07T17:46:07.434Z" },
+]
 
 [[package]]
 name = "typing-extensions"

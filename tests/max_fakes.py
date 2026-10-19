@@ -25,6 +25,8 @@ from pymax.types.domain.member import Member
 from pymax.types.domain import Message
 from pymax.types.domain.attachments.file import FileRequest
 from pymax.types.domain.attachments.video import VideoRequest
+from pymax.types.domain.attachments.poll import Poll, PollState
+from pymax.types.domain.message import ReactionInfo
 from pymax.types.domain.profile import Profile
 from pymax.types.domain.sync import SyncState
 
@@ -92,6 +94,16 @@ class FakeMaxServer:
         self.members_page = 2
         self.join_queue: dict[int, list[int]] = {}
         self.next_group_id = -71_000_000_000
+
+        # Release 4 (plan 2026-10-19 Р4): the attachment objects of every send (one list per
+        # send_message), pins, votes, reactions; unpin_ignored: MAX takes the unpin frame
+        # and keeps the message pinned (Р-33)
+        self.sent_attachments: list[list] = []
+        self.pinned: dict[int, int] = {}
+        self.unpin_ignored = False
+        self.votes: list[tuple] = []
+        self.reactions: dict[tuple[int, int], dict] | None = {}
+        self.next_poll_id = 7_000
 
         self.factory_calls: list[dict] = []
         self.clients: list["FakePyMaxClient"] = []
@@ -174,7 +186,7 @@ class FakePyMaxClient:
             config=SimpleNamespace(phone=phone, password_max_attempts=extra_config.password_max_attempts),
         )
         self.me = None
-        self._app = SimpleNamespace(invoke=self._admin_frame)  # raw frames (remove_group_admin)
+        self._app = SimpleNamespace(invoke=self._raw_frame)  # raw frames (remove_group_admin, unpin)
         self.chats: list = []
         self.contacts: list = []
         self.is_connected = False
@@ -289,7 +301,13 @@ class FakePyMaxClient:
             raise self.server.group_errors.pop(0)
 
     def _chat(self, chat_id: int) -> Chat:
-        return Chat.model_validate(self.server.groups[chat_id])
+        chat = dict(self.server.groups[chat_id])
+        pinned = self.server.pinned.get(chat_id)
+        if pinned is not None:
+            found = [m for m in self.server.history.get(chat_id, []) if int(m["id"]) == pinned]
+            chat["pinnedMessage"] = found[0] if found else {"id": pinned, "time": 0, "type": "USER", "text": "",
+                                                            "sender": self.server.user_id}
+        return Chat.model_validate(chat)
 
     def _group(self, chat_id: int) -> dict:
         if chat_id not in self.server.groups:
@@ -332,11 +350,13 @@ class FakePyMaxClient:
         g["admins"] = sorted({*g.get("admins", []), user_id})
         g.setdefault("adminParticipants", {})[str(user_id)] = {"permissions": mask}
 
-    async def _admin_frame(self, opcode, payload: dict):
+    async def _raw_frame(self, opcode, payload: dict):
         self._group_call("invoke", int(opcode), payload)
         g = self._group(payload["chatId"])
         if payload.get("type") == "ADMIN" and payload.get("operation") == "remove":
             g["admins"] = [a for a in g.get("admins", []) if a not in payload["userIds"]]
+        if int(opcode) == 55 and payload.get("pinMessageId") == 0 and not self.server.unpin_ignored:
+            self.server.pinned.pop(payload["chatId"], None)
         return None
 
     async def change_group_profile(self, chat_id: int, name=None, description=None, photo=None) -> None:
@@ -456,7 +476,53 @@ class FakePyMaxClient:
         kinds = [type(a).__name__ for a in attachments or []]
         names = [getattr(a, "name", None) or getattr(a, "file_name", None) for a in attachments or []]
         self._write("send_message", chat_id, text, reply_to, kinds, names)
-        return self._new_message(chat_id, text)
+        self.server.sent_attachments.append(list(attachments or []))
+        return self._new_message(chat_id, text, attaches=[self._attach(a, i) for i, a in enumerate(attachments or [])])
+
+    def _attach(self, a, i: int) -> dict:
+        """What MAX stores for a sent attachment (enough for media rows, the poll, the type)."""
+        n = self.server.next_message_id * 10 + i
+        kind = type(a).__name__
+        if isinstance(a, Poll):
+            self.server.next_poll_id += 1
+            return {"_type": "POLL", "pollId": self.server.next_poll_id, "version": 1, "title": a.title,
+                    "settings": int(a.settings),
+                    "answers": [{"text": x.text, "answerId": j + 1} for j, x in enumerate(a.answers)],
+                    "state": {"total": 0, "voterPreviewIds": [],
+                              "result": [{"answerId": j + 1, "voteCount": 0, "votes": [], "rate": 0, "options": 0}
+                                         for j in range(len(a.answers))]}}
+        if kind == "Photo":
+            return {"_type": "PHOTO", "baseUrl": "https://i.oneme.ru/p", "height": 1, "width": 1, "photoId": n,
+                    "photoToken": "pt"}
+        if kind in ("Video", "VideoNote"):
+            return {"_type": "VIDEO", "height": 1, "width": 1, "videoId": n, "thumbnail": "", "token": "vt",
+                    "videoType": 1 if kind == "VideoNote" else 0, "duration": getattr(a, "duration", None)}
+        if kind == "Voice":
+            return {"_type": "AUDIO", "audioId": n, "duration": a.duration, "url": "https://a.oneme.ru/v"}
+        return {"_type": "FILE", "fileId": n, "name": getattr(a, "name", "f"), "size": 1, "token": "ft"}
+
+    # -- release 4 (plan 2026-10-19 Р4) -----------------------------------------
+
+    async def pin_message(self, chat_id: int, message_id: int, notify_pin: bool) -> bool:
+        self._group_call("pin_message", chat_id, message_id, notify_pin)
+        self._group(chat_id)
+        self.server.pinned[chat_id] = int(message_id)
+        return True
+
+    async def vote_poll(self, chat_id: int, message_id: int, poll_id: int, answer_ids: list[int]):
+        self._write("vote_poll", chat_id, message_id, poll_id, list(answer_ids))
+        self.server.votes.append((chat_id, message_id, poll_id, list(answer_ids)))
+        voted = [a for v in self.server.votes if v[:3] == (chat_id, message_id, poll_id) for a in v[3]]
+        ids = sorted({*voted, 1, 2})
+        return PollState.model_validate({"total": len(voted), "voterPreviewIds": [], "result": [
+            {"answerId": a, "voteCount": voted.count(a), "votes": [], "rate": 0, "options": 0} for a in ids]})
+
+    async def get_reactions(self, chat_id: int, message_ids: list[int]):
+        self.calls.append("get_reactions")
+        if self.server.reactions is None:
+            return None
+        return {str(m): ReactionInfo.model_validate(self.server.reactions[(chat_id, m)])
+                for m in message_ids if (chat_id, m) in self.server.reactions}
 
     async def forward_message(self, chat_id: int, message_id, source_chat_id: int | None = None, *,
                               notify: bool = True) -> Message:

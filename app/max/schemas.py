@@ -6,7 +6,7 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, Field
 
-from app.max import normalize
+from app.max import frames, normalize
 from app.schemas import BackfillRequest, MediaResponse, MessageResponse
 
 log = logging.getLogger(__name__)
@@ -38,6 +38,27 @@ class MaxContactCard(BaseModel):
     forwarded: bool = False
 
 
+class MaxPollAnswer(BaseModel):
+    answer_id: int | None = None
+    text: str
+    vote_count: int = 0
+
+
+class MaxPoll(BaseModel):
+    """A poll of the message (plan Р4 Р-44): poll_id and answer_id are what vote_poll takes;
+    the counts are as of the stored copy, vote_poll answers the fresh ones."""
+
+    poll_id: int
+    title: str
+    answers: list[MaxPollAnswer]
+    total: int = 0
+    anonymous: bool = False
+    multiselect: bool = False
+    revote: bool = False
+    closed: bool = False
+    quiz: bool = False
+
+
 def _parsed(raw: dict | None) -> Any:
     if not raw:
         return None
@@ -56,12 +77,13 @@ def _name(user: Any) -> str | None:
 
 class MaxMessageResponse(MessageResponse):
     """MessageResponse + deleted_at (ADR §2.G), always present in MAX responses; from_user filled;
-    forward and contacts read from the stored raw — old rows too, without a repair (plan Р-8, Р-9)."""
+    forward, contacts and poll read from the stored raw — old rows too, without a repair (plan Р-8, Р-9, Р4 Р-44)."""
 
     deleted_at: datetime | None = None
     forward: MaxForward | None = None
     contacts: list[MaxContactCard] = Field(default_factory=list)
     media: list[MaxMediaResponse] = Field(default_factory=list)
+    poll: MaxPoll | None = None
     always_deleted_at: ClassVar[bool] = True
     fill_from_user: ClassVar[bool] = True
     media_cls: ClassVar[type[MediaResponse]] = MaxMediaResponse
@@ -97,6 +119,9 @@ class MaxMessageResponse(MessageResponse):
         cards = normalize.contact_cards(msg, lambda uid: getattr(people.get(uid), "phone", None))
         if cards:
             out["contacts"] = [MaxContactCard(**c) for c in cards]
+        poll = frames.find_poll(msg)
+        if poll is not None:
+            out["poll"] = MaxPoll(**frames.poll_view(poll))
         return out
 
 

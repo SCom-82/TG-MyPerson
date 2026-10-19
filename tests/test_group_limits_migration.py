@@ -32,7 +32,7 @@ def account():
 
 
 def test_014_roundtrip(account):
-    assert _revision() == _HEAD == "014"
+    assert _revision() == _HEAD
     for _ in range(2):
         _alembic("downgrade", "013")
         assert _defaults() == {}

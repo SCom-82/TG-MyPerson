@@ -170,10 +170,11 @@ async def test_max_tools_not_yet_implemented_501(client, accounts, method, path,
 
 @pytest.mark.asyncio
 async def test_max_rw_write_passes_authz_then_501(client, accounts):
-    """A MAX write MAX has no counterpart for: authz lets it through, the route answers 501."""
+    """A MAX write parameter MAX has no counterpart for (a quiz, plan Р4 Р-46): authz lets it
+    through, the route answers 501."""
     alias = accounts["max_rw"]["alias"]
     resp = await client.post("/api/v1/messages/poll", headers=_h(alias),
-                             json={"chat_id": 1, "question": "q", "options": ["a", "b"]})
+                             json={"chat_id": 1, "question": "q", "options": ["a", "b"], "quiz_correct_option": 0})
     assert resp.status_code == 501
     assert resp.json()["tool"] == "send_poll"
     assert await _audit_rows(alias) == [("send_poll", True, "error", "HTTP 501,legacy_key")]  # shared key (D10)
@@ -500,7 +501,9 @@ def test_catalog_messenger_write_category():
     assert tc.WRITE_TG_TOOLS is tc.WRITE_MESSENGER_TOOLS
     assert "send_message" in tc.WRITE_MESSENGER_TOOLS
     assert {"auth_qr_start", "auth_qr_status"} <= tc.MANAGE_SESSION_TOOLS
-    assert tc.MAX_ONLY_TOOLS == {"auth_qr_start", "auth_qr_status", *tc.GROUP_WRITE_TOOLS, *tc.GROUP_READ_TOOLS}
+    assert tc.MAX_ONLY_TOOLS == {"auth_qr_start", "auth_qr_status", *tc.GROUP_WRITE_TOOLS, *tc.GROUP_READ_TOOLS,
+                                 *tc.MAX_R4_WRITE_TOOLS, *tc.MAX_R4_READ_TOOLS}
     assert set(tc.GROUP_WRITE_TOOLS) <= tc.WRITE_MESSENGER_TOOLS and set(tc.GROUP_READ_TOOLS) <= tc.READ_ONLY_TOOLS
+    assert set(tc.MAX_R4_WRITE_TOOLS) <= tc.WRITE_MESSENGER_TOOLS and set(tc.MAX_R4_READ_TOOLS) <= tc.READ_ONLY_TOOLS
     assert tc.tool_is_write("auth_qr_start") is False
     assert tc.tool_is_write("send_message") is True
