@@ -416,8 +416,8 @@ MAX-only (★) для TG-алиаса → `501`. Состав на релизе 
 | Текст, фото, файл, пересылка, правка, удаление, реакция, «прочитано» | `send_message`, `send_photo`, `send_file`, `forward_message`, `edit_message`, `delete_message`, `react_to_message`, `mark_chat_read` | `send` / `actions_per_hour` |
 | Видео (`.mp4/.mov/.m4v` в `send_file`; `force_document` — файлом), голос (`send_voice`, `send_file voice_note`), ★ кружок `send_video_note` | | `send`; длительность читается до слота (нечитаемый файл → `422`) |
 | Альбом 2–10 файлов — одно сообщение MAX | `send_album` | `send` × 1 |
-| Опрос (викторина → `501`), ★ голос в опросе `vote_poll`; опрос в ответе сообщения — поле `poll` с `poll_id` и `answer_id` | `send_poll`, `vote_poll` | `send` / `actions_per_hour` |
-| Закреп и открепление (сверка по свежему чату; «всё ещё закреплено» → `502`) | `pin_message`, `unpin_message` | `actions_per_hour` |
+| Опрос: у MAX по умолчанию не анонимный, явный `is_anonymous=true` → `501` (MAX отвечает «Invalid poll settings» и рвёт соединение), викторина → `501`; ★ голос в опросе `vote_poll`; опрос в ответе сообщения — поле `poll` с `poll_id` и `answer_id`, `get_message` перечитывает открытый опрос из MAX (свежие счётчики, и у ro) | `send_poll`, `vote_poll` | `send` / `actions_per_hour` |
+| Закреп и открепление (открепляется только закреплённое сообщение; сверка по свежему чату; «всё ещё закреплено» → `502`); `get_chat` отдаёт `pinned_message` | `pin_message`, `unpin_message` | `actions_per_hour` |
 | ★ Реакции сообщения (счётчики, своя реакция; кто поставил — MAX не отдаёт) | `get_reactions` | чтение |
 | Вступление и просмотр по ссылке: `https://max.ru/join/<код>`, `join/<код>`, `https://max.ru/<имя>`, `@имя`; `already_member` может прийти из сохранённого чата (поле `note`) | `join_chat`, `resolve_chat` | `chats_joined_per_day` (5) |
 | Группы и каналы: создать (только группу), участники, админы (у канала `post_message`/`edit_message`, по умолчанию 1792), профиль, настройки, ссылка, заявки, удалить (только группу), выйти | `create_group`, `add_group_members`, …, `leave_chat` | `groups_created_per_day` (3), `group_invites_per_day` (30, приглашения в каналы там же) |
@@ -427,6 +427,10 @@ MAX-only (★) для TG-алиаса → `501`. Состав на релизе 
 
 Выключить без рестарта: `PATCH /api/v1/accounts/{id}/write-limits` с `{"chats_joined_per_day":0}`,
 `{"contacts_imported_per_day":0}`, `{"group_invites_per_day":0}` или `{"enabled":false}`.
+
+**Голос и кружок** уходят сразу после загрузки: сигнала готовности (`NOTIF_ATTACH`) MAX для них не шлёт
+(живая проверка 19.10), на `attachment.not.ready` — ожидание сигнала до 8 с и повтор. Пришедшие
+`NOTIF_ATTACH` пишутся в лог (`max[…]: NOTIF_ATTACH {…Id}`).
 
 **Не проверено живьём на момент релиза 4** (сверено по коду PyMax и сторонним описаниям протокола; после
 живой проверки вычеркнуть): загрузка голоса, видео и кружка через наш прокси и `wave` голоса на web-транспорте;

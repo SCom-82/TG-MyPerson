@@ -21,6 +21,7 @@ from pymax.files import File, Photo, Video, VideoNote, Voice
 from pymax.protocol import Opcode
 
 from app.max import media
+from app.max.session import NumericForwardMessages
 from tests.max_env import ADMIN_KEY, API_KEY, aliases, env  # noqa: F401 — pytest fixtures
 from tests.test_max_ingest import DIALOG
 from tests.test_max_uploads import PNG, Socks5
@@ -94,7 +95,7 @@ class StubApp:
         uploads = UploadService(self)
         media.install_uploads(SimpleNamespace(api=SimpleNamespace(uploads=uploads)))
         self.api.uploads = uploads
-        self.api.messages = MessageService(self)
+        self.api.messages = NumericForwardMessages(self)  # the session's class (not-ready handling, Р4.1)
 
     def sent(self, opcode: Opcode) -> list[dict]:
         return [p for o, p in self.frames if o == int(opcode)]
@@ -152,9 +153,13 @@ def _signal(app: StubApp, kind_wanted: str):
     return on_post
 
 
-async def test_voice_frames_through_socks5_and_an_early_ready_signal(stub):
-    stub.host.on_post = _signal(stub, "voice")
+async def test_voice_frames_through_socks5_and_no_wait_for_a_signal(stub):
+    """Р4.1: MAX sends no ready signal for a voice (live 19.10: 30 s waited every time),
+    so the message goes right after the POST."""
+    loop = asyncio.get_running_loop()
+    started = loop.time()
     await stub.api.messages.send_message(5, None, attachments=[media.upload_attachment(OGG, "v.ogg", voice=True)])
+    assert loop.time() - started < 2
     assert stub.sent(Opcode.VIDEO_UPLOAD) == [{"count": 1, "type": 2, "uploaderType": 1, "profile": False}]
     [(kind, size, headers)] = stub.host.posts
     assert (kind, size, headers["Content-Range"]) == ("voice", len(OGG), f"bytes 0-{len(OGG) - 1}/{len(OGG)}")
@@ -163,21 +168,32 @@ async def test_voice_frames_through_socks5_and_an_early_ready_signal(stub):
     [send] = stub.sent(Opcode.MSG_SEND)
     assert send["message"]["attaches"] == [{"_type": "AUDIO", "token": "tok501", "duration": 1500,
                                             "wave": b"\x00" * 80}]
-    assert stub.api.uploads.voice_upload_waiters == {}
+    assert stub.api.uploads.voice_upload_waiters == {} and stub.api.uploads.video_upload_waiters == {}
 
 
-async def test_voice_without_a_ready_signal_is_sent_anyway(stub, monkeypatch):
-    monkeypatch.setattr(media, "READY_WAIT_SEC", 0.05)
-    await stub.api.messages.send_message(5, None, attachments=[Voice(raw=OGG, name="v.ogg", duration=1500)])
-    assert len(stub.sent(Opcode.MSG_SEND)) == 1
-
-
-async def test_attachment_not_ready_is_waited_out_by_pymax(stub, monkeypatch):
-    monkeypatch.setattr(media, "READY_WAIT_SEC", 0.05)
+@pytest.mark.parametrize("key", ["audio_id", "video_id"])
+async def test_attachment_not_ready_waits_for_a_signal_under_any_key(stub, key):
+    """Р4.1: a ready signal for a voice may come as audioId or videoId (PyMax picks the event
+    by the first id key present); either one ends the wait, then the message goes again."""
     stub.not_ready = 1
-    stub.on_not_ready = lambda: stub.api.uploads.voice_upload_waiters[501].set_result(SimpleNamespace(audio_id=501))
+    waiters = "voice_upload_waiters" if key == "audio_id" else "video_upload_waiters"
+    stub.on_not_ready = lambda: getattr(stub.api.uploads, waiters)[501].set_result(SimpleNamespace(**{key: 501}))
+    loop = asyncio.get_running_loop()
+    started = loop.time()
     await stub.api.messages.send_message(5, None, attachments=[Voice(raw=OGG, name="v.ogg", duration=1500)])
-    assert len(stub.sent(Opcode.MSG_SEND)) == 2  # refused once, sent after the signal
+    assert len(stub.sent(Opcode.MSG_SEND)) == 2 and loop.time() - started < 2  # refused once, sent after the signal
+    assert stub.api.uploads.voice_upload_waiters == {} and stub.api.uploads.video_upload_waiters == {}
+
+
+async def test_attachment_not_ready_without_a_signal_retries_after_a_short_wait(stub, monkeypatch):
+    monkeypatch.setattr(media, "NOT_READY_WAIT_SEC", 0.05)
+    stub.not_ready = 1
+    note = media.upload_attachment(MP4, "note.mp4", video_note=True, duration_ms=4000)
+    await stub.api.messages.send_message(5, None, attachments=[note])
+    assert len(stub.sent(Opcode.MSG_SEND)) == 2
+    stub.not_ready = 2  # still not ready on the second try: MAX's error, nothing sent
+    with pytest.raises(ApiError, match="attachment.not.ready"):
+        await stub.api.messages.send_message(5, None, attachments=[note])
 
 
 async def test_video_waits_for_video_ready(stub, monkeypatch):
@@ -194,8 +210,7 @@ async def test_video_waits_for_video_ready(stub, monkeypatch):
     assert stub.api.uploads.video_upload_waiters == {}
 
 
-async def test_video_note_frames_thumbhash_and_duration(stub, monkeypatch):
-    monkeypatch.setattr(media, "READY_WAIT_SEC", 0.05)
+async def test_video_note_frames_thumbhash_and_duration(stub):
     note = media.upload_attachment(MP4, "note.mp4", video_note=True, duration_ms=4000)  # the form's duration wins
     await stub.api.messages.send_message(5, None, attachments=[note])
     assert stub.sent(Opcode.VIDEO_UPLOAD) == [{"count": 1, "type": 1, "uploaderType": 1, "profile": False}]
@@ -304,3 +319,12 @@ async def test_upload_error_is_502_and_gives_the_slot_back(rw):
     resp = await _file(rw, "send-file", "c.mp4", MP4)
     assert resp.status_code == 502 and "UploadError" in resp.text
     assert _events(rw.id) == []
+
+
+async def test_notif_attach_is_logged_by_its_ids(rw, caplog):
+    """Р4.1: which ready signal MAX sends for an upload, ids only (no tokens)."""
+    import logging
+
+    caplog.set_level(logging.INFO, logger="app.max.ingest")
+    await rw.client.push({"opcode": 136, "cmd": 0, "payload": {"audioId": 77, "token": "secret"}})
+    assert "NOTIF_ATTACH {'audioId': 77}" in caplog.text and "secret" not in caplog.text

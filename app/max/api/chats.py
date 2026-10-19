@@ -20,6 +20,7 @@ from app.api import data_reads
 from app.max import frames, groups, normalize, repo
 from app.max.api import groups as mx_groups
 from app.max.api.common import authorized_or_error, call_max, call_max_read
+from app.max.schemas import MaxChatResponse
 from app.repo import chats as chats_repo
 from app.services.tg_store import new_mode, shadow
 from app.storage import account_db
@@ -166,10 +167,15 @@ async def list_chats(
     )
 
 
-@router.get("/{chat_id}", response_model=ChatResponse, name="get_chat_detail")
+@router.get("/{chat_id}", response_model=MaxChatResponse, name="get_chat_detail")
 async def get_chat_detail(chat_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    """+ pinned_message (Р4.1): from the stored chat, kept fresh by pin / unpin and chat frames."""
     if new_mode():
-        return await data_reads.get_chat(request, chat_id)
+        chat = await data_reads.get_chat(request, chat_id)
+        account_id = getattr(request.state, "account_id", None)
+        async with account_db(account_id) as adb:
+            row = await chats_repo.get_chat(adb, account_id, chat_id)
+        return MaxChatResponse(**chat.model_dump(), pinned_message=MaxChatResponse.pinned(row.raw if row else None))
     chat = await repo.get_chat(db, chat_id)
     if chat is None:
         raise HTTPException(status_code=404, detail="Chat not found")

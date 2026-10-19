@@ -27,6 +27,7 @@ OP_MESSAGE = int(Opcode.NOTIF_MESSAGE)
 OP_EDIT = int(Opcode.MSG_EDIT)
 OP_DELETE = int(Opcode.NOTIF_MSG_DELETE)
 OP_CHAT = int(Opcode.NOTIF_CHAT)
+OP_ATTACH = int(Opcode.NOTIF_ATTACH)  # upload ready signals: only logged (Р4.1)
 JOURNALED_OPCODES = frozenset({OP_MESSAGE, OP_EDIT, OP_DELETE, OP_CHAT})
 SERVER_PUSH = int(Command.REQUEST)  # server-initiated frames carry cmd=REQUEST
 

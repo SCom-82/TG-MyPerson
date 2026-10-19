@@ -222,3 +222,61 @@ async def test_unpin_only_the_pinned_message(rw):
     assert [c for c in rw.env.server.group_calls if c[0] == "invoke"] == []
     assert [e[1] for e in _events(rw.id) if e[0] == "action"] == ["pin_message"]
     assert (await _post(rw, f"/messages/{gid}/{x}/unpin")).json()["status"] == "unpinned"
+
+
+# ---------------------------------------------------------------------------
+# Р4.1 (live check 19.10)
+# ---------------------------------------------------------------------------
+
+async def test_poll_is_not_anonymous_on_max_unless_asked_and_then_501(rw):
+    """MAX refused ANONYMOUS (settings 1) with "Invalid poll settings" and dropped the socket."""
+    await _limits(rw, **OFF)
+    resp = await rw.http.post("/api/v1/messages/poll", headers=rw.env.h(),
+                              json={"chat_id": DIALOG, "question": "q", "options": ["a", "b"]})
+    assert resp.status_code == 200, resp.text
+    [[sent]] = rw.env.server.sent_attachments
+    assert int(sent.settings) == 0
+    resp = await _poll(rw, is_anonymous=True)
+    assert resp.status_code == 501 and resp.json()["parameter"] == "is_anonymous", resp.text
+    assert len(rw.env.server.sent_attachments) == 1 and [e[0] for e in _events(rw.id)] == ["send"]
+
+
+async def test_get_message_refreshes_the_poll_counts(rw):
+    """A vote elsewhere (another account, the app) does not come as a frame: get_message re-reads."""
+    await _limits(rw, **OFF)
+    mid = (await _poll(rw)).json()["message_id"]
+    stored = (await rw.http.get(f"/api/v1/messages/{DIALOG}/{mid}", headers=rw.env.h())).json()["poll"]
+    await rw.client.vote_poll(DIALOG, mid, stored["poll_id"], [2])  # someone votes in MAX
+    poll = (await rw.http.get(f"/api/v1/messages/{DIALOG}/{mid}", headers=rw.env.h())).json()["poll"]
+    assert poll["total"] == 1 and [a["vote_count"] for a in poll["answers"]] == [0, 1]
+    [listed] = (await rw.http.get(f"/api/v1/messages?chat_id={DIALOG}", headers=rw.env.h())).json()["items"]
+    assert listed["poll"]["total"] == 1  # the stored copy is updated too
+
+    async def down(chat_id, message_id):
+        raise TimeoutError("no answer")
+
+    rw.client.get_message = down
+    poll = (await rw.http.get(f"/api/v1/messages/{DIALOG}/{mid}", headers=rw.env.h())).json()["poll"]
+    assert poll["total"] == 1  # the stored copy, not an error
+
+
+async def test_vote_updates_the_stored_poll(rw):
+    await _limits(rw, **OFF)
+    mid = (await _poll(rw)).json()["message_id"]
+    assert (await _vote(rw, DIALOG, mid, answer_ids=[1])).status_code == 200
+    [listed] = (await rw.http.get(f"/api/v1/messages?chat_id={DIALOG}", headers=rw.env.h())).json()["items"]
+    assert listed["poll"]["total"] == 1 and listed["poll"]["answers"][0]["vote_count"] == 1
+
+
+async def test_get_chat_shows_the_pinned_message(rw):
+    await _limits(rw, **OFF)
+    gid = await _create(rw, user_ids=())
+    mid = (await rw.http.post("/api/v1/messages", headers=rw.env.h(), json={"chat_id": gid, "text": "важно"})).json()[
+        "message_id"]
+    chat = (await rw.http.get(f"/api/v1/chats/{gid}", headers=rw.env.h())).json()
+    assert chat["pinned_message"] is None
+    await _post(rw, f"/messages/{gid}/{mid}/pin")
+    chat = (await rw.http.get(f"/api/v1/chats/{gid}", headers=rw.env.h())).json()
+    assert chat["pinned_message"]["message_id"] == mid and chat["pinned_message"]["text"] == "важно"
+    await _post(rw, f"/messages/{gid}/{mid}/unpin")
+    assert (await rw.http.get(f"/api/v1/chats/{gid}", headers=rw.env.h())).json()["pinned_message"] is None

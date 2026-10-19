@@ -317,9 +317,12 @@ class RangeNotSatisfiable(Exception):
 # ---------------------------------------------------------------------------
 
 VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".m4v"})
-# Voice and video note: MAX's ready signal is awaited this long after the POST,
-# then the message goes anyway (PyMax's send_message waits out attachment.not.ready).
-READY_WAIT_SEC = 30
+# Voice and video note: MAX sends no ready signal for them (live check 19.10: every
+# voice / video note waited the whole 30 s, a video's VIDEO_READY came in 4 s), so the
+# message goes right after the POST. If MAX answers attachment.not.ready, the signal
+# is awaited this long under any id key, then the message goes once more (Р4.1,
+# session.NumericForwardMessages._process_attachment_error).
+NOT_READY_WAIT_SEC = 8
 # Video: no ready signal in this time → UploadError (PyMax waits the same).
 VIDEO_READY_SEC = 60
 
@@ -370,6 +373,19 @@ def _app_user_agent(app: Any) -> str | None:
         return None
 
 
+async def wait_ready_any(uploads: Any, item_id: int, seconds: float) -> bool:
+    """A ready signal for item_id as a voice OR a video one (PyMax resolves NOTIF_ATTACH by
+    the first of fileId, videoId, audioId present), at most `seconds`."""
+    future: asyncio.Future = asyncio.get_running_loop().create_future()
+    uploads.voice_upload_waiters[item_id] = future
+    uploads.video_upload_waiters[item_id] = future
+    try:
+        return await _ready(future, seconds, "attachment", item_id)
+    finally:
+        uploads.voice_upload_waiters.pop(item_id, None)
+        uploads.video_upload_waiters.pop(item_id, None)
+
+
 async def _ready(future: asyncio.Future, seconds: float, what: str, item_id: int) -> bool:
     try:
         await asyncio.wait_for(asyncio.shield(future), seconds)
@@ -391,7 +407,7 @@ class ProxiedUploads(UploadService):
       longer sends (upstream issue #108; dev/2.5.0 reads `photos`, PR #107
       takes the only entry). Here: photoIds, then photos, then the only entry.
     Voice, video and video notes (plan Р4 Р-34) go the same way: PyMax's frames,
-    headers and attach payloads, the POST through http_session(). The ready
+    headers and attach payloads, the POST through http_session(). A video's ready
     waiter is registered BEFORE the POST: MAX may signal before the body ends.
     """
 
@@ -497,13 +513,7 @@ class ProxiedUploads(UploadService):
         headers = {**self._range_headers(voice.name, await voice.size()), "Content-Type": "application/octet-stream"}
         if ua := _app_user_agent(self.app):
             headers["User-Agent"] = urllib.parse.quote(ua)
-        future: asyncio.Future = asyncio.get_running_loop().create_future()
-        self.voice_upload_waiters[info.video_id] = future
-        try:
-            await self._post_media(info.url, headers, voice, "voice", info.video_id)
-            await _ready(future, READY_WAIT_SEC, "voice", info.video_id)
-        finally:
-            self.voice_upload_waiters.pop(info.video_id, None)
+        await self._post_media(info.url, headers, voice, "voice", info.video_id)
         return VoiceAttachPayload(video_id=info.video_id, token=info.token, duration=duration, wave=b"\x00" * 80)
 
     async def upload_video(self, video: Video | VideoNote) -> VideoAttachPayload | VideoNoteAttachPayload:
@@ -513,14 +523,14 @@ class ProxiedUploads(UploadService):
         info = await self._video_slot(payload.to_payload(), what)
         duration = await video.get_duration() if note else None
         headers = self._range_headers(video.name, await video.size())
+        if note:  # no ready signal for a video note (see NOT_READY_WAIT_SEC)
+            result = await self._post_media(info.url, headers, video, what, info.video_id, want_json=True)
+            return VideoNoteAttachPayload(video_id=info.video_id, token=info.token,
+                                          thumbhash=_thumbhash(result), duration=duration)
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         self.video_upload_waiters[info.video_id] = future
         try:
-            result = await self._post_media(info.url, headers, video, what, info.video_id, want_json=note)
-            if note:
-                await _ready(future, READY_WAIT_SEC, what, info.video_id)
-                return VideoNoteAttachPayload(video_id=info.video_id, token=info.token,
-                                              thumbhash=_thumbhash(result), duration=duration)
+            await self._post_media(info.url, headers, video, what, info.video_id)
             if not await _ready(future, VIDEO_READY_SEC, what, info.video_id):
                 raise UploadError(f"Timed out waiting for video processing video_id={info.video_id}")
         finally:

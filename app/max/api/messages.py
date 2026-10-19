@@ -13,6 +13,7 @@ reactions of a message. A file is read, classified and its duration taken
 BEFORE the write slot: a bad file costs no limit (Р-35).
 """
 
+import asyncio
 import logging
 import re
 import urllib.parse
@@ -94,14 +95,40 @@ async def list_messages(
     )
 
 
+POLL_REFRESH_SEC = 10
+
+
 @router.get("/{chat_id}/{message_id}", response_model=MaxMessageResponse, name="get_single_message")
 async def get_single_message(chat_id: int, message_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    """A message with an open poll is re-read from MAX first (Р4.1): the stored copy holds the
+    counts as of its arrival, votes do not come as frames. A failed re-read answers the stored copy."""
     if new_mode():
-        return await data_reads.get_message(request, chat_id, message_id, MaxMessageResponse)
+        found = await data_reads.get_message(request, chat_id, message_id, MaxMessageResponse)
+        if found.poll is not None and not found.poll.closed and await _refresh_poll(request, chat_id, message_id):
+            found = await data_reads.get_message(request, chat_id, message_id, MaxMessageResponse)
+        return found
     msg = await repo.get_message(db, chat_id, message_id)
     if msg is None:
         raise HTTPException(status_code=404, detail="Message not found")
     return MaxMessageResponse.model_validate(msg)
+
+
+async def _refresh_poll(request: Request, chat_id: int, message_id: int, session=None) -> bool:
+    """The message fresh from MAX (a read: ro too), stored over the old copy; False on any failure."""
+    if session is None:
+        session = await authorized_or_error(request)
+        if isinstance(session, JSONResponse):
+            return False
+    try:
+        fresh = await asyncio.wait_for(session.client.get_message(chat_id, message_id), POLL_REFRESH_SEC)
+    except Exception as exc:  # noqa: BLE001
+        log.info("max[%s]: poll %s/%s not re-read: %s: %s", session.alias, chat_id, message_id,
+                 type(exc).__name__, exc)
+        return False
+    if fresh is None or frames.find_poll(fresh) is None:
+        return False
+    await store_sent(session, fresh, chat_id)
+    return True
 
 
 def _content_disposition(name: str) -> str:
@@ -328,15 +355,23 @@ async def send_album(
 
 @router.post("/poll", name="send_poll")
 async def send_poll(req: SendPollRequest, request: Request):
-    """A poll (Р-46): is_anonymous / allows_multiple → MAX's poll flags. A quiz → 501."""
+    """A poll (Р-46): allows_multiple → MAX's MULTISELECT flag. A quiz → 501.
+
+    Not anonymous on MAX unless asked (Р4.1): the live MAX refused ANONYMOUS (settings 1)
+    with "Invalid poll settings" and dropped the connection (19.10). The flag MAX wants
+    is unknown, so is_anonymous=true sent explicitly → 501, no frame; the TG default
+    (true) of the shared schema does not apply here."""
     if req.quiz_correct_option is not None:
         return param_not_supported(request, "send_poll", "quiz_correct_option")
+    anonymous = req.is_anonymous if "is_anonymous" in req.model_fields_set else False
+    if anonymous:
+        return param_not_supported(request, "send_poll", "is_anonymous")
     if req.schedule_date is not None:
         return param_not_supported(request, "send_poll", "schedule_date")
     session = await authorized_or_error(request)
     if isinstance(session, JSONResponse):
         return session
-    poll = frames.poll_attach(req.question, req.options, anonymous=req.is_anonymous, multiple=req.allows_multiple)
+    poll = frames.poll_attach(req.question, req.options, anonymous=False, multiple=req.allows_multiple)
     msg = await _send_attachments(request, session, "send_poll", req.chat_id, None, req.reply_to_message_id, [poll])
     out = _sent(msg, req.chat_id)
     sent = frames.find_poll(msg)
@@ -502,6 +537,7 @@ async def vote_poll(chat_id: int, message_id: int, req: VoteRequest, request: Re
         log.warning("max[%s]: vote answer not understood: %s: %s", session.alias, type(exc).__name__, exc)
         raise HTTPException(status_code=502, detail=f"MAX took the vote, its answer was not understood "
                                                     f"({type(exc).__name__}); check get_message before retrying")
+    await _refresh_poll(request, chat_id, message_id, session)  # the stored copy shows the vote too
     return {"chat_id": chat_id, "message_id": message_id, "poll_id": view["poll_id"], "answer_ids": answers,
             "state": frames.poll_state(state)}
 

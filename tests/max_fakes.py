@@ -599,8 +599,14 @@ class FakePyMaxClient:
         self.server.votes.append((chat_id, message_id, poll_id, list(answer_ids)))
         voted = [a for v in self.server.votes if v[:3] == (chat_id, message_id, poll_id) for a in v[3]]
         ids = sorted({*voted, 1, 2})
-        return PollState.model_validate({"total": len(voted), "voterPreviewIds": [], "result": [
-            {"answerId": a, "voteCount": voted.count(a), "votes": [], "rate": 0, "options": 0} for a in ids]})
+        state = {"total": len(voted), "voterPreviewIds": [], "result": [
+            {"answerId": a, "voteCount": voted.count(a), "votes": [], "rate": 0, "options": 0} for a in ids]}
+        for m in self.server.history.get(chat_id, []):  # MAX's copy of the message shows the votes
+            if int(m["id"]) == int(message_id):
+                for att in m.get("attaches") or []:
+                    if att.get("_type") == "POLL":
+                        att["state"] = state
+        return PollState.model_validate(state)
 
     async def get_reactions(self, chat_id: int, message_ids: list[int]):
         self.calls.append("get_reactions")

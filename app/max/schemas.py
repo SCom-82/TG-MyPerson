@@ -7,7 +7,7 @@ from typing import Any, ClassVar
 from pydantic import BaseModel, Field
 
 from app.max import frames, normalize
-from app.schemas import BackfillRequest, MediaResponse, MessageResponse
+from app.schemas import BackfillRequest, ChatResponse, MediaResponse, MessageResponse
 
 log = logging.getLogger(__name__)
 
@@ -123,6 +123,27 @@ class MaxMessageResponse(MessageResponse):
         if poll is not None:
             out["poll"] = MaxPoll(**frames.poll_view(poll))
         return out
+
+
+class MaxPinned(BaseModel):
+    message_id: int
+    from_user_id: int | None = None
+    text: str | None = None
+    date: datetime | None = None
+
+
+class MaxChatResponse(ChatResponse):
+    """ChatResponse + the pinned message as the stored chat has it (raw.pinnedMessage, Р4.1)."""
+
+    pinned_message: MaxPinned | None = None
+
+    @staticmethod
+    def pinned(raw: dict | None) -> MaxPinned | None:
+        p = (raw or {}).get("pinnedMessage")
+        if not isinstance(p, dict) or p.get("id") is None:
+            return None
+        return MaxPinned(message_id=int(p["id"]), from_user_id=p.get("sender"), text=p.get("text") or None,
+                         date=normalize.ms_to_dt(p.get("time")))
 
 
 class MaxBackfillRequest(BackfillRequest):

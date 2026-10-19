@@ -76,6 +76,11 @@ class MaxIngest:
     # -- frames --------------------------------------------------------------
 
     async def on_frame(self, opcode: int, cmd: int, payload: dict | None) -> None:
+        if opcode == normalize.OP_ATTACH:
+            # Which upload MAX says is ready, and under which key (Р4.1: voice and video
+            # notes got none on 19.10) — ids only, no tokens.
+            log.info("max[%s]: NOTIF_ATTACH %s", self.session.alias,
+                     {k: v for k, v in (payload or {}).items() if k.endswith("Id") or k == "type"})
         if cmd != normalize.SERVER_PUSH or opcode not in normalize.JOURNALED_OPCODES:
             return
         if new_mode() and not getattr(self.session, "identity_ok", False):

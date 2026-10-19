@@ -37,6 +37,7 @@ from pymax.api.binding import bind_api_model
 from pymax.api.messages.payloads import ForwardLink, ForwardMessagePayload, ForwardMessagePayloadMessage
 from pymax.api.messages.service import MessageService
 from pymax.api.response import require_payload_model
+from pymax.api.uploads.payloads import VideoNoteAttachPayload, VoiceAttachPayload
 from pymax.protocol import Opcode
 from pymax.types.domain import Message
 from pymax.versions.catalog import VersionCatalog
@@ -121,6 +122,16 @@ class NumericForwardMessages(MessageService):
         payload = forward_payload(chat_id, message_id, source_chat_id, cid=-self._next_cid(), notify=notify)
         response = await self.app.invoke(Opcode.MSG_SEND, payload)
         return bind_api_model(self.app, require_payload_model(response, Message))
+
+    async def _process_attachment_error(self, attaches: list) -> None:
+        """attachment.not.ready for a voice / video note (Р4.1): MAX sends them no ready
+        signal we know of, so PyMax's wait (60 s for one signal kind, then UploadError)
+        would fail a message MAX takes a moment later. Here: a signal under any id key or
+        media.NOT_READY_WAIT_SEC, then PyMax sends once more. Anything else: PyMax's."""
+        timed = [a for a in attaches if isinstance(a, (VoiceAttachPayload, VideoNoteAttachPayload))]
+        if not timed:
+            return await super()._process_attachment_error(attaches)
+        await media.wait_ready_any(self.app.api.uploads, timed[0].video_id, media.NOT_READY_WAIT_SEC)
 
 
 def forward_payload(chat_id: int, message_id: int | str, source_chat_id: int, *, cid: int, notify: bool) -> dict:
