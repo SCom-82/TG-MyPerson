@@ -543,10 +543,9 @@ async def test_mcp_send_and_limit_text(rw):
 
 MAX_501_TOOLS = {"send_album", "send_voice", "send_poll", "pin_message", "unpin_message", "join_chat",
                  "leave_chat", "resolve_chat", "archive_chat", "get_my_rights", "get_chat_members",
-                 "list_scheduled", "cancel_scheduled", "send_scheduled_now", "block_user", "unblock_user",
-                 "reachable_contacts", "send_to_person"}
+                 "list_scheduled", "cancel_scheduled", "send_scheduled_now", "block_user", "unblock_user"}
 MAX_WRITES = {"send_message", "send_photo", "send_file", "create_upload", "forward_message", "edit_message",
-              "delete_message", "react_to_message", "mark_chat_read"}
+              "delete_message", "react_to_message", "mark_chat_read", "contact_by_phone", "send_to_person"}
 
 
 async def test_mcp_tools_depend_on_platform(rw):
@@ -555,7 +554,8 @@ async def test_mcp_tools_depend_on_platform(rw):
     assert MAX_WRITES <= max_rw and not MAX_501_TOOLS & max_rw
     assert not MAX_WRITES & max_ro and not MAX_501_TOOLS & max_ro and "list_messages" in max_ro
     tg_rw = names(_caller(rw, platform="telegram"))
-    assert len(tg_rw) == 45 and MAX_501_TOOLS | MAX_WRITES <= tg_rw
+    assert len(tg_rw) == 46 and MAX_501_TOOLS | MAX_WRITES <= tg_rw
+    assert len(max_rw) == 30 and "reachable_contacts" in max_rw  # reach on MAX (plan 2026-10-19 Р-17)
 
     # Every tool shown to a MAX account has its route on MAX (no 501 by construction).
     for name in max_rw:

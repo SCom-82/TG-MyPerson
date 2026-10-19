@@ -29,6 +29,7 @@ from fastapi import Request
 from starlette.responses import JSONResponse
 
 from app.authz.policy import AuthContext, authorize
+from app.utils.phone import mask_phone_params
 from app.authz.tool_catalog import (
     MAX_ONLY_TOOLS,
     READ_ONLY_TOOLS,
@@ -541,6 +542,8 @@ async def audit_log_middleware(request: Request, call_next):
     # Extract chat_id from path params if present
     chat_id = _extract_int_param(request, "chat_id")
     target_user_id = _extract_int_param(request, "user_id")
+    if target_user_id is None:
+        target_user_id = getattr(request.state, "audit_target_user_id", None)  # contact_by_phone
 
     # params_digest — only for write operations, from body
     params_digest: str | None = None
@@ -609,9 +612,9 @@ async def _try_read_body(request: Request) -> bytes | None:
 
 
 def _digest(body: bytes) -> str:
-    """SHA256 hex digest of body, first 16 chars."""
+    """SHA256 hex digest of body, first 16 chars; a "phone" is hashed masked (plan 2026-10-19 Р-19)."""
     try:
-        canonical = json.dumps(json.loads(body), sort_keys=True, ensure_ascii=False)
+        canonical = json.dumps(mask_phone_params(json.loads(body)), sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(canonical.encode()).hexdigest()[:16]
     except Exception:
         return hashlib.sha256(body).hexdigest()[:16]

@@ -450,6 +450,16 @@ def _rw_tools() -> list[Tool]:
              {"type": "object", "required": ["person_id", "text"],
               "properties": {"person_id": {"type": "integer"}, "text": {"type": "string"}}},
              "send_to_person", rest("POST", "/messages/to-person", body=ALL), "rw"),
+        Tool("contact_by_phone", "Find a person by phone in this account's messenger, add to contacts and to the "
+             "contacts base; returns person_id/user_id/chat_id (then send_to_person or send_message). Limit 20 "
+             "lookups/day per account; known numbers answer from the base without a lookup (refresh=true looks "
+             "up anyway).",
+             {"type": "object", "required": ["phone"],
+              "properties": {"phone": {"type": "string", "description": "+7…, 7…, 8…; spaces and dashes are fine"},
+                             "first_name": {"type": "string", "description": "name for the address book (TG)"},
+                             "last_name": {"type": "string"},
+                             "refresh": {"type": "boolean", "default": False}}},
+             "contact_by_phone", rest("POST", "/contacts/by-phone", body=ALL), "rw"),
         Tool("create_upload", "Get a URL to PUT a local file to (curl -T), then pass upload_id to send_file / "
              "send_photo / send_voice / send_album. Valid 15 minutes, ≤ 50 MB.",
              {"type": "object", "properties": {}}, "send_file", create_upload, "rw"),

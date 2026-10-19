@@ -120,7 +120,7 @@ async def test_list_tools_by_key(app, mcp_keys):
 
     stdio = {t["name"] for t in STDIO_TOOLS}
     assert len(stdio) == 42
-    assert rw == stdio | {"reachable_contacts", "send_to_person", "create_upload"}
+    assert rw == stdio | {"reachable_contacts", "send_to_person", "contact_by_phone", "create_upload"}
     writes = {t.name for t in ACCOUNT_TOOLS if t.is_write}
     assert ro == stdio - writes and "send_message" not in ro and "list_chats" in ro
     assert owner == {"find_person", "get_person", "person_accounts", "person_messages", "person_chats",

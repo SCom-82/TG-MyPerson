@@ -1,22 +1,30 @@
-"""People a rw account can write to, and writing to a person (ТЗ 2026-10-13 §6.4, §7.3).
+"""People a rw account can write to, writing to a person, finding one by phone
+(ТЗ 2026-10-13 §6.4, §7.3; plan 2026-10-19 §4).
 
 Account key (or alias). Contact fields of the shared base only — no messages
-or chats of other accounts. ro accounts: 403.
+or chats of other accounts. ro accounts: 403. Mounted for Telegram and MAX
+(Р-17): the tools a platform shows follow from its routes.
 """
 
+import logging
 import random
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import and_, select
 
 from app.api.data_reads import account_of
-from app.authz.write_limits import SEND, write_slot
+from app.authz import write_limits
+from app.authz.write_limits import SEND, lookup_slot, write_slot
 from app.database import async_session
-from app.models import Account
+from app.models import Account, Identity, User
 from app.repo import people_queries
 from app.services import tg_store
 from app.storage import account_db
+from app.utils.phone import mask_phone, normalize_phone
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["reach"])
 
@@ -92,3 +100,113 @@ async def _send_to_person(client, account: Account, identity, user, reach, req: 
         "chat_id": getattr(sent, "chat_id", None),
         "message_id": getattr(sent, "id", None),
     }
+
+
+# ---------------------------------------------------------------------------
+# Find a person by phone (Р-13…Р-19)
+# ---------------------------------------------------------------------------
+
+class ByPhoneRequest(BaseModel):
+    phone: str
+    first_name: str | None = None
+    last_name: str | None = None
+    refresh: bool = False
+
+
+NOT_FOUND_REASON = "not registered or hidden by privacy"
+
+
+async def _known(account: Account, e164: str, user_id: int | None = None) -> dict | None:
+    """The account's users row for this phone (or this user) on its platform, with the person."""
+    async with account_db(account.id) as db:
+        match = Identity.phone == e164 if user_id is None else Identity.external_user_id == user_id
+        row = (await db.execute(
+            select(Identity, User)
+            .join(User, and_(User.account_id == account.id, User.identity_id == Identity.id))
+            .where(Identity.platform == account.platform, match)
+            .order_by(User.is_contact.desc(), Identity.id)
+            .limit(1)
+        )).one_or_none()
+    if row is None:
+        return None
+    identity, user = row
+    if account.platform == "max":
+        chat_id = account.external_user_id ^ user.external_id if account.external_user_id is not None else None
+    else:
+        chat_id = user.external_id
+    name = " ".join(p for p in (user.first_name, user.last_name) if p) or user.username
+    return {"person_id": identity.person_id, "user_id": user.external_id, "chat_id": chat_id, "name": name,
+            "phone": identity.phone or e164, "is_contact": user.is_contact}
+
+
+async def _connected(request: Request, account: Account):
+    """The account's messenger client (TG) / session (MAX), before a slot is taken:
+    a session that is down spends no lookup."""
+    if account.platform == "telegram":
+        from app.telegram.pool import require_authorized_client
+
+        return await require_authorized_client(request)
+    from app.max.api.common import authorized_or_error
+
+    session = await authorized_or_error(request)
+    if isinstance(session, JSONResponse):
+        raise HTTPException(status_code=session.status_code, detail=session.body.decode())
+    return session
+
+
+async def _messenger_lookup(conn, account: Account, req: ByPhoneRequest, e164: str,
+                            masked: str) -> tuple[int | None, dict]:
+    """(found user id or None, extra answer fields). Errors of the messenger → 502."""
+    if account.platform == "telegram":
+        from app.telegram import lookup as tg_lookup
+
+        try:
+            return await tg_lookup.by_phone(conn, account.id, e164, req.first_name, req.last_name), {}
+        except Exception as exc:  # noqa: BLE001 — FloodWait, RPC errors: the slot is spent anyway
+            raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}")
+
+    from app.max import lookup as max_lookup
+
+    try:
+        found = await max_lookup.by_phone(conn, e164, masked)
+    except max_lookup.NotFound:
+        return None, {}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}")
+    return found.user_id, ({"warning": found.warning} if found.warning else {})
+
+
+@router.post("/contacts/by-phone", name="contact_by_phone")
+async def contact_by_phone(req: ByPhoneRequest, request: Request):
+    """Find a person by phone in this account's messenger, add them to its contacts
+    and to the contacts base; a number the account already knows answers from the
+    base without a lookup (cached), refresh=true looks it up anyway.
+
+    The number reaches logs and the audit only masked (+7******5956).
+    """
+    e164 = normalize_phone(req.phone)
+    if e164 is None or len(e164) > 16:
+        raise HTTPException(status_code=422, detail="phone: a number with the country code, e.g. +79001234567")
+    masked = mask_phone(e164)
+    account = await _rw_account(request)
+
+    if not req.refresh:
+        known = await _known(account, e164)
+        if known is not None:
+            request.state.audit_target_user_id = known["user_id"]
+            return {"found": True, "cached": True, "platform": account.platform, **known,
+                    "lookups_left_today": await write_limits.lookups_left(account.id)}
+
+    conn = await _connected(request, account)
+    async with lookup_slot(request, "contact_by_phone"):
+        user_id, extra = await _messenger_lookup(conn, account, req, e164, masked)
+    left = await write_limits.lookups_left(account.id)
+    if user_id is None:
+        log.info("contact_by_phone[%s]: %s not found", account.alias, masked)
+        return JSONResponse(status_code=404, content={
+            "found": False, "phone": masked, "reason": NOT_FOUND_REASON, "lookups_left_today": left})
+    log.info("contact_by_phone[%s]: %s → user %s", account.alias, masked, user_id)
+    request.state.audit_target_user_id = user_id
+    known = await _known(account, e164, user_id=user_id) or {"user_id": user_id}
+    return {"found": True, "cached": False, "platform": account.platform, **known, **extra,
+            "lookups_left_today": left}

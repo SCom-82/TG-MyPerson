@@ -19,3 +19,23 @@ def normalize_phone(raw: str | int | None) -> str | None:
     if len(digits) < 10:
         return None
     return "+" + digits
+
+
+def mask_phone(phone: str | int | None) -> str | None:
+    """'+79278975956' → '+7******5956' for logs and audit (plan 2026-10-19 Р-19).
+
+    The full number never goes to a log or a digest: phone numbers are a small
+    space, a sha256 of one is reversed by enumeration.
+    """
+    e164 = normalize_phone(phone)
+    if e164 is None:
+        return None
+    digits = e164[1:]
+    return "+" + digits[0] + "*" * (len(digits) - 5) + digits[-4:]
+
+
+def mask_phone_params(params):
+    """Call parameters with "phone" masked, for digests (a JSON object; anything else as is)."""
+    if isinstance(params, dict) and isinstance(params.get("phone"), (str, int)):
+        return {**params, "phone": mask_phone(params["phone"]) or "?"}
+    return params

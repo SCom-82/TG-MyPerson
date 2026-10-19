@@ -52,6 +52,8 @@ WRITE_MESSENGER_TOOLS: frozenset[str] = frozenset({
     "unblock_user",
     # contacts (account isolation §6.4): write to a person from the shared base
     "send_to_person",
+    # find by phone + add to the address book (plan 2026-10-19 Р-13): ro → 403
+    "contact_by_phone",
 })
 
 # Backward-compatible name: same object, so `in` checks and imports keep working.

@@ -400,6 +400,8 @@ class AccountWriteLimits(Base):
     min_interval_sec: Mapped[int | None] = mapped_column(Integer, nullable=True)
     jitter_sec: Mapped[int | None] = mapped_column(Integer, nullable=True)
     actions_per_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # migration 013: lookups by phone in 24 h (contact_by_phone)
+    phone_lookups_per_day: Mapped[int | None] = mapped_column(Integer, server_default="20", nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -412,7 +414,7 @@ class WriteEvent(Base):
     account_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
     )
-    kind: Mapped[str] = mapped_column(Text, nullable=False)  # 'send' | 'action'
+    kind: Mapped[str] = mapped_column(Text, nullable=False)  # 'send' | 'action' | 'lookup' (013)
     tool: Mapped[str] = mapped_column(Text, nullable=False)
     chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # external chat id
     new_dialog: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)

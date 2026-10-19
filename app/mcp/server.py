@@ -32,6 +32,7 @@ from app.authz.policy import AuthContext, audit, authorize
 from app.database import async_session
 from app.mcp.tools import BY_NAME, Caller, ToolError, coerce_ids, safe_ints, visible
 from app.models import Account
+from app.utils.phone import mask_phone_params
 
 log = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ async def list_tools() -> list[types.Tool]:
 
 
 def _digest(args: dict) -> str:
-    canonical = json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)
+    canonical = json.dumps(mask_phone_params(args), sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
@@ -101,6 +102,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent] | typ
         log.exception("mcp tool %s failed", name)
         audit(ctx, tool.route, status="error", error=f"{type(exc).__name__}: {exc}"[:500], **common)
         return _text(f"Error: {exc}")
+    if tool.route == "contact_by_phone" and isinstance(result, dict):
+        common["target_user_id"] = result.get("user_id")  # the number itself is not audited (Р-19)
     audit(ctx, tool.route, status="ok", **common)
     return _text(json.dumps(safe_ints(result), ensure_ascii=False, indent=2, default=str))
 

@@ -14,7 +14,11 @@ write: a change through the admin API applies to the next call.
   cold first message; a reply to someone who wrote first is not new; counted
   once per chat) and
   min_interval_sec + random 0..jitter_sec between sends;
-- actions (edit, delete, react, mark_read): actions_per_hour.
+- actions (edit, delete, react, mark_read): actions_per_hour;
+- lookups by phone (contact_by_phone, plan 2026-10-19 Р-14):
+  phone_lookups_per_day, 20 by default on every platform — Telegram too,
+  whose writes have no limits. A lookup that reached the messenger keeps its
+  slot whatever the outcome (lookup_slot): anti-spam counts requests.
 
 Over a limit → 429 + Retry-After with the limit, used and remaining; with
 several full windows the one with the longest wait (the others in `also`); a
@@ -48,6 +52,8 @@ log = logging.getLogger(__name__)
 
 SEND = "send"
 ACTION = "action"
+LOOKUP = "lookup"
+LOOKUP_DEFAULT = 20
 
 MAX_WAIT_SEC = 15
 RETENTION = timedelta(hours=25)
@@ -64,6 +70,7 @@ class Limits:
     min_interval_sec: int | None = 3
     jitter_sec: int | None = 2
     actions_per_hour: int | None = 60
+    phone_lookups_per_day: int | None = LOOKUP_DEFAULT
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -72,7 +79,8 @@ class Limits:
 LIMIT_FIELDS = tuple(f.name for f in fields(Limits))
 DEFAULT_LIMITS = Limits()
 # Every limit off: the base of the first change for a platform without a default.
-NO_LIMITS = Limits(**{f: None for f in LIMIT_FIELDS if f != "enabled"})
+# Lookups keep their default: a PATCH of a TG account does not switch them off.
+NO_LIMITS = Limits(**{f: None for f in LIMIT_FIELDS if f not in ("enabled", "phone_lookups_per_day")})
 # None: the platform writes without limits unless the account has its own row.
 PLATFORM_DEFAULTS: dict[str, Limits | None] = {"max": DEFAULT_LIMITS, "telegram": None}
 
@@ -92,7 +100,9 @@ WINDOWS = (
     Window("per_day", SEND, 86400),
     Window("new_dialogs_per_day", SEND, 86400, new_dialogs_only=True, noun="new dialogs"),
     Window("actions_per_hour", ACTION, 3600, noun="actions"),
+    Window("phone_lookups_per_day", LOOKUP, 86400, noun="phone lookups"),
 )
+LOOKUP_WINDOW = WINDOWS[-1]
 _SPAN = {60: "minute", 3600: "hour", 86400: "24 hours"}
 
 
@@ -297,7 +307,7 @@ class Slot:
 
 async def reserve(account_id: int, kind: str, tool: str, chat_id: int | None = None) -> Slot | None:
     """Check the limits and take a slot; waits out min_interval. None: no limits for the account."""
-    assert kind in (SEND, ACTION), kind
+    assert kind in (SEND, ACTION, LOOKUP), kind
     wait = 0.0
     # Before the lock, each step on its own short-lived connection (review R10-1):
     # a call never holds one connection while waiting for another, so parallel
@@ -307,6 +317,8 @@ async def reserve(account_id: int, kind: str, tool: str, chat_id: int | None = N
     # (write_events) is repeated under the lock.
     async with async_session() as db:
         eff = await effective(db, account_id)
+        if eff is not None and eff.limits is None and kind == LOOKUP:
+            eff = replace(eff, limits=NO_LIMITS)  # writes unlimited (TG), lookups are not
         if eff is None or eff.limits is None:
             return None
         sent_before = kind == SEND and chat_id is not None and await _sent_to(db, account_id, chat_id)
@@ -382,6 +394,27 @@ async def reserve(account_id: int, kind: str, tool: str, chat_id: int | None = N
 
 
 @asynccontextmanager
+async def lookup_slot(request: Request, tool: str) -> AsyncIterator[Slot | None]:
+    """A phone lookup's slot: never given back — the request reached the messenger,
+    found or not, failed or not (Р-14). Refusals of ours (a bad number) come before it."""
+    account_id = getattr(request.state, "account_id", None)
+    yield await reserve(account_id, LOOKUP, tool) if account_id is not None else None
+
+
+async def lookups_left(account_id: int) -> int | None:
+    """phone_lookups_per_day minus the lookups of the last 24 h; None: no limit."""
+    async with async_session() as db:
+        eff = await effective(db, account_id)
+        if eff is None:
+            return None
+        limit = (eff.limits or NO_LIMITS).phone_lookups_per_day
+        if limit is None:
+            return None
+        used = await _count(db, account_id, LOOKUP_WINDOW, _now())
+    return max(0, limit - used)
+
+
+@asynccontextmanager
 async def write_slot(request: Request, kind: str, tool: str, chat_id: int | None = None) -> AsyncIterator[Slot | None]:
     """Take a slot for the request's account.
 
@@ -436,8 +469,16 @@ async def status(account_id: int) -> dict | None:
             "sends_last_day": used["per_day"],
             "new_dialogs_last_day": used["new_dialogs_per_day"],
             "actions_last_hour": used["actions_per_hour"],
+            "lookups_last_day": used["phone_lookups_per_day"],
             "last_send_at": last.isoformat() if last else None,
             "next_send_at": next_send.isoformat() if next_send else None,
         },
         "remaining": remaining,
+        # Every account, Telegram without own limits too (Р-14).
+        "phone_lookups": {
+            "limit": (limits or NO_LIMITS).phone_lookups_per_day,
+            "used": used["phone_lookups_per_day"],
+            "remaining": None if (limits or NO_LIMITS).phone_lookups_per_day is None
+            else max(0, (limits or NO_LIMITS).phone_lookups_per_day - used["phone_lookups_per_day"]),
+        },
     }

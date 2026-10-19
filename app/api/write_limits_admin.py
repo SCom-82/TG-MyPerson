@@ -5,7 +5,8 @@ GET    /accounts/{account_id}/write-limits  one account
 PATCH  /accounts/{account_id}/write-limits  change settings (null = that limit off);
                                             the first change copies the current limits
 DELETE /accounts/{account_id}/write-limits  back to the platform default
-                                            (MAX: defaults, Telegram: no limits)
+                                            (MAX: defaults, Telegram: no limits;
+                                            phone_lookups_per_day 20 on both)
 
 Applies to the next write, no restart.
 """
@@ -35,6 +36,7 @@ class WriteLimitsPatch(BaseModel):
     min_interval_sec: int | None = _SECONDS
     jitter_sec: int | None = _SECONDS
     actions_per_hour: int | None = _COUNT
+    phone_lookups_per_day: int | None = _COUNT
 
 
 async def _status_or_404(account_id: int) -> dict:

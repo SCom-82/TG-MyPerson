@@ -77,6 +77,13 @@ class FakeMaxServer:
         self.write_errors: list[BaseException] = []
         self.next_message_id = 900_000
 
+        # Lookup by phone (plan 2026-10-19 D1): e164 → user dict; errors one per call
+        self.phone_book: dict[str, dict] = {}
+        self.lookup_calls: list[str] = []
+        self.lookup_errors: list[BaseException] = []
+        self.add_contact_errors: list[BaseException] = []
+        self.added_contacts: list[int] = []
+
         self.factory_calls: list[dict] = []
         self.clients: list["FakePyMaxClient"] = []
         self.authenticate_calls = 0
@@ -262,6 +269,22 @@ class FakePyMaxClient:
         self.calls.append("get_users")
         self.server.get_users_calls.append(list(user_ids))
         return [User.model_validate(self.server.users[i]) for i in user_ids if i in self.server.users]
+
+    async def search_by_phone(self, phone: str):
+        self.calls.append("search_by_phone")
+        self.server.lookup_calls.append(phone)
+        if self.server.lookup_errors:
+            raise self.server.lookup_errors.pop(0)
+        if phone not in self.server.phone_book:
+            raise ApiError(opcode=46, error="contact.not.found", message="Contact not found")
+        return User.model_validate(self.server.phone_book[phone])
+
+    async def add_contact(self, contact_id: int):
+        self.calls.append("add_contact")
+        if self.server.add_contact_errors:
+            raise self.server.add_contact_errors.pop(0)
+        self.server.added_contacts.append(contact_id)
+        return None
 
     async def wait_closed(self) -> None:
         await self._closed.wait()

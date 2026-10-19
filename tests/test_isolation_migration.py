@@ -21,7 +21,7 @@ from tests.conftest import TEST_DB_URL
 from tests.isolation_env import DATA_TABLES, sql
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-HEAD = "012"
+HEAD = "013"
 
 NEW_TABLES = ("api_keys", "people", "identities", "people_merge_log", *DATA_TABLES)
 LEGACY_FINGERPRINTS = {

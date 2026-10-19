@@ -134,6 +134,13 @@ class NewMaxStore:
             await chats.fill_dialog_titles(db, self.account_id)
             await db.commit()
 
+    async def ensure_dialog(self, chat_id: int) -> None:
+        """A private chat row before its first message (contact_by_phone), titled by the peer."""
+        async with account_db(self.account_id) as db:
+            await chats.upsert_chat(db, self.account_id, ChatRow(chat_id, "private"))
+            await chats.fill_dialog_titles(db, self.account_id, [chat_id])
+            await db.commit()
+
     async def dialog_peers_missing(self) -> set[int]:
         """Peers of the account's private chats without a users row or without a name."""
         a = self.account_id
