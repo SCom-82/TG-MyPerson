@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import select
 
 from app.max import normalize
+from app.models import Account
 from app.models import Chat as ChatModel
 from app.models import Message as MessageModel
 from app.models import SyncState
@@ -120,6 +121,7 @@ class NewMaxStore:
         async with account_db(self.account_id) as db:
             for row in rows:
                 await chats.upsert_chat(db, self.account_id, chat_row(row))
+            await chats.fill_dialog_titles(db, self.account_id)
             await db.commit()
 
     async def upsert_users(self, rows: list[dict], via: str, *, is_contact: bool | None = None) -> None:
@@ -128,25 +130,56 @@ class NewMaxStore:
                 u = user_row(row)
                 u.is_contact = is_contact
                 await users.upsert_user(db, self.account_id, PLATFORM, u, via)
+            # A peer's name may have arrived or changed: titles of the dialogs (plan Р-4).
+            await chats.fill_dialog_titles(db, self.account_id)
             await db.commit()
+
+    async def dialog_peers_missing(self) -> set[int]:
+        """Peers of the account's private chats without a users row or without a name."""
+        a = self.account_id
+        async with account_db(a) as db:
+            me = (await db.execute(select(Account.external_user_id).where(Account.id == a))).scalar_one_or_none()
+            if me is None:
+                return set()
+            rows = (await db.execute(
+                select(ChatModel.external_id, ChatModel.raw)
+                .where(ChatModel.account_id == a, ChatModel.chat_type == "private", ChatModel.external_id != 0)
+            )).all()
+            peers = {normalize.dialog_peer(ext, raw, me) for ext, raw in rows} - {None, me}
+            if not peers:
+                return set()
+            named = set((await db.execute(
+                select(UserModel.external_id).where(
+                    UserModel.account_id == a, UserModel.external_id.in_(peers), UserModel.first_name.is_not(None)
+                )
+            )).scalars())
+        return peers - named
 
     # -- messages -----------------------------------------------------------------
 
     async def store_message(
         self, row: dict, media: list[dict], *, chat_type: str, advance_cursor: bool, time_ms: int | None
     ) -> set[int]:
-        """Message + stub chat/sender; returns sender ids that had no users row yet."""
+        """Message + stub chat/sender; returns sender ids without a name yet (no row or a stub, Р-11)."""
         a = self.account_id
         missing: set[int] = set()
         async with account_db(a) as db:
             chat_pk = await chats.chat_pk(db, a, row["chat_id"])
-            if chat_pk is None:
+            new_chat = chat_pk is None
+            if new_chat:
                 chat_pk = await chats.upsert_chat(db, a, ChatRow(row["chat_id"], chat_type))
             sender = row["from_user_id"]
-            if sender is not None and await users.user_pk(db, a, sender) is None:
-                await users.upsert_user(db, a, PLATFORM, UserRow(external_id=sender), "message")
-                missing.add(sender)
+            if sender is not None:
+                known = (await db.execute(
+                    select(UserModel.first_name).where(UserModel.account_id == a, UserModel.external_id == sender)
+                )).one_or_none()
+                if known is None:
+                    await users.upsert_user(db, a, PLATFORM, UserRow(external_id=sender), "message")
+                if known is None or known.first_name is None:
+                    missing.add(sender)
             await messages.upsert_message(db, a, chat_pk, message_row(row, media))
+            if new_chat and chat_type == "private":
+                await chats.fill_dialog_titles(db, a, [row["chat_id"]])
             if advance_cursor and time_ms is not None:
                 await self._advance(db, chat_pk, row["message_id"], time_ms)
             await db.commit()

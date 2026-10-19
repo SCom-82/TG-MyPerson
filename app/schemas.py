@@ -133,6 +133,9 @@ class MessageResponse(BaseModel):
 
     # Subclasses that always carry deleted_at (MAX, API spec) set this to True.
     always_deleted_at: ClassVar[bool] = False
+    # Subclasses whose responses carry from_user (MAX, plan 2026-10-19 Р-3). TG keeps
+    # null while the legacy rollback window is open: golden legacy == new byte for byte.
+    fill_from_user: ClassVar[bool] = False
 
     @model_serializer(mode="wrap")
     def _omit_empty_deleted_at(self, handler):

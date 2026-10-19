@@ -196,6 +196,25 @@ def normalize_chat(chat: Chat) -> dict:
     }
 
 
+def dialog_peer(chat_id: int, raw: dict | None, me_id: int) -> int | None:
+    """The other side of a private chat: the participant that is not us, else chat_id XOR me (Р-5).
+
+    Same rule as repo.chats.fill_dialog_titles (SQL). Chat 0 (saved messages) has no peer.
+    """
+    if chat_id == 0:
+        return None
+    participants = (raw or {}).get("participants")
+    if isinstance(participants, dict):
+        for key in participants:
+            try:
+                peer = int(key)
+            except (TypeError, ValueError):
+                continue
+            if peer != me_id:
+                return peer
+    return chat_id ^ me_id
+
+
 def normalize_user(user: User, *, me_id: int | None = None) -> dict:
     names = user.names or []
     first = names[0] if names else None

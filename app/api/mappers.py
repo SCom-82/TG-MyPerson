@@ -58,6 +58,7 @@ def message_response(m: Message, chat_external_id: int, cls: type[MessageRespons
         message_id=m.external_id,
         chat_id=chat_external_id,
         from_user_id=m.sender.external_id if m.sender is not None else None,
+        from_user=user_response(m.sender) if cls.fill_from_user and m.sender is not None else None,
         sender_chat_id=m.sender_chat_external_id,
         reply_to_message_id=m.reply_to_external_id,
         forward_from_chat_id=m.forward_from_chat_external_id,

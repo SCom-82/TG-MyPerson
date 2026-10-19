@@ -9,10 +9,11 @@ from app.schemas import BackfillRequest, MessageResponse
 
 
 class MaxMessageResponse(MessageResponse):
-    """MessageResponse + deleted_at (ADR §2.G), always present in MAX responses."""
+    """MessageResponse + deleted_at (ADR §2.G), always present in MAX responses; from_user filled."""
 
     deleted_at: datetime | None = None
     always_deleted_at: ClassVar[bool] = True
+    fill_from_user: ClassVar[bool] = True
 
 
 class MaxBackfillRequest(BackfillRequest):

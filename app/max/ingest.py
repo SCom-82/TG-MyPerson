@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _ERROR_MAX_LEN = 2000
+FILL_ASKS_PER_SESSION = 2
 
 
 class MaxIngest:
@@ -43,6 +44,9 @@ class MaxIngest:
         self._known_users: set[int] = set()
         self._locks: dict[int | None, asyncio.Lock] = {}
         self._fills = 0
+        # get_users asks per user in this session: the first sight of a stub plus one
+        # retry if it is still without a name (get_users failed, Р-11), then not again.
+        self._fill_asks: dict[int, int] = {}
 
     def install(self) -> None:
         self.session.client_hooks.append(self.attach)
@@ -183,9 +187,15 @@ class MaxIngest:
         await shadow("max message", lambda: self._store_legacy(
             msg, cid, received_at, is_edit, advance_cursor, fill=False
         ))
-        if missing:
-            self._spawn(self.fill_users(missing))
+        self._fill_once(missing)
         return row
+
+    def _fill_once(self, user_ids: set[int]) -> None:
+        todo = {u for u in user_ids if self._fill_asks.get(u, 0) < FILL_ASKS_PER_SESSION}
+        for u in todo:
+            self._fill_asks[u] = self._fill_asks.get(u, 0) + 1
+        if todo:
+            self._spawn(self.fill_users(todo))
 
     async def store_sent(self, msg: Any, chat_id: int, *, is_edit: bool = False) -> dict:
         """A message we just sent or edited (PR-7): stored at once, not on the echo.
@@ -265,7 +275,12 @@ class MaxIngest:
     # -- login snapshot / users ---------------------------------------------
 
     async def on_authorized(self, client: Any) -> None:
-        """Chats and contacts from the login response (no extra network)."""
+        """Chats and contacts from the login response; then the names of unknown dialog peers.
+
+        new storage: peers of private chats without a name are fetched in the
+        background (get_users) — their names become the dialog titles (Р-4).
+        """
+        self._fill_asks = {}
         me_id = self.me_id
         chats_ = list(getattr(client, "chats", None) or [])
         contacts = [c for c in (getattr(client, "contacts", None) or []) if c is not None]
@@ -278,6 +293,7 @@ class MaxIngest:
             if me is not None:
                 await new.upsert_users([normalize.normalize_user(me)], "dialog")
             await shadow("max login", lambda: self._authorized_legacy(chats_, users, me_id))
+            self._fill_once(await new.dialog_peers_missing())
         else:
             await self._authorized_legacy(chats_, users, me_id)
         self._known_users.update(u.id for u in users)

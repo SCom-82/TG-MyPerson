@@ -2,11 +2,11 @@
 
 from datetime import datetime
 
-from sqlalchemy import and_, case, func, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Chat
+from app.models import Account, Chat
 from app.repo import ensure_scope
 from app.repo.rows import ChatRow
 
@@ -143,3 +143,53 @@ async def external_ids(db: AsyncSession, account_id: int, chat_ids: set[int]) ->
         select(Chat.id, Chat.external_id).where(Chat.account_id == account_id, Chat.id.in_(chat_ids))
     )
     return dict(rows.all())
+
+
+SAVED_MESSAGES_TITLE = "Избранное"
+
+# MAX private chats have no title of their own (plan 2026-10-19 Р-4, Р-5): the
+# title is the peer's name. Peer = the key of raw.participants that is not the
+# account, else external_id XOR the account's user id (how MAX builds dialog
+# ids, pymax UserService.get_chat_id). Chat 0 is the account's saved messages.
+_FILL_DIALOG_TITLES = text("""
+UPDATE chats c SET title = n.name
+FROM (
+    SELECT ch.id,
+           CASE WHEN ch.external_id = 0 THEN :saved
+                ELSE coalesce(nullif(trim(concat_ws(' ', u.first_name, u.last_name)), ''), u.username)
+           END AS name
+    FROM chats ch
+    CROSS JOIN LATERAL (
+        SELECT coalesce(
+            (SELECT k::bigint
+             FROM jsonb_object_keys(CASE WHEN jsonb_typeof(ch.raw -> 'participants') = 'object'
+                                         THEN ch.raw -> 'participants' ELSE '{}'::jsonb END) AS k
+             WHERE k ~ '^-?[0-9]+$' AND k::bigint <> :me
+             LIMIT 1),
+            ch.external_id # :me
+        ) AS peer
+    ) p
+    LEFT JOIN users u ON u.account_id = ch.account_id AND u.external_id = p.peer
+    WHERE ch.account_id = :a AND ch.chat_type = 'private'
+      AND (CAST(:ids AS bigint[]) IS NULL OR ch.external_id = ANY(CAST(:ids AS bigint[])))
+) n
+WHERE c.account_id = :a AND c.id = n.id AND n.name IS NOT NULL AND c.title IS DISTINCT FROM n.name
+""")
+
+
+async def fill_dialog_titles(db: AsyncSession, account_id: int, chat_ids: list[int] | None = None) -> int:
+    """MAX private chats: title = the peer's name (recomputed when it changed). Returns rows changed.
+
+    Other platforms and accounts without a known own user id: nothing (0).
+    """
+    ensure_scope(db, account_id)
+    platform, me = (await db.execute(
+        select(Account.platform, Account.external_user_id).where(Account.id == account_id)
+    )).one_or_none() or (None, None)
+    if platform != "max" or me is None:
+        return 0
+    result = await db.execute(_FILL_DIALOG_TITLES, {
+        "a": account_id, "me": me, "saved": SAVED_MESSAGES_TITLE,
+        "ids": list(chat_ids) if chat_ids is not None else None,
+    })
+    return result.rowcount or 0
