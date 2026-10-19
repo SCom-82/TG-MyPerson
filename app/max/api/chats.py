@@ -8,7 +8,7 @@ from app.authz.write_limits import ACTION, write_slot
 from app.database import get_db
 from app.api import data_reads
 from app.max import repo
-from app.max.api.common import authorized_or_error, call_max
+from app.max.api.common import authorized_or_error, call_max, call_max_read
 from app.services.tg_store import new_mode, shadow
 from app.schemas import ChatResponse, ChatUpdateRequest, PaginatedResponse
 
@@ -73,11 +73,12 @@ async def mark_read(chat_id: int, request: Request):
     session = await authorized_or_error(request)
     if isinstance(session, JSONResponse):
         return session
-    history = await call_max(session.client.fetch_history(chat_id, backward=1))
-    if not history:
-        raise HTTPException(status_code=404, detail="Chat has no messages")
-    last = max(history, key=lambda m: (m.time or 0, m.id))
-    message_id = int(last.id)
+    # The slot first (QA PR-7 W-D3): a refused write does not touch MAX at all. A
+    # failed history read or an empty chat gives the slot back.
     async with write_slot(request, ACTION, "mark_read", chat_id):
-        await call_max(session.client.read_message(message_id, chat_id))
+        history = await call_max_read(session.client.fetch_history(chat_id, backward=1))
+        if not history:
+            raise HTTPException(status_code=404, detail="Chat has no messages")
+        last = max(history, key=lambda m: (m.time or 0, m.id))
+        await call_max(session.client.read_message(int(last.id), chat_id))
     return {"status": "read", "chat_id": chat_id, "message_id": last.id}

@@ -254,7 +254,10 @@ async def test_new_dialog_is_a_chat_without_any_history(rw):
     await rw.client.push(_frame(2003, 78, 555, "здравствуйте"))  # incoming only: they wrote first
     assert (await _send(rw, chat=2001)).status_code == 200
     assert (await _send(rw, chat=2003)).status_code == 200
-    _check_429(await _send(rw, chat=2002), "new_dialogs_per_day", 0, 1)
+    resp = await _send(rw, chat=2002)  # limit 0: new dialogs are off, no Retry-After (W-D2)
+    assert resp.status_code == 429 and "retry-after" not in resp.headers
+    assert (resp.json()["limit"], resp.json()["retry_after"]) == ("new_dialogs_per_day", None)
+    assert resp.json()["message"] == f"new dialogs of account '{rw.env.alias}' are off: new_dialogs_per_day = 0"
     assert [e[3] for e in _events(rw.id)] == [False, False]
 
 
@@ -436,6 +439,82 @@ async def test_telegram_writes_unlimited_by_default_limited_by_setting(rw, alias
     resp = await rw.http.post("/api/v1/messages", headers=h, json={"chat_id": 5, "text": "tg"})
     _check_429(resp, "per_minute", 1, 60)
     assert resp.json()["platform"] == "telegram" and len(sent) == 26
+
+
+# ---------------------------------------------------------------------------
+# QA PR-7 W-D1…W-D3 (plan 2026-10-19 Р-12, QA R1-14)
+# ---------------------------------------------------------------------------
+
+async def test_wd1_the_longest_wait_decides(rw):
+    await _limits(rw, **{**OFF, "per_minute": 1, "per_hour": 1})
+    assert (await _send(rw)).status_code == 200
+    rw.clock.at(1)
+    body = _check_429(await _send(rw), "per_hour", 1, 3599)
+    assert body["also"] == ["per_minute"]
+    rw.clock.at(60)  # per_minute has passed, per_hour has not: the same answer, no surprise
+    body = _check_429(await _send(rw), "per_hour", 1, 3540)
+    assert body["also"] == []
+    rw.clock.at(3600)
+    assert (await _send(rw)).status_code == 200
+
+
+async def test_wd2_limit_zero_is_off_without_retry_after(rw):
+    await _limits(rw, **{**OFF, "per_minute": 1, "per_hour": 0})
+    for _ in range(2):  # zero wins over a full per_minute too
+        resp = await _send(rw)
+        assert resp.status_code == 429, resp.text
+        assert "retry-after" not in resp.headers
+        body = resp.json()
+        assert (body["limit"], body["max"], body["retry_after"]) == ("per_hour", 0, None)
+        assert body["message"] == f"sends of account '{rw.env.alias}' are off: per_hour = 0"
+    assert rw.env.server.writes == [] and _events(rw.id) == []
+
+    await _limits(rw, **{**OFF, "actions_per_hour": 0})
+    resp = await rw.http.post(f"/api/v1/chats/{DIALOG}/read", headers=rw.env.h())
+    assert resp.status_code == 429 and "retry-after" not in resp.headers
+    assert resp.json()["message"].endswith("are off: actions_per_hour = 0")
+
+    with pytest.raises(mcp_tools.ToolError) as exc:
+        await mcp_tools.BY_NAME["mark_chat_read"].call(_caller(rw), {"chat_id": DIALOG})
+    assert "are off: actions_per_hour = 0" in str(exc.value) and '"retry_after": null' in str(exc.value)
+
+
+async def test_wd3_mark_read_refused_before_max(rw):
+    await _limits(rw, enabled=False)
+    resp = await rw.http.post(f"/api/v1/chats/{DIALOG}/read", headers=rw.env.h())
+    assert resp.status_code == 403, resp.text
+    await _limits(rw, **{**OFF, "actions_per_hour": 1, "enabled": True})
+    sent = (await _send(rw)).json()["message_id"]
+    assert (await _react(rw, DIALOG, sent)).status_code == 200
+    resp = await rw.http.post(f"/api/v1/chats/{DIALOG}/read", headers=rw.env.h())
+    assert resp.status_code == 429, resp.text
+    assert "fetch_history" not in rw.client.calls and rw.env.server.history_calls == []
+
+
+@pytest.mark.parametrize("error,status", [(TimeoutError("timed out"), 504), (ConnectionError("dropped"), 504),
+                                          (ApiError(opcode=49, error="chat.not.found", message="x"), 502)])
+async def test_wd3_failed_history_read_gives_the_slot_back(rw, error, status):
+    await _limits(rw, **{**OFF, "actions_per_hour": 5})
+    rw.env.server.history[DIALOG] = [{"id": "1", "time": 1, "type": "USER", "text": "x", "attaches": [], "sender": 200}]
+    rw.env.server.history_errors[DIALOG] = [error]
+    resp = await rw.http.post(f"/api/v1/chats/{DIALOG}/read", headers=rw.env.h())
+    assert resp.status_code == status, resp.text
+    assert "may have been sent" not in resp.text
+    if status == 504:
+        assert "no answer from MAX (read)" in resp.text
+    assert _events(rw.id) == [] and (await _status(rw))["counters"]["actions_last_hour"] == 0
+    assert "read_message" not in rw.client.calls
+
+    resp = await rw.http.post(f"/api/v1/chats/{DIALOG}/read", headers=rw.env.h())  # the next one works
+    assert resp.status_code == 200, resp.text
+    assert [e[0] for e in _events(rw.id)] == ["action"]
+
+
+async def test_wd3_empty_chat_404_gives_the_slot_back(rw):
+    await _limits(rw, **{**OFF, "actions_per_hour": 5})
+    resp = await rw.http.post("/api/v1/chats/424242/read", headers=rw.env.h())
+    assert resp.status_code == 404 and resp.json()["detail"] == "Chat has no messages"
+    assert _events(rw.id) == []
 
 
 async def _status_of(w, account_id: int) -> dict:

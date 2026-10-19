@@ -16,7 +16,9 @@ write: a change through the admin API applies to the next call.
   min_interval_sec + random 0..jitter_sec between sends;
 - actions (edit, delete, react, mark_read): actions_per_hour.
 
-Over a limit → 429 + Retry-After with the limit, used and remaining.
+Over a limit → 429 + Retry-After with the limit, used and remaining; with
+several full windows the one with the longest wait (the others in `also`); a
+limit of 0 → 429 without Retry-After (that kind of write is off).
 min_interval is not a refusal: the call waits up to MAX_WAIT_SEC, then 429.
 
 reserve() runs under a per-account advisory lock, so concurrent writes of
@@ -209,8 +211,8 @@ async def _retry_after(db, account_id: int, w: Window, now: datetime, used: int,
         .where(*_events(account_id, w.kind, since, new_dialogs_only=w.new_dialogs_only))
         .order_by(WriteEvent.at).offset(used - limit).limit(1)
     )).scalar_one_or_none()
-    if at is None:
-        return 1
+    if at is None:  # cannot happen for limit ≥ 1 (the window holds ≥ limit events); be conservative
+        return w.seconds
     return max(1, math.ceil((at + timedelta(seconds=w.seconds) - now).total_seconds()))
 
 
@@ -248,8 +250,18 @@ async def _has_history(eff: Effective, chat_id: int) -> bool:
         )).scalar_one()
 
 
-def _refusal(eff: Effective, tool: str, w: Window, limit: int, used: int, retry_after: int) -> WriteLimited:
+def _refusal(eff: Effective, tool: str, w: Window, limit: int, used: int, retry_after: int | None,
+             also: list[str]) -> WriteLimited:
+    """429 for the window that decides; also = the other windows that are full too.
+
+    limit 0 (QA PR-7 W-D2): the kind of write is off — no Retry-After, nothing to wait for.
+    """
     span = _SPAN[w.seconds]
+    if limit == 0:
+        message = f"{w.noun} of account '{eff.alias}' are off: {w.name} = 0"
+    else:
+        message = (f"write limit {w.name} of account '{eff.alias}' reached: {used} of {limit} {w.noun} "
+                   f"in the last {span}; retry in {retry_after} s")
     return WriteLimited(429, {
         "error": "rate limit",
         "limit": w.name,
@@ -257,11 +269,11 @@ def _refusal(eff: Effective, tool: str, w: Window, limit: int, used: int, retry_
         "used": used,
         "remaining": max(0, limit - used),
         "retry_after": retry_after,
+        "also": also,
         "tool": tool,
         "alias": eff.alias,
         "platform": eff.platform,
-        "message": (f"write limit {w.name} of account '{eff.alias}' reached: {used} of {limit} {w.noun} "
-                    f"in the last {span}; retry in {retry_after} s"),
+        "message": message,
     }, retry_after)
 
 
@@ -319,13 +331,21 @@ async def reserve(account_id: int, kind: str, tool: str, chat_id: int | None = N
         new_dialog = (kind == SEND and chat_id is not None and not history
                       and not await _sent_to(db, account_id, chat_id))
 
+        # Every window is checked (QA PR-7 W-D1): the refusal names the one a retry
+        # has to wait for longest, so a retry after Retry-After passes them all;
+        # a window with limit 0 decides over any wait.
+        full = []
         for w in WINDOWS:
             limit = getattr(limits, w.name)
             if limit is None or w.kind != kind or (w.new_dialogs_only and not new_dialog):
                 continue
             used = await _count(db, account_id, w, now)
             if used >= limit:
-                raise _refusal(eff, tool, w, limit, used, await _retry_after(db, account_id, w, now, used, limit))
+                wait_for = None if limit == 0 else await _retry_after(db, account_id, w, now, used, limit)
+                full.append((w, limit, used, wait_for))
+        if full:
+            w, limit, used, wait_for = max(full, key=lambda f: math.inf if f[3] is None else f[3])
+            raise _refusal(eff, tool, w, limit, used, wait_for, [f[0].name for f in full if f[0] is not w])
 
         at = now
         if kind == SEND and limits.min_interval_sec:

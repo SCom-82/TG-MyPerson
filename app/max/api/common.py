@@ -75,6 +75,22 @@ async def call_max(call: Awaitable[T]) -> T:
         raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}")
 
 
+async def call_max_read(call: Awaitable[T]) -> T:
+    """A PyMax read inside a write (mark_read's history): nothing was sent, so no
+    "may have been sent" and the write slot is given back on any failure.
+    A timeout or a dropped connection → 504, anything else → 502."""
+    try:
+        return await call
+    except HTTPException:
+        raise
+    except _UNCERTAIN as exc:
+        log.warning("max read: no answer (%s: %s)", type(exc).__name__, exc)
+        raise HTTPException(status_code=504, detail=f"{type(exc).__name__}: {exc} — no answer from MAX (read)")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("max read failed: %s: %s", type(exc).__name__, exc)
+        raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}")
+
+
 def param_not_supported(request: Request, tool: str, parameter: str) -> JSONResponse:
     """501 for a parameter MAX has no counterpart for (API spec §4)."""
     return JSONResponse(status_code=501, content={
