@@ -520,7 +520,7 @@ class ProxiedUploads(UploadService):
             if note:
                 await _ready(future, READY_WAIT_SEC, what, info.video_id)
                 return VideoNoteAttachPayload(video_id=info.video_id, token=info.token,
-                                              thumbhash=_thumbhash(result), duration=duration)
+                                              thumbhash=_thumbhash(result, web=_is_web(self.app)), duration=duration)
             if not await _ready(future, VIDEO_READY_SEC, what, info.video_id):
                 raise UploadError(f"Timed out waiting for video processing video_id={info.video_id}")
         finally:
@@ -528,11 +528,26 @@ class ProxiedUploads(UploadService):
         return VideoAttachPayload(video_id=info.video_id, token=info.token)
 
 
-def _thumbhash(result: Any) -> bytes | None:
-    """The video note's thumbhash of the POST answer (base64, padding restored as PyMax does)."""
+def _is_web(app: Any) -> bool:
+    try:
+        return app.config.device.user_agent.device_type == DeviceType.WEB
+    except Exception:  # noqa: BLE001 — no device config: PyMax's own (TCP) form
+        return False
+
+
+def _thumbhash(result: Any, *, web: bool = False) -> bytes | None:
+    """The video note's thumbhash of the POST answer.
+
+    TCP (msgpack): the decoded bytes, as PyMax sends them. Web (JSON): the base64 text
+    the CDN returned — PyMax's web transport encodes the frame with model_dump_json, and
+    binary bytes fail there with "invalid utf-8" before the frame goes out (QA-R4 D2);
+    ASCII bytes go into the JSON as that same string. Not checked live.
+    """
     value = result.get("thumbhash") if isinstance(result, dict) else None
-    if not value:
+    if not value or not isinstance(value, str):
         return None
+    if web:
+        return value.encode("ascii", "ignore") or None
     try:
         return base64.b64decode(value + "=" * (-len(value) % 4))
     except ValueError:

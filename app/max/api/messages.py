@@ -542,10 +542,17 @@ async def pin_message(chat_id: int, message_id: int, request: Request, notify: b
 
 @router.post("/{chat_id}/{message_id}/unpin", name="unpin_message")
 async def unpin_message(chat_id: int, message_id: int, request: Request):
-    """MAX has one pinned message per chat; the frame is ours (Р-33), checked by the fresh chat."""
+    """MAX has one pinned message per chat and our frame (Р-33) unpins whichever it is: the
+    chat is read first, and only message_id itself is unpinned (QA-R4 D4) — nothing pinned
+    → 404, another message pinned → 409, no frame. Checked by the fresh chat after."""
     session = await authorized_or_error(request)
     if isinstance(session, JSONResponse):
         return session
+    pinned_now = frames.pinned_id(await call_max_read(groups.fresh_chat(session.client, chat_id)))
+    if pinned_now is None:
+        raise HTTPException(status_code=404, detail=f"no message is pinned in chat {chat_id}")
+    if pinned_now != message_id:
+        raise HTTPException(status_code=409, detail=f"message {message_id} is not pinned (pinned: {pinned_now})")
     async with write_slot(request, ACTION, "unpin_message", chat_id):
         await call_max(frames.unpin(session.client, chat_id), UNCERTAIN)
     read, pinned = await _pinned_after(session, chat_id)

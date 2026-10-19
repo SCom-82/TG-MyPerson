@@ -73,10 +73,12 @@ async def _resolve(client: Any, kind: str, link: str) -> Any:
 
 
 async def _is_joined(request: Request, session, chat: Any) -> bool:
-    """The account is among its participants, or holds the chat as an active one."""
+    """MAX's participants decide when the answer has them (QA-R4 D3: a stored row outlives
+    a leave); without them — the account holds the chat with a status not LEFT/REMOVED/…"""
     me = mx_groups.me_of(session)
-    if me is not None and me in {int(p) for p in (getattr(chat, "participants", None) or {})}:
-        return True
+    participants = getattr(chat, "participants", None) or {}
+    if participants and me is not None:
+        return me in {int(p) for p in participants}
     if not new_mode():
         return False
     account_id = getattr(request.state, "account_id", None)
@@ -253,7 +255,7 @@ async def leave_chat_endpoint(req: LeaveChatRequest, request: Request):
     session = await mx_groups.connected(request)
     async with write_slot(request, ACTION, "leave_chat_endpoint", req.chat_id):
         await call_max(groups.leave(session.client, req.chat_id, chat.chat_type), mx_groups.UNCERTAIN)
-    await mx_groups.unmonitor(session, req.chat_id)
+    await mx_groups.mark_left(session, req.chat_id)
     return {"status": "left", "chat_id": req.chat_id}
 
 

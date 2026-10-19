@@ -205,3 +205,20 @@ async def test_vote_frame_is_pymax_and_an_unparsed_answer_keeps_the_slot(rw, stu
     resp = await _vote(rw, DIALOG, mid, answer_ids=[1])
     assert resp.status_code == 502 and "MAX took the vote" in resp.text, resp.text
     assert rw.env.server.votes and [e[1] for e in _events(rw.id) if e[0] == "action"] == ["vote_poll"]
+
+
+async def test_unpin_only_the_pinned_message(rw):
+    """QA-R4 D4: our unpin frame unpins whatever is pinned — so only message_id itself."""
+    await _limits(rw, **OFF)
+    gid = await _create(rw, user_ids=())
+    send = lambda t: rw.http.post("/api/v1/messages", headers=rw.env.h(), json={"chat_id": gid, "text": t})  # noqa: E731
+    x, y = (await send("x")).json()["message_id"], (await send("y")).json()["message_id"]
+    resp = await _post(rw, f"/messages/{gid}/{y}/unpin")
+    assert resp.status_code == 404 and "no message is pinned" in resp.text
+    await _post(rw, f"/messages/{gid}/{x}/pin")
+    resp = await _post(rw, f"/messages/{gid}/{y}/unpin")
+    assert resp.status_code == 409 and f"pinned: {x}" in resp.text
+    assert rw.env.server.pinned[gid] == x
+    assert [c for c in rw.env.server.group_calls if c[0] == "invoke"] == []
+    assert [e[1] for e in _events(rw.id) if e[0] == "action"] == ["pin_message"]
+    assert (await _post(rw, f"/messages/{gid}/{x}/unpin")).json()["status"] == "unpinned"

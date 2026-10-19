@@ -382,6 +382,18 @@ async def _stored_or_refreshed(session: MaxSession, chat_id: int, chat: Any) -> 
     return await refresh(session, chat_id)
 
 
+async def mark_left(session: MaxSession, chat_id: int) -> None:
+    """The account left: raw.status LEFT (R3.1 statuses), monitoring off — a later join is a
+    real one, not already_member (QA-R4 D3)."""
+    try:
+        async with account_db(session.account_id) as db:
+            old = (await chats.statuses(db, session.account_id, [chat_id])).get(chat_id)
+            await chats.set_status(db, session.account_id, chat_id, "LEFT", old)
+            await db.commit()
+    except Exception:  # noqa: BLE001
+        log.warning("max[%s]: chat %s not marked left", session.alias, chat_id, exc_info=True)
+
+
 async def unmonitor(session: MaxSession, chat_id: int) -> None:
     try:
         async with account_db(session.account_id) as db:

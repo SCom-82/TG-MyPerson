@@ -121,3 +121,24 @@ async def test_resolve_without_joining_and_ro_reads_it(rw):
     assert (await _post(rw, "/chats/join", {"target": "@news"})).status_code == 403
     assert (await _post(rw, "/chats/resolve", {"target": "@nobody"})).status_code == 404
     assert _events(rw.id) == [] and await _chat_row(rw.id, CHANNEL_ID) is None  # a resolve stores nothing
+
+
+async def test_join_again_after_leave(rw):
+    """QA-R4 D3: a stored ACTIVE row outlived the leave; join answered already_member."""
+    _setup(rw)
+    assert (await _post(rw, "/chats/join", {"target": "join/AbC"})).json()["already_member"] is False
+    assert (await _post(rw, "/chats/leave", {"chat_id": GROUP_ID})).status_code == 200
+    row = await _chat_row(rw.id, GROUP_ID)
+    assert ((row.raw or {}).get("status"), row.is_monitored) == ("LEFT", False)
+    resolved = (await _post(rw, "/chats/resolve", {"target": "join/AbC"})).json()
+    assert resolved["is_joined"] is False
+
+    # MAX's answer without participants: the stored status decides
+    rw.env.server.groups[GROUP_ID]["participants"] = {}
+    assert (await _post(rw, "/chats/resolve", {"target": "join/AbC"})).json()["is_joined"] is False
+
+    rw.env.server.groups[GROUP_ID]["participants"] = {"9999": 1}
+    resp = await _post(rw, "/chats/join", {"target": "join/AbC"})
+    assert resp.status_code == 200 and resp.json()["already_member"] is False, resp.text
+    assert len(_calls(rw, "join_group")) == 2
+    assert [e[0] for e in _events(rw.id) if e[0] == "chat_join"] == ["chat_join"] * 2

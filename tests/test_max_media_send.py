@@ -304,3 +304,27 @@ async def test_upload_error_is_502_and_gives_the_slot_back(rw):
     resp = await _file(rw, "send-file", "c.mp4", MP4)
     assert resp.status_code == 502 and "UploadError" in resp.text
     assert _events(rw.id) == []
+
+
+async def test_video_note_thumbhash_goes_through_the_web_transport(stub, monkeypatch):
+    """QA-R4 D2: a binary thumbhash broke PyMax's web JSON ("invalid utf-8") before the frame
+    went out. Web: the CDN's base64 text; TCP: the decoded bytes, as PyMax does."""
+    import base64
+
+    from pymax.api.session.enums import DeviceType
+    from pymax.protocol import OutboundFrame
+    from pymax.protocol.ws.protocol import WsProtocol
+
+    monkeypatch.setattr(media, "READY_WAIT_SEC", 0.05)
+    binary = b"\xff\xfe\x00\x81\x90"
+    stub.host.note_json = {"thumbhash": base64.b64encode(binary).decode().rstrip("=")}
+    note = media.upload_attachment(MP4, "note.mp4", video_note=True, duration_ms=4000)
+
+    await stub.api.messages.send_message(5, None, attachments=[note])  # TCP
+    assert stub.sent(Opcode.MSG_SEND)[-1]["message"]["attaches"][0]["thumbhash"] == binary
+
+    stub.config.device.user_agent.device_type = DeviceType.WEB
+    await stub.api.messages.send_message(5, None, attachments=[note])
+    send = stub.sent(Opcode.MSG_SEND)[-1]
+    text = WsProtocol().encode(OutboundFrame(ver=11, opcode=64, seq=1, payload=send))
+    assert f'"thumbhash":"{stub.host.note_json["thumbhash"]}"' in text

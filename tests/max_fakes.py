@@ -431,9 +431,11 @@ class FakePyMaxClient:
 
     async def leave_group(self, chat_id: int) -> None:
         self._group_call("leave_group", chat_id)
+        self.server.groups.get(chat_id, {}).get("participants", {}).pop(str(self.server.user_id), None)
 
     async def leave_channel(self, chat_id: int) -> None:
         self._group_call("leave_channel", chat_id)
+        self.server.groups.get(chat_id, {}).get("participants", {}).pop(str(self.server.user_id), None)
 
     async def delete_chat(self, chat_id: int, last_event_time=None, for_all: bool = True) -> None:
         self._group_call("delete_chat", chat_id, for_all)
