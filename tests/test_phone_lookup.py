@@ -422,3 +422,54 @@ async def test_max_send_to_person_refusals(mx, aliases):  # noqa: F811
     mw._mode_cache.clear()
     assert (await _to_person(mx, person)).status_code == 403
     assert [w for w in mx.env.server.writes if w[0] == "send_message"] == []
+
+
+# ---------------------------------------------------------------------------
+# QA-R2-D1: MCP error texts of contact_by_phone carry no full number
+# ---------------------------------------------------------------------------
+
+def test_mask_phones_in_text():
+    from app.utils.phone import mask_phones_in_text
+
+    assert mask_phones_in_text("Input validation error: 79278975956 is not of type 'string'") == \
+        "Input validation error: +7******5956 is not of type 'string'"
+    assert mask_phones_in_text("bad +7 (927) 897-59-56 and ['+79001234567']") == \
+        "bad +7******5956 and ['+7******4567']"
+    assert mask_phones_in_text("chat 12345, id 117461068428223441") == "chat 12345, id 117461068428223441"
+
+
+async def test_mcp_errors_of_contact_by_phone_are_masked(mx, monkeypatch):
+    import app.main as main_module
+    from app.authz import keys
+    from tests.test_mcp_http import session
+
+    _, key = await keys.create_key(scope="account", account_id=mx.id, label="mcp-phone-mask")
+    mx.env.server.phone_book.clear()
+    mx.env.server.lookup_errors = [ApiError(opcode=46, error="search.failed",
+                                            message="no contact for +7 927 897-59-56 (79278975956)")]
+    try:
+        async with session(main_module.app, key) as s:
+            texts = [(await s.call_tool("contact_by_phone", args)).content[0].text for args in (
+                {"phone": 79278975956}, {"phone": ["+79001234567"]}, {"phone": PHONE, "refresh": True})]
+    finally:
+        sql("DELETE FROM api_keys WHERE label = 'mcp-phone-mask'")
+    for _ in range(100):
+        rows = sql("SELECT status, error FROM audit_logs WHERE alias = %s AND tool = 'contact_by_phone'"
+                   " ORDER BY id", (mx.env.alias,), fetch=True)
+        if len(rows) >= 3:
+            break
+        await asyncio.sleep(0.05)
+    assert [r[0] for r in rows] == ["error"] * 3
+    assert texts[0].startswith("Input validation error") and MASKED in texts[0]
+    assert "+7******4567" in texts[1]
+    assert texts[2].startswith("HTTP 502") and MASKED in texts[2]
+    blob = " ".join(texts) + repr(rows)
+    for number in ("79278975956", "79001234567", "927 897", "897-59-56"):
+        assert number not in blob, number
+
+
+def test_mask_phones_in_text_two_numbers_in_a_row():
+    from app.utils.phone import mask_phones_in_text
+
+    assert mask_phones_in_text("no contact for +7 927 897-59-56 (79278975956)") == \
+        "no contact for +7******5956 (+7******5956)"

@@ -32,7 +32,7 @@ from app.authz.policy import AuthContext, audit, authorize
 from app.database import async_session
 from app.mcp.tools import BY_NAME, Caller, ToolError, coerce_ids, safe_ints, visible
 from app.models import Account
-from app.utils.phone import mask_phone_params
+from app.utils.phone import mask_phone_params, mask_phones_in_text
 
 log = logging.getLogger(__name__)
 
@@ -81,7 +81,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent] | typ
         args = coerce_ids(args, tool.schema)
         jsonschema.validate(instance=args, schema=tool.schema)
     except (ToolError, jsonschema.ValidationError) as exc:
-        error = str(exc) if isinstance(exc, ToolError) else f"Input validation error: {exc.message}"
+        error = _scrub(tool, str(exc) if isinstance(exc, ToolError) else f"Input validation error: {exc.message}")
         audit(ctx, tool.route, status="error", is_write=tool.is_write, error=error[:500])
         return types.CallToolResult(content=_text(error), isError=True)
     chat = args.get("chat_id", args.get("to_chat_id"))
@@ -96,16 +96,29 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent] | typ
     try:
         result = await tool.call(caller, args)
     except ToolError as exc:
-        audit(ctx, tool.route, status="error", error=str(exc)[:500], **common)
-        return _text(str(exc))
+        error = _scrub(tool, str(exc))
+        audit(ctx, tool.route, status="error", error=error[:500], **common)
+        return _text(error)
     except Exception as exc:  # noqa: BLE001 — the agent gets the error, the server stays up
-        log.exception("mcp tool %s failed", name)
-        audit(ctx, tool.route, status="error", error=f"{type(exc).__name__}: {exc}"[:500], **common)
-        return _text(f"Error: {exc}")
+        if tool.route in PHONE_TOOLS:  # the traceback would carry the number
+            log.error("mcp tool %s failed: %s", name, _scrub(tool, f"{type(exc).__name__}: {exc}"))
+        else:
+            log.exception("mcp tool %s failed", name)
+        audit(ctx, tool.route, status="error", error=_scrub(tool, f"{type(exc).__name__}: {exc}")[:500], **common)
+        return _text(_scrub(tool, f"Error: {exc}"))
     if tool.route == "contact_by_phone" and isinstance(result, dict):
         common["target_user_id"] = result.get("user_id")  # the number itself is not audited (Р-19)
     audit(ctx, tool.route, status="ok", **common)
     return _text(json.dumps(safe_ints(result), ensure_ascii=False, indent=2, default=str))
+
+
+# Tools whose arguments carry a phone: their error texts (schema errors repeat the
+# value, messenger errors may quote it) reach the audit and the agent masked (Р-19, QA-R2-D1).
+PHONE_TOOLS = frozenset({"contact_by_phone"})
+
+
+def _scrub(tool, text: str) -> str:
+    return mask_phones_in_text(text) if tool.route in PHONE_TOOLS else text
 
 
 def _text(text: str) -> list[types.TextContent]:
