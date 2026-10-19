@@ -7,6 +7,7 @@ from typing import Any, TypeVar
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from app.authz.write_limits import SEND, write_slot
 from app.max.pool import MaxAliasNotFound, get_max_pool
 from app.max.session import MaxSession
 
@@ -100,6 +101,15 @@ def param_not_supported(request: Request, tool: str, parameter: str) -> JSONResp
         "platform": "max",
         "alias": alias_of(request),
     })
+
+
+async def send_text(request: Request, session: MaxSession, tool: str, chat_id: int, text: str,
+                    reply_to: int | None = None) -> Any:
+    """A text message within the account's write limits, stored at once (send_message, send_to_person)."""
+    async with write_slot(request, SEND, tool, chat_id):
+        msg = await call_max(session.client.send_message(chat_id, text, reply_to=reply_to))
+    await store_sent(session, msg, chat_id)
+    return msg
 
 
 async def store_sent(session: MaxSession, msg: Any, chat_id: int, *, is_edit: bool = False) -> None:

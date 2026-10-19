@@ -59,8 +59,8 @@ class ToPersonRequest(BaseModel):
 @router.post("/messages/to-person", name="send_to_person")
 async def send_to_person(req: ToPersonRequest, request: Request):
     account = await _rw_account(request)
-    if account.platform != "telegram":
-        raise HTTPException(status_code=501, detail=f"send_to_person is not supported for {account.platform} yet")
+    if account.platform == "max":
+        return await _send_to_person_max(request, account, req)
     async with account_db(account.id) as db:
         best = await people_queries.reach_person(db, account, req.person_id)
     if best is None:
@@ -72,6 +72,28 @@ async def send_to_person(req: ToPersonRequest, request: Request):
     client = await require_authorized_client(request)
     async with write_slot(request, SEND, "send_to_person", identity.external_user_id):
         return await _send_to_person(client, account, identity, user, reach, req)
+
+
+async def _send_to_person_max(request: Request, account: Account, req: ToPersonRequest) -> dict:
+    """MAX addresses a person by id: the dialog is me XOR peer, known before the
+    first message (plan 2026-10-19 PR-D2). A first message to a chat without
+    history counts in new_dialogs_per_day like any send."""
+    from app.max.api.common import authorized_or_error, send_text
+
+    if account.external_user_id is None:
+        raise HTTPException(status_code=409, detail="account identity unknown: log the MAX session in first")
+    async with account_db(account.id) as db:
+        best = await people_queries.reach_person(db, account, req.person_id)
+    if best is None:
+        raise HTTPException(status_code=404, detail="person is not reachable from this account")
+    identity, _, reach = best
+    chat_id = account.external_user_id ^ identity.external_user_id
+    session = await authorized_or_error(request)
+    if isinstance(session, JSONResponse):
+        return session
+    msg = await send_text(request, session, "send_to_person", chat_id, req.text)
+    return {"status": "sent", "person_id": req.person_id, "method": reach.method, "note": reach.note,
+            "chat_id": chat_id, "message_id": msg.id}
 
 
 async def _send_to_person(client, account: Account, identity, user, reach, req: ToPersonRequest) -> dict:

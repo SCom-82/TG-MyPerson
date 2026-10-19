@@ -45,8 +45,10 @@ def _cleanup_people(*external_ids: int) -> None:
     rows = sql("SELECT DISTINCT person_id FROM identities WHERE external_user_id = ANY(%s)",
                (list(external_ids),), fetch=True)
     persons = [r[0] for r in rows]
-    sql("DELETE FROM users WHERE identity_id IN (SELECT id FROM identities WHERE external_user_id = ANY(%s))",
-        (list(external_ids),))
+    ids = "(SELECT id FROM identities WHERE external_user_id = ANY(%s))"
+    sql(f"DELETE FROM messages m USING users u WHERE m.account_id = u.account_id AND m.sender_user_id = u.id"
+        f" AND u.identity_id IN {ids}", (list(external_ids),))
+    sql(f"DELETE FROM users WHERE identity_id IN {ids}", (list(external_ids),))
     sql("DELETE FROM identities WHERE external_user_id = ANY(%s)", (list(external_ids),))
     if persons:
         sql("DELETE FROM people_merge_log WHERE from_person_id = ANY(%s) OR to_person_id = ANY(%s)",
@@ -355,3 +357,68 @@ async def test_one_person_across_tg_and_max(tg):
     max_body = (await _lookup(tg.rw)).json()
     assert tg_body["person_id"] == max_body["person_id"]
     assert write_limits.LOOKUP_DEFAULT == 20
+
+
+# ---------------------------------------------------------------------------
+# send_to_person on MAX (plan §4 PR-D2, QA R2-9)
+# ---------------------------------------------------------------------------
+
+async def _to_person(w, person_id: int, text: str = "тест tg-myperson R2, не отвечать", headers=None):
+    return await w.http.post("/api/v1/messages/to-person", headers=headers or w.env.h(),
+                             json={"person_id": person_id, "text": text})
+
+
+async def test_max_send_to_person_new_dialog_once_and_listed(mx):
+    person = (await _lookup(mx)).json()["person_id"]
+    chat = ME ^ PEER
+    resp = await _to_person(mx, person)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert {k: body[k] for k in ("status", "person_id", "method", "chat_id")} == {
+        "status": "sent", "person_id": person, "method": "direct", "chat_id": chat}
+    assert mx.env.server.writes[-1][:3] == ("send_message", chat, "тест tg-myperson R2, не отвечать")
+    listed = (await mx.http.get("/api/v1/messages", headers=mx.env.h(), params={"chat_id": chat})).json()["items"]
+    assert [m["message_id"] for m in listed] == [body["message_id"]] and listed[0]["is_outgoing"] is True
+
+    mx.clock.at(60)
+    assert (await _to_person(mx, person, "второе")).status_code == 200
+    sends = [e for e in _events(mx.id) if e[0] == "send"]
+    assert [(e[1], e[2], e[3]) for e in sends] == [("send_to_person", chat, True), ("send_to_person", chat, False)]
+    status = (await mx.http.get(f"/api/v1/accounts/{mx.id}/write-limits", headers=ADMIN_KEY)).json()
+    assert status["counters"]["new_dialogs_last_day"] == 1
+
+
+async def test_max_send_to_person_reply_is_not_a_new_dialog(mx):
+    person = (await _lookup(mx)).json()["person_id"]
+    chat = ME ^ PEER
+    await mx.client.push({"opcode": 128, "cmd": 0, "payload": {"chatId": chat, "message": {
+        "id": "5", "time": 1_760_000_000_000, "type": "USER", "text": "привет", "attaches": [], "sender": PEER}}})
+    assert (await _to_person(mx, person)).status_code == 200
+    assert [e[3] for e in _events(mx.id) if e[0] == "send"] == [False]
+
+
+async def test_max_send_to_person_errors_and_slot(mx):
+    person = (await _lookup(mx)).json()["person_id"]
+    mx.env.server.write_errors = [ApiError(opcode=64, error="chat.denied", message="denied")]
+    resp = await _to_person(mx, person)
+    assert resp.status_code == 502, resp.text
+    assert [e for e in _events(mx.id) if e[0] == "send"] == []  # given back
+    mx.env.server.write_errors = [TimeoutError("no answer")]
+    resp = await _to_person(mx, person)
+    assert resp.status_code == 504 and "may have been sent" in resp.text
+    assert len([e for e in _events(mx.id) if e[0] == "send"]) == 1  # kept: it may be out
+
+
+async def test_max_send_to_person_refusals(mx, aliases):  # noqa: F811
+    assert (await _to_person(mx, 999_999_999)).status_code == 404
+    person = (await _lookup(mx)).json()["person_id"]
+    sql("UPDATE accounts SET external_user_id = NULL WHERE id = %s", (mx.id,))
+    try:
+        resp = await _to_person(mx, person)
+        assert resp.status_code == 409 and "identity unknown" in resp.text
+    finally:
+        sql("UPDATE accounts SET external_user_id = %s WHERE id = %s", (ME, mx.id))
+    sql("UPDATE accounts SET mode = 'ro' WHERE id = %s", (mx.id,))
+    mw._mode_cache.clear()
+    assert (await _to_person(mx, person)).status_code == 403
+    assert [w for w in mx.env.server.writes if w[0] == "send_message"] == []

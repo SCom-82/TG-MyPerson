@@ -25,7 +25,7 @@ from app.database import get_db
 from app.api import data_reads
 from app.max import media, repo
 from app.services.tg_store import new_mode
-from app.max.api.common import authorized_or_error, call_max, param_not_supported, store_sent
+from app.max.api.common import authorized_or_error, call_max, param_not_supported, send_text, store_sent
 from app.max.schemas import MaxMessageResponse
 from app.schemas import EditMessageRequest, ForwardMessageRequest, PaginatedResponse, ReactRequest, SendMessageRequest
 
@@ -181,9 +181,7 @@ async def send_message(req: SendMessageRequest, request: Request):
     session = await authorized_or_error(request)
     if isinstance(session, JSONResponse):
         return session
-    async with write_slot(request, SEND, "send_message", req.chat_id):
-        msg = await call_max(session.client.send_message(req.chat_id, req.text, reply_to=req.reply_to_message_id))
-    await store_sent(session, msg, req.chat_id)
+    msg = await send_text(request, session, "send_message", req.chat_id, req.text, reply_to=req.reply_to_message_id)
     return {"status": "sent", "message_id": msg.id, "chat_id": req.chat_id, "schedule_date": None}
 
 
