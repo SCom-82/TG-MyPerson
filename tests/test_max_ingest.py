@@ -346,7 +346,7 @@ async def test_read_endpoints(env, clean_max, aliases):
     photo = (await env.client.get(f"/api/v1/messages/{GROUP}/3", headers=h)).json()
     assert photo["media"][0]["file_type"] == "photo"
     assert photo["deleted_at"] is None
-    assert list(photo)[-4:] == ["deleted_at", "forward", "contacts", "poll"]  # TG fields first, in TG order
+    assert list(photo)[-5:] == ["deleted_at", "forward", "contacts", "poll", "keyboard"]  # TG fields first (+ Р5 keyboard)
     deleted = (await env.client.get(f"/api/v1/messages/{DIALOG}/1", headers=h)).json()
     assert deleted["deleted_at"] is not None and deleted["text"] == "Привет"
     assert (await env.client.get(f"/api/v1/messages/{GROUP}/404", headers=h)).status_code == 404
