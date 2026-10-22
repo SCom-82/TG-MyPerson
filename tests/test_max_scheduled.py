@@ -64,7 +64,8 @@ async def test_schedule_list_cancel_send_now(rw):
     frame = _frames(rw, int(Opcode.MSG_EDIT))[-1]
     assert (frame["messageId"], frame["text"], set(frame["delayedAttributes"])) == (
         body["message_id"], "напомнить", {"timeToFire"})
-    assert len(_sends(rw)) == 1  # send now takes no slot
+    assert len(_sends(rw)) == 1  # send now is not a second send: an action slot (review 19 R19-1)
+    assert [e[1] for e in _events(rw.id) if e[0] == "action"] == ["send_scheduled_now"]
     assert (await _get(rw, "/messages/scheduled", chat_id=DIALOG)).json()["total"] == 0
     resp = await rw.http.post(f"/api/v1/messages/scheduled/{DIALOG}/{body['message_id']}/send-now",
                               headers=rw.env.h())
@@ -75,7 +76,7 @@ async def test_schedule_list_cancel_send_now(rw):
     assert resp.json() == {"status": "cancelled", "chat_id": DIALOG, "message_id": second["message_id"]}
     assert _frames(rw, int(Opcode.MSG_DELETE))[-1] == {"chatId": DIALOG, "messageIds": [second["message_id"]],
                                                        "forMe": False, "itemType": "DELAYED"}
-    assert [e[1] for e in _events(rw.id) if e[0] == "action"] == ["cancel_scheduled"]
+    assert [e[1] for e in _events(rw.id) if e[0] == "action"] == ["send_scheduled_now", "cancel_scheduled"]
 
 
 async def test_schedule_date_bounds_and_media_stay_501(rw):
@@ -197,3 +198,15 @@ def test_delayed_frames_match_the_client_schemas():
                      "delayedAttributes": {"timeToFire": 1000}}
     assert set(frames.fire_now_frame(5, {"id": 7}, 1)) == {"chatId", "messageId", "delayedAttributes"}
     assert frames.delayed_attrs(5) == {"timeToFire": 5, "notifySender": True}
+
+
+
+async def test_send_now_stops_with_writes(rw):
+    """review 19 R19-1: the write stop holds send now."""
+    from tests.test_max_write_limits import _limits
+
+    mid = (await _schedule(rw, "текст")).json()["message_id"]
+    await _limits(rw, enabled=False)
+    resp = await rw.http.post(f"/api/v1/messages/scheduled/{DIALOG}/{mid}/send-now", headers=rw.env.h())
+    assert resp.status_code == 403, resp.text
+    assert _frames(rw, int(Opcode.MSG_EDIT)) == []
