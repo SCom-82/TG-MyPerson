@@ -258,3 +258,14 @@ def test_read_frames_match_the_client_schemas():
     assert frames.search_frame(1, "q", 20, 9)["marker"] == 9
     # 74: chatId z, messageIds I(z), readOnly F? — always true (Р-77)
     assert frames.post_stats_frame(1, [2, 3]) == {"chatId": 1, "messageIds": [2, 3], "readOnly": True}
+
+
+async def test_transcript_cache_has_a_ceiling(rw, fast, monkeypatch):
+    """review 19 R19-5: at most TRANSCRIBE_CACHE_MAX entries, the oldest go first."""
+    monkeypatch.setattr(mx_messages, "TRANSCRIBE_CACHE_MAX", 1)
+    for mid, media_id in ((63, 6300), (64, 6400)):
+        _say(rw, DIALOG, mid, attaches=[{"_type": "AUDIO", "audioId": media_id, "duration": 1, "url": "https://a"}])
+        rw.env.server.transcripts[media_id] = [{"transcriptionStatus": 1, "transcription": "x"}]
+        await _post(rw, f"/messages/{DIALOG}/{mid}/transcribe")
+        fast[1][0] += 1
+    assert [k[3] for k in mx_messages._transcripts] == [6400]

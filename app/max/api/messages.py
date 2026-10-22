@@ -880,6 +880,7 @@ TRANSCRIBE_POLL_SEC = 2.0
 TRANSCRIBE_WAIT_SEC = 20.0
 TRANSCRIBE_MIN_GAP_SEC = 10.0  # one MAX call per message in 10 s (plan Р5 §4 PR-R5-2)
 TRANSCRIBE_KEEP_SEC = 3600.0
+TRANSCRIBE_CACHE_MAX = 1000  # entries; the oldest go first (review 19 R19-5)
 # (account, chat, message, media) → (when, answer): ready texts for an hour, the rest for the gap
 _transcripts: dict[tuple, tuple[float, dict]] = {}
 _sleep = asyncio.sleep
@@ -928,4 +929,6 @@ async def transcribe_voice(chat_id: int, message_id: int, request: Request, req:
     for old in [k for k, (at, _) in _transcripts.items() if now - at >= TRANSCRIBE_KEEP_SEC]:
         _transcripts.pop(old, None)
     _transcripts[key] = (now, answer)
+    while len(_transcripts) > TRANSCRIBE_CACHE_MAX:
+        _transcripts.pop(min(_transcripts, key=lambda k: _transcripts[k][0]))
     return answer

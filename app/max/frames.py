@@ -197,12 +197,12 @@ async def press(client: Any, callback_id: str, button_type: str, payload: str | 
                                                                                        payload)))
 
 
-def bot_start_frame(*, chat_id: int | None, bot_id: int, start_payload: str | None) -> dict:
+def bot_start_frame(*, chat_id: int | None, bot_id: int, start_payload: str | None, cid: int | None = None) -> dict:
     """MSG_SEND 64 with a CONTROL botStarted (Р-65): to the dialog by chatId, else by userId."""
     attach = {"_type": "CONTROL", "event": "botStarted"}
     if start_payload is not None:
         attach["startPayload"] = start_payload
-    frame: dict = {"message": {"cid": int(time.time() * 1000), "attaches": [attach]}}
+    frame: dict = {"message": {"cid": cid if cid is not None else int(time.time() * 1000), "attaches": [attach]}}
     if chat_id is not None:
         frame["chatId"] = chat_id
     else:
@@ -215,13 +215,13 @@ async def start_bot(client: Any, chat_id: int, bot_id: int, start_payload: str |
     frame by userId: nothing was sent by the refused one, so it is one send."""
     try:
         return _payload(await client._app.invoke(Opcode.MSG_SEND, bot_start_frame(
-            chat_id=chat_id, bot_id=bot_id, start_payload=start_payload)))
+            chat_id=chat_id, bot_id=bot_id, start_payload=start_payload, cid=groups.next_cid(client))))
     except ApiError as exc:
         if not _about_the_chat(exc):
             raise  # flood, a blocked or stopped bot ...: no second frame (review 19 R19-3)
         log.info("max: botStarted by chatId %s refused (%s), by userId", chat_id, exc)
     return _payload(await client._app.invoke(Opcode.MSG_SEND, bot_start_frame(
-        chat_id=None, bot_id=bot_id, start_payload=start_payload)))
+        chat_id=None, bot_id=bot_id, start_payload=start_payload, cid=groups.next_cid(client))))
 
 
 # Errors that say the dialog id was not taken (the reason for the userId frame); narrowed by
@@ -389,12 +389,13 @@ def delayed_attrs(when_ms: int, *, notify: bool = True) -> dict:
 
 
 def schedule_frame(chat_id: int, text: str, when_ms: int, reply_to: int | None = None,
-                   elements: list | None = None) -> dict:
+                   elements: list | None = None, cid: int | None = None) -> dict:
     """MSG_SEND 64 of a delayed text, PyMax's shape plus delayedAttributes; text and elements as
     prepare_text made them (Р-78). Ours, not PyMax's send_message(send_at=): PyMax's Message
     requires delayedAttributes.notifyOpponents, the client's schema does not — an answer without
     it would fail after the frame went out."""
-    message: dict = {"text": text, "cid": int(time.time() * 1000), "elements": dump_elements(elements),
+    message: dict = {"text": text, "cid": cid if cid is not None else int(time.time() * 1000),
+                     "elements": dump_elements(elements),
                      "attaches": [], "delayedAttributes": delayed_attrs(when_ms)}
     if reply_to:
         message["link"] = {"type": "REPLY", "messageId": reply_to}
@@ -405,7 +406,7 @@ async def schedule(client: Any, chat_id: int, text: str, when_ms: int, reply_to:
                    elements: list | None = None) -> dict:
     """→ MAX's raw answer {chatId, message}; its id is read apart (R17-1)."""
     return _payload(await client._app.invoke(Opcode.MSG_SEND, schedule_frame(chat_id, text, when_ms, reply_to,
-                                                                             elements)))
+                                                                             elements, groups.next_cid(client))))
 
 
 def list_delayed_frame(chat_id: int) -> dict:
