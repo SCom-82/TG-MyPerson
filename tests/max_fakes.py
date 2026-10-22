@@ -113,6 +113,11 @@ class FakeMaxServer:
         self.folders: list[dict] = []
         self.removed_contacts: list[int] = []
         self.vote_answer: dict | None = None  # SEND_VOTE's answer instead of the state (review 17 R17-1)
+        # Release 5 (plan 2026-10-22 Р5): extra invite links per chat, the raw answer of a frame
+        # by opcode instead of the simulated one (None: no payload), members a type-ADMIN read gives
+        self.chat_links: dict[int, list[dict]] = {}
+        self.next_link_id = 300
+        self.frame_answers: dict[int, dict | None] = {}
 
         self.factory_calls: list[dict] = []
         self.clients: list["FakePyMaxClient"] = []
@@ -370,12 +375,94 @@ class FakePyMaxClient:
             state = await self.vote_poll(payload["chatId"], payload["messageId"], payload["pollId"],
                                          payload["answersIds"])
             return SimpleNamespace(payload=self.server.vote_answer or {"state": state.model_dump(by_alias=True)})
+        if int(opcode) in self.server.frame_answers:
+            answer = self.server.frame_answers[int(opcode)]
+            return SimpleNamespace(payload=answer)
+        if int(opcode) == 64:  # MSG_SEND with a CONTROL "new": create a chat (Р-63)
+            return SimpleNamespace(payload=self._create_from_frame(payload))
+        if int(opcode) in (221, 222, 223):  # extra invite links (Р-61): chatId is typed
+            return SimpleNamespace(payload=self._links(int(opcode), payload))
         g = self._group(payload["chatId"])
-        if payload.get("type") == "ADMIN" and payload.get("operation") == "remove":
-            g["admins"] = [a for a in g.get("admins", []) if a not in payload["userIds"]]
-        if int(opcode) == 55 and payload.get("pinMessageId") == 0 and not self.server.unpin_ignored:
-            self.server.pinned.pop(payload["chatId"], None)
+        if int(opcode) == 77:
+            return SimpleNamespace(payload=self._members_update(g, payload))
+        if int(opcode) == 59:
+            return SimpleNamespace(payload=self._members_read(g, payload))
+        if int(opcode) == 55:
+            if payload.get("pinMessageId") == 0 and not self.server.unpin_ignored:
+                self.server.pinned.pop(payload["chatId"], None)
+            if payload.get("changeOwnerId") is not None:
+                g["owner"] = payload["changeOwnerId"]
+                return SimpleNamespace(payload={"chat": self._chat(g["id"]).model_dump(by_alias=True)})
+            if payload.get("options"):
+                g.setdefault("options", {}).update(payload["options"])
         return None
+
+    def _members_update(self, g: dict, payload: dict) -> dict | None:
+        users = payload.get("userIds") or []
+        if payload.get("type") == "ADMIN":
+            if payload["operation"] == "remove":
+                g["admins"] = [a for a in g.get("admins", []) if a not in users]
+            else:
+                g["admins"] = sorted({*g.get("admins", []), *users})
+                for u in users:
+                    g.setdefault("adminParticipants", {})[str(u)] = {"permissions": payload["permissions"]}
+            return None
+        if payload["operation"] == "add":
+            for u in users:
+                g["participants"][str(u)] = int(time.time() * 1000)
+            g["participantsCount"] = len(g["participants"])
+            return {"chat": self._chat(g["id"]).model_dump(by_alias=True)}
+        for u in users:
+            g["participants"].pop(str(u), None)
+        g["participantsCount"] = len(g["participants"])
+        deleted = []
+        if payload.get("cleanMsgPeriod") == -1:
+            deleted = [int(m["id"]) for m in self.server.history.get(g["id"], []) if m.get("sender") in users]
+        return {"deletedMessageIds": deleted}
+
+    def _members_read(self, g: dict, payload: dict) -> dict:
+        if payload.get("type") == "ADMIN":
+            ids = sorted({g["owner"], *g.get("admins", [])})
+        else:
+            ids = sorted(int(u) for u in g["participants"])
+        query = (payload.get("query") or "").lower()
+        users = [self._user_of(u) for u in ids]
+        if query:
+            users = [u for u in users if query in " ".join(
+                filter(None, [n.get("firstName") for n in u.get("names", [])] + [u.get("link")])).lower()]
+        start = payload.get("marker") or 0
+        page = users[start:start + min(payload.get("count", 50), self.server.members_page)]
+        nxt = start + len(page) if start + len(page) < len(users) else None
+        return {"members": [{"contact": u, "presence": {}} for u in page], "marker": nxt}
+
+    def _create_from_frame(self, payload: dict) -> dict:
+        att = payload["message"]["attaches"][0]
+        self.server.next_group_id -= 1
+        cid, now = self.server.next_group_id, int(time.time() * 1000)
+        members = [self.server.user_id, *att.get("userIds", [])]
+        self.server.groups[cid] = {"id": cid, "type": att["chatType"], "status": "ACTIVE",
+                                   "owner": self.server.user_id, "title": att["title"],
+                                   "participants": {str(u): now for u in members}, "participantsCount": len(members),
+                                   "admins": [], "lastEventTime": now}
+        msg = self._new_message(cid, None, attaches=[{"_type": "CONTROL", "event": "new", "title": att["title"]}])
+        return {"chatId": cid, "chat": self._chat(cid).model_dump(by_alias=True),
+                "message": msg.model_dump(by_alias=True, exclude={"chat_id"})}
+
+    def _links(self, opcode: int, payload: dict) -> dict:
+        cid = payload["chatId"]["primaryId"]
+        self._group(cid)
+        links = self.server.chat_links.setdefault(cid, [])
+        if opcode == 221:
+            return {"links": links}
+        if opcode == 222:
+            self.server.next_link_id += 1
+            link = {"id": self.server.next_link_id, "link": f"https://max.ru/join/x{self.server.next_link_id}",
+                    "joinCount": 0, **({"title": payload["title"]} if "title" in payload else {})}
+            links.append(link)
+            return {"link": link}
+        gone = [i for i in payload["linkIds"] if any(link["id"] == i for link in links)]
+        self.server.chat_links[cid] = [link for link in links if link["id"] not in gone]
+        return {"linkIds": gone}
 
     async def change_group_profile(self, chat_id: int, name=None, description=None, photo=None) -> None:
         self._group_call("change_group_profile", chat_id, name, description)

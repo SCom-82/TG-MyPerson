@@ -36,6 +36,9 @@ MAX_R4_WRITE_TOOLS = (
     "create_folder", "update_folder", "delete_folder",
 )
 MAX_R4_READ_TOOLS = ("get_reactions", "list_folders")
+# MAX release 5 without a TG counterpart (plan 2026-10-22 Р5 Р-61, Р-62): MAX router only.
+MAX_R5_WRITE_TOOLS = ("transfer_group_ownership", "create_invite_link", "revoke_invite_links")
+MAX_R5_READ_TOOLS = ("list_invite_links",)
 
 # ---------------------------------------------------------------------------
 # Category 1: writes to the external messenger — blocked on ro
@@ -72,6 +75,8 @@ WRITE_MESSENGER_TOOLS: frozenset[str] = frozenset({
     *GROUP_WRITE_TOOLS,
     # MAX release 4 (plan 2026-10-19 Р4): rw only
     *MAX_R4_WRITE_TOOLS,
+    # MAX release 5 (plan 2026-10-22 Р5): rw only
+    *MAX_R5_WRITE_TOOLS,
 })
 
 # Backward-compatible name: same object, so `in` checks and imports keep working.
@@ -119,6 +124,9 @@ MAX_ONLY_TOOLS: frozenset[str] = frozenset({
     # release 4 (plan 2026-10-19 Р4 Р-32)
     *MAX_R4_WRITE_TOOLS,
     *MAX_R4_READ_TOOLS,
+    # release 5 (plan 2026-10-22 Р5)
+    *MAX_R5_WRITE_TOOLS,
+    *MAX_R5_READ_TOOLS,
 })
 
 # ---------------------------------------------------------------------------
@@ -167,6 +175,8 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset({
     *GROUP_READ_TOOLS,
     # MAX release 4, reads (plan 2026-10-19 Р4 Р-47)
     *MAX_R4_READ_TOOLS,
+    # MAX release 5, reads (plan 2026-10-22 Р5)
+    *MAX_R5_READ_TOOLS,
 })
 
 # ---------------------------------------------------------------------------

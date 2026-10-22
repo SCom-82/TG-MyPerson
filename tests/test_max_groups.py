@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 from pymax import ApiError
+from pymax.api.chats.enums import ChannelPermissions
 from pymax.api.chats.service import ChatService
 from pymax.protocol import Opcode
 
@@ -55,6 +56,17 @@ async def _chat_row(account_id: int, chat_id: int):
 
 def _calls(w, name: str) -> list[tuple]:
     return [c for c in w.env.server.group_calls if c[0] == name]
+
+
+def _admin_frames(w) -> list[tuple]:
+    """(chat, user, mask) of every 77 ADMIN add (plan Р5 Р-52: our frame, not PyMax's add_admin)."""
+    return [(c[2]["chatId"], c[2]["userIds"][0], c[2]["permissions"]) for c in _calls(w, "invoke")
+            if c[1] == int(Opcode.CHAT_MEMBERS_UPDATE) and c[2].get("type") == "ADMIN"
+            and c[2]["operation"] == "add"]
+
+
+GROUP_PERSON = ["add_remove_member", "change_chat_info", "pin_message", "read_all_messages", "edit_link",
+                "delete_message", "call"]  # 251, the MAX app's default for a person in a group (Р-53)
 
 
 async def _foreign(w, kind: str = "group", owner: int = 9999) -> None:
@@ -150,11 +162,11 @@ async def test_admins(rw):
     gid = await _create(rw, user_ids=(A, B))
     resp = await _post(rw, f"/groups/{gid}/admins", {"user_id": A})
     assert resp.status_code == 200, resp.text
-    assert _calls(rw, "add_admin")[-1] == ("add_admin", gid, A, 1050)
-    assert resp.json()["permissions"] == ["add_remove_member", "change_chat_info", "pin_message", "delete_message"]
+    assert _admin_frames(rw)[-1] == (gid, A, 251)
+    assert resp.json()["permissions"] == GROUP_PERSON
     assert resp.json()["admins"] == [A]
     await _post(rw, f"/groups/{gid}/admins", {"user_id": B, "permissions": ["add_admin"]})
-    assert _calls(rw, "add_admin")[-1] == ("add_admin", gid, B, 4)
+    assert _admin_frames(rw)[-1] == (gid, B, 4)
     resp = await _post(rw, f"/groups/{gid}/admins", {"user_id": B, "permissions": ["post_message"]})
     assert resp.status_code == 422 and "channel rights" in resp.text  # a channel right (Р4 Р-40)
     resp = await _post(rw, f"/groups/{gid}/admins", {"user_id": B, "permissions": ["fly"]})
@@ -359,7 +371,7 @@ async def test_mcp_tools_by_platform_and_mode(rw):
     names = lambda platform, mode: {t.name for t in mcp_tools.visible(  # noqa: E731
         mcp_tools.Caller("account", rw.id, rw.env.alias, platform, mode, "http://test"))}
     max_rw, max_ro, tg_rw, tg_ro = names("max", "rw"), names("max", "ro"), names("telegram", "rw"), names("telegram", "ro")
-    assert (len(max_rw), len(max_ro), len(tg_rw), len(tg_ro)) == (63, 24, 46, 21)
+    assert (len(max_rw), len(max_ro), len(tg_rw), len(tg_ro)) == (67, 25, 46, 21)  # R5-1: +4 / +1
     assert {"create_group", "delete_group", "get_chat_members", "leave_chat", "get_my_rights"} <= max_rw
     assert {"get_chat_members", "get_my_rights", "get_invite_link", "list_join_requests"} <= max_ro
     assert not {"create_group", "leave_chat"} & max_ro and not {"create_group", "get_invite_link"} & tg_rw
@@ -397,8 +409,8 @@ def _service():
      {"chatId": -5, "userIds": [1, 2], "showHistory": True, "operation": "add"}),
     (lambda s: s.remove_users_from_group(-5, [1], clean_msg_period=0), Opcode.CHAT_MEMBERS_UPDATE,
      {"chatId": -5, "userIds": [1], "operation": "remove", "cleanMsgPeriod": 0}),
-    (lambda s: s.add_admin(-5, 1, groups.permission_values(None)), Opcode.CHAT_MEMBERS_UPDATE,
-     {"chatId": -5, "userIds": [1], "type": "ADMIN", "operation": "add", "permissions": 1050}),
+    (lambda s: s.add_admin(-5, 1, [ChannelPermissions.ADD_ADMIN, ChannelPermissions.PIN_MESSAGE]),
+     Opcode.CHAT_MEMBERS_UPDATE, groups.admin_frame(-5, 1, 20)),  # our frame (Р5) has PyMax's shape
     (lambda s: s.rework_invite_link(-5), Opcode.CHAT_UPDATE, {"chatId": -5, "revokePrivateLink": True}),
     (lambda s: s.leave_group(-5), Opcode.CHAT_LEAVE, {"chatId": -5}),
 ])
@@ -411,9 +423,10 @@ async def test_pymax_group_frames(call, opcode, payload):
 
 def test_remove_admin_frame_mirrors_add_admin():
     assert groups.remove_admin_frame(-5, 1) == {"chatId": -5, "userIds": [1], "type": "ADMIN", "operation": "remove"}
-    assert groups.permission_mask(["add_admin"]) == 4 and groups.permission_names(1050) == list(groups.DEFAULT_PERMISSIONS)
+    assert groups.resolve_mask(["add_admin"], None, channel=False, bot=False) == 4
+    assert groups.permission_names(251) == GROUP_PERSON
     with pytest.raises(groups.UnknownPermission):
-        groups.permission_mask(["post_message"])
+        groups.resolve_mask(["post_message"], None, channel=False, bot=False)
     assert write_limits.DEFAULT_LIMITS.groups_created_per_day == 3 and write_limits.NO_LIMITS.group_invites_per_day is None
 
 
@@ -430,11 +443,12 @@ async def test_channel_takes_the_group_tools(rw):
     assert [e[0] for e in _events(rw.id)] == ["group_invite", "group_invite"]
 
     resp = await _post(rw, f"/groups/{FOREIGN}/admins", {"user_id": A})
-    assert resp.status_code == 200 and resp.json()["permissions"] == ["delete_message", "post_message",
-                                                                      "edit_message"], resp.text
-    assert _calls(rw, "add_admin") == [("add_admin", FOREIGN, A, 1792)]
+    assert resp.status_code == 200 and resp.json()["permissions"] == [
+        "add_remove_member", "change_chat_info", "pin_message", "read_all_messages", "edit_link", "delete_message",
+        "post_message", "edit_message", "view_stats"], resp.text
+    assert _admin_frames(rw) == [(FOREIGN, A, 4026)]  # the MAX app's default for a person in a channel (Р-53)
     resp = await _post(rw, f"/groups/{FOREIGN}/admins", {"user_id": B, "permissions": ["post_message"]})
-    assert resp.status_code == 200 and _calls(rw, "add_admin")[-1] == ("add_admin", FOREIGN, B, 256)
+    assert resp.status_code == 200 and _admin_frames(rw)[-1] == (FOREIGN, B, 256)
     for path, body in ((f"/groups/{FOREIGN}/members/remove", {"user_ids": [C]}),
                        (f"/groups/{FOREIGN}/admins/remove", {"user_id": B}),
                        (f"/groups/{FOREIGN}/invite-link", {}),
@@ -447,13 +461,13 @@ async def test_channel_takes_the_group_tools(rw):
     assert (await _get(rw, f"/groups/{FOREIGN}/join-requests")).status_code == 200
 
     resp = await _post(rw, f"/groups/{FOREIGN}/delete", {"confirm_title": "Чужая"})
-    assert resp.status_code == 422 and "not a group" in resp.text
+    assert resp.status_code == 422 and "a channel with subscribers" in resp.text  # Р5 Р-63
 
 
 async def test_channel_rights_are_refused_for_a_group(rw):
     gid = await _create(rw, user_ids=(A,))
     resp = await _post(rw, f"/groups/{gid}/admins", {"user_id": A, "permissions": ["post_message"]})
     assert resp.status_code == 422 and "channel rights" in resp.text
-    assert _calls(rw, "add_admin") == []
+    assert _admin_frames(rw) == []
     resp = await _post(rw, f"/groups/{gid}/admins", {"user_id": A})
-    assert _calls(rw, "add_admin") == [("add_admin", gid, A, 1050)]
+    assert _admin_frames(rw) == [(gid, A, 251)]

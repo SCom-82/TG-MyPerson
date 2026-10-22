@@ -69,6 +69,7 @@ ID_KEYS = frozenset({
     "chat_id", "message_id", "message_ids", "reply_to_message_id", "from_user_id", "user_id",
     "to_chat_id", "from_chat_id", "forward_from_chat_id", "forward_from_message_id", "user_ids",
     "chat_ids", "answer_ids",  # folders, votes (plan 2026-10-19 Р4)
+    "link_ids",  # extra invite links (plan 2026-10-22 Р5 Р-61)
 })
 # Internal ids of the contacts base: small, stay plain integers.
 SMALL_IDS = frozenset({"person_id", "identity_id", "from_id", "to_id"})
@@ -482,6 +483,31 @@ def _widened(tools: list[Tool]) -> list[Tool]:
     return tools
 
 
+# Admin rights of MAX as its app shows them (plan 2026-10-22 Р5 §1.1, Р-52): name → (what it gives, where).
+ADMIN_RIGHTS = {
+    "read_all_messages": ("read messages — a bot gets the group's messages only with it", "group, channel"),
+    "delete_message": ("delete messages (group) / others' posts (channel)", "group, channel"),
+    "pin_message": ("pin messages", "group, channel"),
+    "add_remove_member": ("add and remove members, join requests", "group, channel"),
+    "change_chat_info": ("photo, title, description", "group, channel"),
+    "edit_link": ("renew the invite link, extra links; needs add_remove_member", "group, channel"),
+    "add_admin": ("appoint and remove admins", "group, channel"),
+    "call": ("call when only admins may call", "group"),
+    "post_message": ("write posts", "channel"),
+    "edit_message": ("edit others' posts", "channel"),
+    "view_stats": ("channel statistics", "channel"),
+}
+SET_ADMIN_DOC = (
+    "Make a member or a bot an admin of the group or channel, or replace an admin's rights (previous_mask). "
+    "A bot: add it with add_group_members, then set_group_admin without permissions: a bot gets "
+    "read_all_messages + delete + pin + members + info + call (123), like in the MAX app; a person gets the "
+    "same + edit_link (251). Channel defaults: a bot 1850, a person 4026. A bot in a group needs "
+    "read_all_messages for delete_message / pin_message. Rights: "
+    + "; ".join(f"{name} — {what} ({where})" for name, (what, where) in ADMIN_RIGHTS.items())
+    + ". The answer: permissions, mask, is_bot."
+)
+
+
 def _max_group_tools() -> list[Tool]:
     """MAX groups and channels (plan 2026-10-19 Р3; Р4 Р-40): routes only in the MAX router —
     visible() hides them from TG, the writes from ro."""
@@ -490,29 +516,35 @@ def _max_group_tools() -> list[Tool]:
            "description": "user ids, ≤ 20"}
     obj = lambda props, req=("chat_id",): {"type": "object", "properties": props, "required": list(req)}  # noqa: E731
     path = lambda a: {k: v for k, v in a.items() if k != "chat_id" and v is not None}  # noqa: E731
-    perms = {"type": "array", "items": {"type": "string", "enum": ["add_remove_member", "add_admin",
-                                                                  "change_chat_info", "pin_message",
-                                                                  "delete_message", "post_message",
-                                                                  "edit_message"]},
-             "description": "default for a group: add_remove_member, change_chat_info, pin_message, "
-                            "delete_message; for a channel: post_message, edit_message, delete_message "
-                            "(post_message / edit_message: channels only)"}
+    perms = {"type": "array", "items": {"type": "string", "enum": list(ADMIN_RIGHTS)},
+             "description": "rights by name (see the table in the tool description); omit for the MAX app's "
+                            "default"}
     flag = {"type": "boolean"}
     return _widened([
-        Tool("create_group", "Create a MAX group with this account as owner; user_ids are invited at once. "
-             "Limits: 3 groups and 30 invited people a day.",
+        Tool("create_group", "Create a MAX group (chat_type=group, default) or channel (chat_type=channel) with "
+             "this account as owner; user_ids are invited at once. Limits: 3 groups/channels and 30 invited "
+             "people a day.",
              obj({"title": {"type": "string"}, "user_ids": {**ids, "minItems": 0},
-                  "notify": {"type": "boolean", "default": True}}, ["title"]),
+                  "notify": {"type": "boolean", "default": True},
+                  "chat_type": {"type": "string", "enum": ["group", "channel"], "default": "group"}}, ["title"]),
              "create_group", rest("POST", "/groups", body=ALL)),
-        Tool("add_group_members", "Add people to a group or channel (each counts in the 30 invites a day).",
-             obj({**cid, "user_ids": ids, "show_history": {"type": "boolean", "default": True}},
+        Tool("add_group_members", "Add people or a bot to a group or channel (each counts in the 30 invites a "
+             "day). A bot: add it here, then set_group_admin without permissions.",
+             obj({**cid, "user_ids": ids, "show_history": {"type": "boolean", "default": True},
+                  "start_payload": {"type": "string", "maxLength": 512,
+                                    "description": "a bot only: the payload of its /start (not checked live)"}},
                  ["chat_id", "user_ids"]),
              "add_group_members", rest("POST", "/groups/{chat_id}/members", body=path)),
-        Tool("remove_group_members", "Remove people from a group or channel (their messages stay).",
-             obj({**cid, "user_ids": ids}, ["chat_id", "user_ids"]),
+        Tool("remove_group_members", "Remove people from a group or channel. delete_messages=true deletes their "
+             "messages in the chat too (deleted_message_ids); by default the messages stay.",
+             obj({**cid, "user_ids": ids, "delete_messages": {"type": "boolean", "default": False}},
+                 ["chat_id", "user_ids"]),
              "remove_group_members", rest("POST", "/groups/{chat_id}/members/remove", body=path)),
-        Tool("set_group_admin", "Make a member an admin of the group or channel.",
-             obj({**cid, "user_id": {"type": "integer"}, "permissions": perms}, ["chat_id", "user_id"]),
+        Tool("set_group_admin", SET_ADMIN_DOC,
+             obj({**cid, "user_id": {"type": "integer"}, "permissions": perms,
+                  "permissions_mask": {"type": "integer", "minimum": 1, "maximum": 4095,
+                                       "description": "exact MAX bit mask instead of permissions (not both)"}},
+                 ["chat_id", "user_id"]),
              "set_group_admin", rest("POST", "/groups/{chat_id}/admins", body=path)),
         Tool("remove_group_admin", "Take admin rights from a member.",
              obj({**cid, "user_id": {"type": "integer"}}, ["chat_id", "user_id"]),
@@ -520,10 +552,13 @@ def _max_group_tools() -> list[Tool]:
         Tool("update_group_profile", "Change the title and/or description of a group or channel.",
              obj({**cid, "title": {"type": "string"}, "description": {"type": "string"}}),
              "update_group_profile", rest("PATCH", "/groups/{chat_id}", body=path)),
-        Tool("update_group_settings", "Change settings of a group or channel (only the ones passed).",
+        Tool("update_group_settings", "Change settings of a group or channel (only the ones passed). "
+             "join_request: people join by request (approve_join_requests); disable_forward: messages cannot be "
+             "forwarded; comments: a channel only.",
              obj({**cid, "all_can_pin_message": flag, "only_owner_can_change_icon_title": flag,
                   "only_admin_can_add_member": flag, "only_admin_can_call": flag,
-                  "members_can_see_private_link": flag}),
+                  "members_can_see_private_link": flag, "join_request": flag, "disable_forward": flag,
+                  "comments": flag}),
              "update_group_settings", rest("PATCH", "/groups/{chat_id}/settings", body=path)),
         Tool("get_invite_link", "The current invite link of a group or channel (null if it has none).", obj(cid),
              "get_invite_link", rest("GET", "/groups/{chat_id}/invite-link")),
@@ -539,10 +574,28 @@ def _max_group_tools() -> list[Tool]:
         Tool("decline_join_requests", "Decline join requests.", obj({**cid, "user_ids": ids}, ["chat_id", "user_ids"]),
              "decline_join_requests", rest("POST", "/groups/{chat_id}/join-requests/decline", body=path)),
         Tool("delete_group", "Delete a group: owner only; confirm_title must equal the current title. "
-             "for_all=true deletes it for every member.",
+             "for_all=true deletes it for every member. A channel only while the account is its one member.",
              obj({**cid, "confirm_title": {"type": "string"}, "for_all": {"type": "boolean", "default": True}},
                  ["chat_id", "confirm_title"]),
              "delete_group", rest("POST", "/groups/{chat_id}/delete", body=path)),
+        Tool("transfer_group_ownership", "Make an admin the owner of the group or channel. IRREVERSIBLE: only the "
+             "new owner can give it back. The account must be the owner; confirm_title = the current title, "
+             "confirm_user_id = user_id; user_id must be an admin already (set_group_admin first).",
+             obj({**cid, "user_id": {"type": "integer"}, "confirm_title": {"type": "string"},
+                  "confirm_user_id": {"type": "integer"}}, ["chat_id", "user_id", "confirm_title", "confirm_user_id"]),
+             "transfer_group_ownership", rest("POST", "/groups/{chat_id}/owner", body=path)),
+        Tool("list_invite_links", "Extra invite links of a group or channel: link_id, title, link, join_count "
+             "(how many joined by it); main_link is the one of get_invite_link. MAX may not have extra links "
+             "enabled for the account: then an error.", obj(cid),
+             "list_invite_links", rest("GET", "/groups/{chat_id}/invite-links")),
+        Tool("create_invite_link", "Make an extra invite link with a title (≤ 64 chars), e.g. per ad campaign; "
+             "the main link stays. A private chat only; needs edit_link or the owner.",
+             obj({**cid, "title": {"type": "string", "maxLength": 64}}),
+             "create_invite_link", rest("POST", "/groups/{chat_id}/invite-links", body=path)),
+        Tool("revoke_invite_links", "Revoke extra invite links by link_id (≤ 20): they stop working.",
+             obj({**cid, "link_ids": {"type": "array", "items": {"type": "integer"}, "minItems": 1, "maxItems": 20}},
+                 ["chat_id", "link_ids"]),
+             "revoke_invite_links", rest("POST", "/groups/{chat_id}/invite-links/revoke", body=path)),
     ])
 
 
@@ -613,7 +666,15 @@ def _max_variants() -> dict[str, Tool]:
         "type": "boolean", "default": False,
         "description": "MAX: false only — MAX rejects an anonymous poll (answer 501)",
     }
-    return {"send_poll": dataclasses.replace(poll, schema=schema)}
+    members = next(t for t in ACCOUNT_TOOLS if t.name == "get_chat_members")
+    members_schema = copy.deepcopy(members.schema)
+    members_schema["properties"]["search"] = {"type": "string", "description": "MAX searches its members itself"}
+    members_schema["properties"]["role"] = {"type": "string", "enum": ["all", "admins"], "default": "all",
+                                            "description": "admins: only admins, with their rights (mask)"}
+    return {"send_poll": dataclasses.replace(poll, schema=schema),
+            "get_chat_members": dataclasses.replace(
+                members, schema=members_schema,
+                description=members.description + " MAX: an admin's item has permissions, mask, inviter_id.")}
 
 
 MAX_VARIANTS = _max_variants()

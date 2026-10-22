@@ -1,10 +1,12 @@
 """MAX groups (plan 2026-10-19 Р3 §3 PR-G2): /api/v1/groups/..., MAX-only routes.
 
 Channels (plan Р4 Р-40) use the same routes: a channel in MAX is the same Chat
-with the same frames. Only create_group and delete_group stay groups-only
-(PyMax cannot create a channel; deleting one loses its audience). Inviting to
-a channel counts in group_invites_per_day like a group; post_message /
-edit_message are channel admin rights (1792 by default for a channel).
+with the same frames. Inviting to a channel counts in group_invites_per_day
+like a group. Release 5 (plan 2026-10-22 Р-52…Р-63): admin rights are the MAX
+client's 12 bits with its defaults (a bot 123 / a person 251 in a group, 1850 /
+4026 in a channel); create_group makes a channel too (chat_type), delete_group
+deletes a channel only while the account is its one member; extra invite
+links and the ownership transfer are here.
 
 Writes are rw only (WRITE_MESSENGER_TOOLS → 403 for ro in the middleware),
 within the account's write limits: create_group takes 1 group + 1 invite per
@@ -16,7 +18,7 @@ store is logged, the answer stays 200 — the change is made in MAX.
 """
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -61,6 +63,7 @@ class CreateGroupRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     user_ids: list[int] = Field(default_factory=list, max_length=MAX_IDS)
     notify: bool = True
+    chat_type: Literal["group", "channel"] = "group"
 
 
 class MembersRequest(BaseModel):
@@ -68,14 +71,23 @@ class MembersRequest(BaseModel):
     show_history: bool = True
 
 
+class AddMembersRequest(MembersRequest):
+    start_payload: str | None = Field(default=None, min_length=1, max_length=512,
+                                      description="a bot: the payload of its /start (Р-58)")
+
+
 class UserIdsRequest(BaseModel):
     user_ids: list[int] = _IDS
 
 
+class RemoveMembersRequest(UserIdsRequest):
+    delete_messages: bool = False
+
+
 class AdminRequest(BaseModel):
     user_id: int
-    permissions: list[str] | None = Field(default=None, description=f"of {sorted(groups.PERMISSIONS)}; "
-                                                                    f"post_message, edit_message: a channel only")
+    permissions: list[str] | None = Field(default=None, description=f"of {list(groups.PERMISSIONS)}")
+    permissions_mask: int | None = Field(default=None, ge=1, le=groups.FULL_MASK)
 
 
 class RemoveAdminRequest(BaseModel):
@@ -99,6 +111,9 @@ class SettingsRequest(BaseModel):
     only_admin_can_add_member: bool | None = None
     only_admin_can_call: bool | None = None
     members_can_see_private_link: bool | None = None
+    join_request: bool | None = None
+    disable_forward: bool | None = None
+    comments: bool | None = None  # a channel only (Р-59)
 
     @model_validator(mode="after")
     def _one(self):
@@ -110,6 +125,20 @@ class SettingsRequest(BaseModel):
 class DeleteGroupRequest(BaseModel):
     confirm_title: str
     for_all: bool = True
+
+
+class TransferRequest(BaseModel):
+    user_id: int
+    confirm_title: str
+    confirm_user_id: int
+
+
+class InviteLinkRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class RevokeLinksRequest(BaseModel):
+    link_ids: list[int] = Field(min_length=1, max_length=MAX_IDS)
 
 
 # ---------------------------------------------------------------------------
@@ -207,31 +236,44 @@ async def create_group(req: CreateGroupRequest, request: Request):
     _target(request, req.user_ids)
     ids = list(dict.fromkeys(req.user_ids))
     async with bundle_slot(request, "create_group", {GROUP_CREATE: 1, GROUP_INVITE: len(ids)}):
-        result = await call_max(groups.create(session.client, req.title, ids, req.notify), UNCERTAIN)
+        result = await call_max(groups.create(session.client, req.title, ids, req.notify, req.chat_type), UNCERTAIN)
         if result is None:
-            # MAX accepted the frame but sent no chat back: the group (and its invites) is
-            # most likely made — the slots stay, a retry must not create a second one
-            # unchecked (review 15 R15-1), as with a 504.
-            error = HTTPException(status_code=502, detail="MAX answered without the new group; it may have "
-                                                          "been created, check list_chats before retrying")
-            error.keep_write_slot = True
-            raise error
+            raise _maybe_created()
+    if req.chat_type == "channel":
+        # our frame: parsed outside the slot, the slots of a frame that reached MAX stay (R17-1)
+        try:
+            result = groups.parse_created(result)
+        except Exception:  # noqa: BLE001
+            log.warning("max[%s]: the answer of a channel creation does not parse", session.alias, exc_info=True)
+            result = None
+        if result is None:
+            raise _maybe_created()
     chat, msg = result
     await store_chat(session, chat)
     await store_sent(session, msg, chat.id)
-    return summary(chat, me_of(session), message_id=getattr(msg, "id", None))
+    return summary(chat, me_of(session), message_id=getattr(msg, "id", None), chat_type=req.chat_type)
+
+
+def _maybe_created() -> HTTPException:
+    """MAX accepted the frame but sent no chat back: the group (and its invites) is most likely
+    made — the slots stay, a retry must not create a second one unchecked (review 15 R15-1)."""
+    error = HTTPException(status_code=502, detail="MAX answered without the new group; it may have "
+                                                  "been created, check list_chats before retrying")
+    error.keep_write_slot = True
+    return error
 
 
 @router.post("/{chat_id:sint}/members", name="add_group_members")
-async def add_group_members(chat_id: int, req: MembersRequest, request: Request):
+async def add_group_members(chat_id: int, req: AddMembersRequest, request: Request):
+    """A bot is added like a person (Р-58); start_payload goes in the frame as the /start payload."""
     chat_row = await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
     session = await connected(request)
     not_me(session, req.user_ids)
     _target(request, req.user_ids)
     ids = list(dict.fromkeys(req.user_ids))
     async with bundle_slot(request, "add_group_members", {GROUP_INVITE: len(ids)}, chat_id):
-        chat = await call_max(groups.invite(session.client, chat_id, ids, req.show_history, chat_row.chat_type),
-                              UNCERTAIN)
+        chat = await call_max(groups.invite(session.client, chat_id, ids, req.show_history, chat_row.chat_type,
+                                            req.start_payload), UNCERTAIN)
     if chat is not None:
         await store_chat(session, chat)
     else:
@@ -240,33 +282,55 @@ async def add_group_members(chat_id: int, req: MembersRequest, request: Request)
 
 
 @router.post("/{chat_id:sint}/members/remove", name="remove_group_members")
-async def remove_group_members(chat_id: int, req: UserIdsRequest, request: Request):
+async def remove_group_members(chat_id: int, req: RemoveMembersRequest, request: Request):
+    """delete_messages=true removes the members' messages too (cleanMsgPeriod -1, Р-60): MAX names
+    them in its answer, they are marked deleted here."""
     await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
     session = await connected(request)
     not_me(session, req.user_ids)
     _target(request, req.user_ids)
     async with write_slot(request, ACTION, "remove_group_members", chat_id):
-        await call_max(groups.remove(session.client, chat_id, req.user_ids), UNCERTAIN)
+        deleted = await call_max(groups.remove(session.client, chat_id, req.user_ids, clean=req.delete_messages),
+                                 UNCERTAIN)
+    if deleted and session.ingest is not None:
+        try:
+            await session.ingest.apply_delete(chat_id, deleted)
+        except Exception:  # noqa: BLE001 — deleted in MAX, the delete frames mark them anyway
+            log.warning("max[%s]: deleted messages of chat %s not marked", session.alias, chat_id, exc_info=True)
     chat = await refresh(session, chat_id)
-    return summary(chat, me_of(session), chat_id=chat_id, removed=req.user_ids)
+    return summary(chat, me_of(session), chat_id=chat_id, removed=req.user_ids, deleted_message_ids=deleted)
 
 
 @router.post("/{chat_id:sint}/admins", name="set_group_admin")
 async def set_group_admin(chat_id: int, req: AdminRequest, request: Request):
+    """Rights as the MAX client gives them (Р-52…Р-57): names or an exact mask, else the client's
+    default for a bot / a person; the client's dependencies → 422. Again on an admin — the mask is
+    replaced (previous_mask). Everything is checked before the slot and the frame."""
     chat_row = await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
     channel = chat_row.chat_type == "channel"
+    rights = lambda bot: groups.resolve_mask(req.permissions, req.permissions_mask,  # noqa: E731
+                                             channel=channel, bot=bot)
     try:
-        names = groups.permission_names(groups.permission_mask(req.permissions, channel=channel))
+        if req.permissions or req.permissions_mask is not None:
+            rights(False)  # the shape is wrong whoever the target is: no MAX read
     except groups.UnknownPermission as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     session = await connected(request)
     not_me(session, [req.user_id])
     _target(request, [req.user_id])
+    bot = await call_max_read(groups.is_bot(session.client, req.user_id))
+    try:
+        mask = rights(bot)
+    except groups.UnknownPermission as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    before = await call_max_read(groups.fresh_chat(session.client, chat_id))
+    previous = groups.admin_mask(before, req.user_id) if req.user_id in (before.admins or []) else None
     async with write_slot(request, ACTION, "set_group_admin", chat_id):
-        await call_max(groups.set_admin(session.client, chat_id, req.user_id, req.permissions, channel=channel),
-                       UNCERTAIN)
+        await call_max(groups.set_admin(session.client, chat_id, req.user_id, mask), UNCERTAIN)
     chat = await refresh(session, chat_id)
-    return summary(chat, me_of(session), chat_id=chat_id, user_id=req.user_id, permissions=names)
+    return summary(chat, me_of(session), chat_id=chat_id, user_id=req.user_id,
+                   permissions=groups.permission_names(mask, channel=channel), mask=mask, previous_mask=previous,
+                   is_bot=bot)
 
 
 @router.post("/{chat_id:sint}/admins/remove", name="remove_group_admin")
@@ -293,7 +357,9 @@ async def update_group_profile(chat_id: int, req: ProfileRequest, request: Reque
 
 @router.patch("/{chat_id:sint}/settings", name="update_group_settings")
 async def update_group_settings(chat_id: int, req: SettingsRequest, request: Request):
-    await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
+    chat_row = await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
+    if req.comments is not None and chat_row.chat_type != "channel":
+        raise HTTPException(status_code=422, detail="comments is a channel setting, not for a group")
     session = await connected(request)
     options = req.model_dump(exclude_none=True)
     async with write_slot(request, ACTION, "update_group_settings", chat_id):
@@ -360,12 +426,15 @@ async def decline_join_requests(chat_id: int, req: UserIdsRequest, request: Requ
 
 @router.post("/{chat_id:sint}/delete", name="delete_group")
 async def delete_group(chat_id: int, req: DeleteGroupRequest, request: Request):
-    """Only the account's own group, confirmed by its current title (Р-26). Local rows stay as history."""
-    await known_chat(request, chat_id)
+    """Only the account's own group, confirmed by its current title (Р-26). A channel only while the
+    account is its one member — cleaning up a test one (Р-63). Local rows stay as history."""
+    chat_row = await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
     session = await connected(request)
     chat = await call_max_read(groups.fresh_chat(session.client, chat_id))
     if chat.owner != me_of(session):
         raise HTTPException(status_code=403, detail="owner only: the account did not create this group")
+    if chat_row.chat_type == "channel" and _count(chat) > 1:
+        raise HTTPException(status_code=422, detail="a channel with subscribers is not deleted by the agent")
     if req.confirm_title != chat.title:
         raise HTTPException(status_code=409, detail=f"confirm_title does not match the group's current title "
                                                     f"{chat.title!r}")
@@ -373,6 +442,82 @@ async def delete_group(chat_id: int, req: DeleteGroupRequest, request: Request):
         await call_max(groups.delete(session.client, chat_id, req.for_all), UNCERTAIN)
     await unmonitor(session, chat_id)
     return {"chat_id": chat_id, "deleted": True, "for_all": req.for_all}
+
+
+@router.post("/{chat_id:sint}/owner", name="transfer_group_ownership")
+async def transfer_group_ownership(chat_id: int, req: TransferRequest, request: Request):
+    """Irreversible (Р-62): the account is the owner, the title and the user are confirmed, the new
+    owner is an admin already (the client's rule); only the new owner can give it back."""
+    await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
+    session = await connected(request)
+    me = me_of(session)
+    if req.confirm_user_id != req.user_id:
+        raise HTTPException(status_code=422, detail="confirm_user_id is not user_id")
+    if req.user_id == me:
+        raise HTTPException(status_code=422, detail="the account owns the chat already")
+    _target(request, [req.user_id])
+    chat = await call_max_read(groups.fresh_chat(session.client, chat_id))
+    if chat.owner != me:
+        raise HTTPException(status_code=422, detail="owner only: the account does not own this chat")
+    if req.confirm_title != chat.title:
+        raise HTTPException(status_code=422, detail=f"confirm_title does not match the current title {chat.title!r}")
+    if req.user_id not in (chat.admins or []):
+        raise HTTPException(status_code=422, detail="ownership goes to an admin only: set_group_admin first "
+                                                    "(MAX client rule)")
+    async with write_slot(request, ACTION, "transfer_group_ownership", chat_id):
+        answered = await call_max(groups.transfer(session.client, chat_id, req.user_id), UNCERTAIN)
+    chat = await _stored_or_refreshed(session, chat_id, answered)
+    return summary(chat, me, chat_id=chat_id, new_owner=req.user_id)
+
+
+# ---------------------------------------------------------------------------
+# Extra invite links (Р-61): 221 / 222 / 223, behind MAX's server flag additional-links
+# ---------------------------------------------------------------------------
+
+def _link(item: dict) -> dict:
+    return {"link_id": item.get("id"), "title": item.get("title"), "link": item.get("link"),
+            "join_count": item.get("joinCount")}
+
+
+@router.get("/{chat_id:sint}/invite-links", name="list_invite_links")
+async def list_invite_links(chat_id: int, request: Request):
+    chat_row = await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
+    session = await connected(request)
+    found = await call_max_read(groups.links_list(session.client, chat_id, channel=chat_row.chat_type == "channel"))
+    return {"chat_id": chat_id, "main_link": (chat_row.raw or {}).get("link"),
+            "links": [_link(i) for i in found if isinstance(i, dict)]}
+
+
+@router.post("/{chat_id:sint}/invite-links", name="create_invite_link")
+async def create_invite_link(chat_id: int, req: InviteLinkRequest, request: Request):
+    chat_row = await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
+    session = await connected(request)
+    async with write_slot(request, ACTION, "create_invite_link", chat_id):
+        answer = await call_max(groups.link_create(session.client, chat_id, channel=chat_row.chat_type == "channel",
+                                                   title=req.title), UNCERTAIN)
+    item = answer.get("link") if isinstance(answer, dict) else None
+    if not isinstance(item, dict):
+        raise HTTPException(status_code=502, detail=f"MAX answered without the link: {answer!r}; "
+                                                    f"check list_invite_links")
+    out = _link(item)
+    out.pop("join_count")
+    return {"chat_id": chat_id, **out}
+
+
+@router.post("/{chat_id:sint}/invite-links/revoke", name="revoke_invite_links")
+async def revoke_invite_links(chat_id: int, req: RevokeLinksRequest, request: Request):
+    chat_row = await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
+    session = await connected(request)
+    async with write_slot(request, ACTION, "revoke_invite_links", chat_id):
+        answer = await call_max(groups.links_revoke(session.client, chat_id, channel=chat_row.chat_type == "channel",
+                                                    link_ids=req.link_ids), UNCERTAIN)
+    revoked = answer.get("linkIds") if isinstance(answer, dict) else None
+    return {"chat_id": chat_id, "revoked": [int(i) for i in revoked or []],
+            "warning": "the revoked links no longer work"}
+
+
+def _count(chat: Any) -> int:
+    return chat.participants_count or len(chat.participants or {})
 
 
 async def _stored_or_refreshed(session: MaxSession, chat_id: int, chat: Any) -> Any:

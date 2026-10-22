@@ -7,7 +7,7 @@ from typing import Any, ClassVar
 from pydantic import BaseModel, Field
 
 from app.max import frames, normalize
-from app.schemas import BackfillRequest, ChatResponse, MediaResponse, MessageResponse
+from app.schemas import BackfillRequest, ChatResponse, MediaResponse, MemberResponse, MessageResponse, MyRightsResponse
 
 log = logging.getLogger(__name__)
 
@@ -133,9 +133,19 @@ class MaxPinned(BaseModel):
 
 
 class MaxChatResponse(ChatResponse):
-    """ChatResponse + the pinned message as the stored chat has it (raw.pinnedMessage, Р4.1)."""
+    """ChatResponse + the pinned message as the stored chat has it (raw.pinnedMessage, Р4.1);
+    + access (PUBLIC / PRIVATE) and MAX's options of the chat (Р5 Р-56), read-only."""
 
     pinned_message: MaxPinned | None = None
+    access: str | None = None
+    options: dict[str, Any] | None = None
+
+    @staticmethod
+    def extras(raw: dict | None) -> dict:
+        raw = raw or {}
+        options = raw.get("options")
+        return {"pinned_message": MaxChatResponse.pinned(raw), "access": raw.get("access"),
+                "options": options if isinstance(options, dict) else None}
 
     @staticmethod
     def pinned(raw: dict | None) -> MaxPinned | None:
@@ -144,6 +154,26 @@ class MaxChatResponse(ChatResponse):
             return None
         return MaxPinned(message_id=int(p["id"]), from_user_id=p.get("sender"), text=p.get("text") or None,
                          date=normalize.ms_to_dt(p.get("time")))
+
+
+class MaxMyRightsResponse(MyRightsResponse):
+    """MyRightsResponse + the MAX client's bits (Р5 Р-56): the mask, its names for the chat type."""
+
+    mask: int | None = None
+    permissions: list[str] = Field(default_factory=list)
+    can_read_all_messages: bool = False
+    can_change_invite_link: bool = False
+    can_call: bool = False
+    can_view_stats: bool = False
+
+
+class MaxMemberResponse(MemberResponse):
+    """MemberResponse + an admin's rights from the chat's adminParticipants (Р5 Р-56)."""
+
+    is_bot: bool = False
+    permissions: list[str] | None = None
+    mask: int | None = None
+    inviter_id: int | None = None
 
 
 class MaxBackfillRequest(BackfillRequest):

@@ -7,7 +7,7 @@ link (join/<code> or a public https://max.ru/<name>), MAX-only delete_dialog.
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -20,7 +20,7 @@ from app.api import data_reads
 from app.max import frames, groups, normalize, repo
 from app.max.api import groups as mx_groups
 from app.max.api.common import authorized_or_error, call_max, call_max_read
-from app.max.schemas import MaxChatResponse
+from app.max.schemas import MaxChatResponse, MaxMemberResponse, MaxMyRightsResponse
 from app.repo import chats as chats_repo
 from app.services.tg_store import new_mode, shadow
 from app.storage import account_db
@@ -29,8 +29,6 @@ from app.schemas import (
     ChatUpdateRequest,
     JoinChatRequest,
     LeaveChatRequest,
-    MemberResponse,
-    MyRightsResponse,
     PaginatedResponse,
     ResolveRequest,
     ResolveResponse,
@@ -169,13 +167,14 @@ async def list_chats(
 
 @router.get("/{chat_id}", response_model=MaxChatResponse, name="get_chat_detail")
 async def get_chat_detail(chat_id: int, request: Request, db: AsyncSession = Depends(get_db)):
-    """+ pinned_message (Р4.1): from the stored chat, kept fresh by pin / unpin and chat frames."""
+    """+ pinned_message (Р4.1), access and options (Р5 Р-56): from the stored chat, kept fresh by
+    pin / unpin, group changes and chat frames."""
     if new_mode():
         chat = await data_reads.get_chat(request, chat_id)
         account_id = getattr(request.state, "account_id", None)
         async with account_db(account_id) as adb:
             row = await chats_repo.get_chat(adb, account_id, chat_id)
-        return MaxChatResponse(**chat.model_dump(), pinned_message=MaxChatResponse.pinned(row.raw if row else None))
+        return MaxChatResponse(**chat.model_dump(), **MaxChatResponse.extras(row.raw if row else None))
     chat = await repo.get_chat(db, chat_id)
     if chat is None:
         raise HTTPException(status_code=404, detail="Chat not found")
@@ -234,24 +233,34 @@ def _role(chat, user_id: int) -> str:
 async def list_members(
     chat_id: int,
     request: Request,
-    search: str | None = Query(None),
+    search: str | None = Query(None, min_length=1),
+    role: Literal["all", "admins"] = Query("all"),
     limit: int = Query(200, ge=1, le=1000),
 ):
-    """Live from MAX, paging by marker up to limit; search by name/username on our side."""
-    await mx_groups.known_chat(request, chat_id, kinds=("group", "channel"))
+    """Live from MAX, paging by marker up to limit. role=admins — MAX's admin list (59 type ADMIN),
+    search — MAX's own search (59 query, Р-56). An admin's item carries its rights from the chat."""
+    chat_row = await mx_groups.known_chat(request, chat_id, kinds=("group", "channel"))
     session = await mx_groups.connected(request)
     chat = await call_max_read(groups.fresh_chat(session.client, chat_id))
-    found = await call_max_read(groups.members(session.client, chat_id, limit))
+    if role == "admins" or search:
+        kind = "ADMIN" if role == "admins" else "MEMBER"
+        found = await call_max_read(groups.find_members(session.client, chat_id, limit, kind=kind, query=search))
+    else:
+        found = await call_max_read(groups.members(session.client, chat_id, limit))
     users = [m.contact for m in found if getattr(m, "contact", None) is not None]
     await mx_groups.store_members(session, users)
+    channel = chat_row.chat_type == "channel"
     items = []
     for u in users:
         row = normalize.normalize_user(u)
-        item = MemberResponse(user_id=row["id"], username=row["username"], first_name=row["first_name"],
-                              last_name=row["last_name"], role=_role(chat, row["id"]))
-        text = " ".join(filter(None, (item.first_name, item.last_name, item.username))).lower()
-        if search is None or search.lower() in text:
-            items.append(item)
+        item = MaxMemberResponse(user_id=row["id"], username=row["username"], first_name=row["first_name"],
+                                 last_name=row["last_name"], role=_role(chat, row["id"]), is_bot=row["is_bot"])
+        if item.role != "member":
+            mask = groups.admin_mask(chat, item.user_id)
+            item.mask = mask
+            item.permissions = groups.permission_names(mask, channel=channel)
+            item.inviter_id = groups.admin_inviter(chat, item.user_id)
+        items.append(item)
     return {"items": items, "total": len(items)}
 
 
@@ -265,9 +274,10 @@ async def leave_chat_endpoint(req: LeaveChatRequest, request: Request):
     return {"status": "left", "chat_id": req.chat_id}
 
 
-@router.get("/{chat_id}/my_rights", response_model=MyRightsResponse, name="get_my_rights")
+@router.get("/{chat_id}/my_rights", response_model=MaxMyRightsResponse, name="get_my_rights")
 async def get_my_rights(chat_id: int, request: Request):
-    """creator / admin from owner / admins; an admin's rights from admin_participants[me] by the bit mask."""
+    """creator / admin from owner / admins; an admin's rights from admin_participants[me] by the
+    client's 12 bits (Р5 Р-56): delete in a group is bit 1, in a channel 1024 (or 1). The owner — 4095."""
     await mx_groups.known_chat(request, chat_id, kinds=("group", "channel"))
     session = await mx_groups.connected(request)
     chat = await call_max_read(groups.fresh_chat(session.client, chat_id))
@@ -277,22 +287,28 @@ async def get_my_rights(chat_id: int, request: Request):
     admin = creator or me in (chat.admins or [])
     raw = (chat.admin_participants or {}).get(me) if me is not None else None
     options = chat.options if isinstance(chat.options, dict) else {}  # PyMax annotates dict | int
-    channel = str(getattr(chat.type, "value", chat.type)) == "CHANNEL"
-    mask = raw.get("permissions") if isinstance(raw, dict) else None
-    names = set(groups.PERMISSIONS) if creator else set(groups.permission_names(mask))
-    return MyRightsResponse(
+    channel = groups.is_channel(chat)
+    mask = groups.admin_mask(chat, me) if admin and me is not None else None
+    bits = mask or 0
+    return MaxMyRightsResponse(
         chat_id=chat_id,
         is_member=creator or me in {int(p) for p in (chat.participants or {})},
         is_admin=admin,
         is_creator=creator,
         can_post_messages=admin if channel else True,  # a channel: admins post (review 15 R15-2)
         can_edit_messages=admin,
-        can_delete_messages="delete_message" in names,
-        can_pin_messages="pin_message" in names or bool(options.get("ALL_CAN_PIN_MESSAGE")),
-        can_add_admins="add_admin" in names,
-        can_invite_users="add_remove_member" in names or not options.get("ONLY_ADMIN_CAN_ADD_MEMBER"),
-        can_change_info="change_chat_info" in names,
+        can_delete_messages=bool(bits & ((1024 | 1) if channel else 1)),
+        can_pin_messages=bool(bits & 16) or bool(options.get("ALL_CAN_PIN_MESSAGE")),
+        can_add_admins=bool(bits & 4),
+        can_invite_users=bool(bits & 2) or not options.get("ONLY_ADMIN_CAN_ADD_MEMBER"),
+        can_change_info=bool(bits & 8),
         raw=raw if isinstance(raw, dict) else None,
+        mask=mask,
+        permissions=groups.permission_names(mask, channel=channel),
+        can_read_all_messages=bool(bits & 32),
+        can_change_invite_link=bool(bits & 128),
+        can_call=bool(bits & 64) or (not channel and not options.get("ONLY_ADMIN_CAN_CALL")),
+        can_view_stats=bool(bits & 2048),
     )
 
 
