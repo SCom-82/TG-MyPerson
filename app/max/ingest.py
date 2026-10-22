@@ -155,6 +155,10 @@ class MaxIngest:
                 log.exception("max[%s]: failed to update raw event %s", self.session.alias, raw_id)
 
     async def _on_message(self, payload: dict, received_at: datetime, *, is_edit: bool) -> str | None:
+        if normalize.is_delayed(payload, normalize.dt_to_ms(received_at)):
+            # a scheduled message is not "sent" until MAX sends it (Р5 Р-73): journaled only
+            log.info("max[%s]: a scheduled message, stored when it is sent", self.session.alias)
+            return None
         msg = normalize.parse_message(payload)
         await self._chat_status_of(payload)
         if str(getattr(msg.status, "value", msg.status)) == "REMOVED" and msg.chat_id is not None:

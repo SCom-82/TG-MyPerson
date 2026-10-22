@@ -26,6 +26,7 @@ from typing import Any
 from pymax import ApiError
 from pymax.api.messages.payloads import VotePollPayload
 from pymax.api.users.payloads import ImportContactsPayload
+from pymax.formatting.markdown import Formatter
 from pymax.protocol import Opcode
 from pymax.types import Chat, User
 from pymax.types.domain import Message
@@ -365,3 +366,65 @@ async def blocked_ids(client: Any, *, pages: int = 5) -> set[int]:
         if len(contacts) < BLOCKED_PAGE:
             break
     return out
+
+
+# -- release 5: scheduled (delayed) messages, Р-73 ---------------------------------
+
+def delayed_attrs(when_ms: int, *, notify: bool = True) -> dict:
+    """message.delayedAttributes of 64 / 67 (qs: timeToFire ms, notifySender?)."""
+    return {"timeToFire": when_ms, "notifySender": notify}
+
+
+def schedule_frame(chat_id: int, text: str, when_ms: int, reply_to: int | None = None) -> dict:
+    """MSG_SEND 64 of a delayed text, PyMax's shape (its markdown included, as every send for now)
+    plus delayedAttributes. Ours, not PyMax's send_message(send_at=): PyMax's Message requires
+    delayedAttributes.notifyOpponents, the client's schema does not — an answer without it would
+    fail after the frame went out."""
+    clean, elements = Formatter.format_markdown(text)
+    message: dict = {"text": clean, "cid": int(time.time() * 1000),
+                     "elements": [e.model_dump(by_alias=True, exclude_none=True) for e in elements], "attaches": [],
+                     "delayedAttributes": delayed_attrs(when_ms)}
+    if reply_to:
+        message["link"] = {"type": "REPLY", "messageId": reply_to}
+    return {"chatId": chat_id, "message": message, "notify": True}
+
+
+async def schedule(client: Any, chat_id: int, text: str, when_ms: int, reply_to: int | None = None) -> dict:
+    """→ MAX's raw answer {chatId, message}; its id is read apart (R17-1)."""
+    return _payload(await client._app.invoke(Opcode.MSG_SEND, schedule_frame(chat_id, text, when_ms, reply_to)))
+
+
+def list_delayed_frame(chat_id: int) -> dict:
+    """CHAT_HISTORY 49 of the chat's delayed messages, as the client reads them."""
+    return {"chatId": chat_id, "from": 1, "forward": 100, "getMessages": True, "itemType": "DELAYED"}
+
+
+async def list_delayed(client: Any, chat_id: int) -> list[dict]:
+    """The chat's delayed messages as MAX sends them (raw dicts: text and elements kept as they are)."""
+    payload = _payload(await client._app.invoke(Opcode.CHAT_HISTORY, list_delayed_frame(chat_id)))
+    return [m for m in payload.get("messages") or [] if isinstance(m, dict)]
+
+
+def cancel_delayed_frame(chat_id: int, message_ids: list[int]) -> dict:
+    """MSG_DELETE 66 of delayed messages (forMe false: nobody gets them)."""
+    return {"chatId": chat_id, "messageIds": list(message_ids), "forMe": False, "itemType": "DELAYED"}
+
+
+async def cancel_delayed(client: Any, chat_id: int, message_ids: list[int]) -> dict:
+    return _payload(await client._app.invoke(Opcode.MSG_DELETE, cancel_delayed_frame(chat_id, message_ids)))
+
+
+def fire_now_frame(chat_id: int, message: dict, now_ms: int) -> dict:
+    """MSG_EDIT 67 with delayedAttributes timeToFire now — the client's "send now". Text and
+    elements go back as MAX keeps them, not re-parsed."""
+    frame = {"chatId": chat_id, "messageId": int(message["id"]), "delayedAttributes": {"timeToFire": now_ms}}
+    if message.get("text"):
+        frame["text"] = message["text"]
+    if message.get("elements"):
+        frame["elements"] = message["elements"]
+    return frame
+
+
+async def fire_now(client: Any, chat_id: int, message: dict) -> dict:
+    return _payload(await client._app.invoke(Opcode.MSG_EDIT, fire_now_frame(chat_id, message,
+                                                                             int(time.time() * 1000))))

@@ -16,7 +16,11 @@ from typing import Any
 
 from app.authz.tool_catalog import WRITE_MESSENGER_TOOLS
 from app.mcp import files, invoke
+from app.max.config import max_settings
 from app.mcp.stdio_catalog import STDIO_TOOLS
+
+# MAX_SCHEDULED_ENABLED=false hides these from a MAX account (plan 2026-10-22 Р5 Р-73)
+SCHEDULED_TOOLS = frozenset({"list_scheduled", "cancel_scheduled", "send_scheduled_now"})
 
 
 @dataclass
@@ -731,8 +735,16 @@ def _max_variants() -> dict[str, Tool]:
     keyboard = (" MAX: a bot's message has keyboard {callback_id, buttons: [[{text, type, url?, payload?}]]}: "
                 "press with press_button(row, column).")
     by_name = {t.name: t for t in ACCOUNT_TOOLS}
+    send = by_name["send_message"]
+    send_schema = copy.deepcopy(send.schema)
+    send_schema["properties"]["schedule_date"] = {
+        **send_schema["properties"]["schedule_date"],
+        "description": "ISO datetime or unix time, now + 60 s … 365 days. MAX: text only (files, albums and "
+                       "polls are not scheduled); list_scheduled / cancel_scheduled / send_scheduled_now manage it",
+    }
     blocked = " MAX: the answer has blocked — whether the user is in the account's blocked list after it."
-    return {"list_messages": dataclasses.replace(by_name["list_messages"],
+    return {"send_message": dataclasses.replace(send, schema=send_schema),
+            "list_messages": dataclasses.replace(by_name["list_messages"],
                                                  description=by_name["list_messages"].description + keyboard),
             "get_message": dataclasses.replace(by_name["get_message"],
                                                description=by_name["get_message"].description + keyboard),
@@ -776,4 +788,5 @@ def visible(caller: Caller) -> list[Tool]:
     else:
         tools = [*ACCOUNT_TOOLS, *RW_TOOLS]
     variants = MAX_VARIANTS if caller.platform == "max" else {}
-    return [variants.get(t.name, t) for t in tools if supported(t, caller.platform)]
+    off = SCHEDULED_TOOLS if caller.platform == "max" and not max_settings.scheduled_enabled else frozenset()
+    return [variants.get(t.name, t) for t in tools if supported(t, caller.platform) and t.name not in off]

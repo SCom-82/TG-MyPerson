@@ -13,6 +13,9 @@ class MaxSettings(BaseSettings):
     catchup_seed: int = Field(default=50, alias="MAX_CATCHUP_SEED")
     catchup_max_chats: int = Field(default=60, alias="MAX_CATCHUP_MAX_CHATS")
     raw_events_retention_days: int = Field(default=30, alias="MAX_RAW_EVENTS_RETENTION_DAYS")
+    # Scheduled messages (plan 2026-10-22 Р5 Р-73): false → schedule_date and the three scheduled
+    # tools answer 501 and leave GET /tools, without a rollback (MAX's server flag may be off).
+    scheduled_enabled: bool = Field(default=True, alias="MAX_SCHEDULED_ENABLED")
 
     model_config = {
         "env_file": ".env",

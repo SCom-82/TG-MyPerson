@@ -118,8 +118,8 @@ async def test_send_message_is_stored_and_listed_at_once(rw):
 
 
 async def test_parameters_without_max_counterpart_501(rw):
-    resp = await _send(rw, schedule_date="2026-10-18T10:00:00Z")
-    assert resp.status_code == 501 and resp.json()["parameter"] == "schedule_date", resp.text
+    resp = await _send(rw, schedule_date="2026-10-18T10:00:00Z")  # scheduled text: Р5 Р-73, the past → 422
+    assert resp.status_code == 422 and "schedule_date" in resp.text, resp.text
     resp = await rw.http.post("/api/v1/messages/send-file", headers=rw.env.h(),
                               data={"chat_id": str(DIALOG), "schedule_date": "2026-10-18T10:00:00Z"},
                               files={"file": ("v.ogg", b"OggS", "audio/ogg")})
@@ -617,8 +617,7 @@ async def test_mcp_send_and_limit_text(rw):
     assert "retry in 60 s" in text and '"retry_after": 60' in text
 
 
-MAX_501_TOOLS = {"archive_chat",  # block_user / unblock_user: MAX since Р5 (Р-72)
-                 "list_scheduled", "cancel_scheduled", "send_scheduled_now"}
+MAX_501_TOOLS = {"archive_chat"}  # block_user / unblock_user (Р-72), scheduled (Р-73): MAX since Р5
 MAX_WRITES = {"send_message", "send_photo", "send_file", "create_upload", "forward_message", "edit_message",
               "delete_message", "react_to_message", "mark_chat_read", "contact_by_phone", "send_to_person",
               "leave_chat",
@@ -636,7 +635,7 @@ async def test_mcp_tools_depend_on_platform(rw):
     assert not MAX_WRITES & max_ro and not MAX_501_TOOLS & max_ro and "list_messages" in max_ro
     tg_rw = names(_caller(rw, platform="telegram"))
     assert len(tg_rw) == 46 and MAX_501_TOOLS <= tg_rw and not tool_catalog.MAX_ONLY_TOOLS & tg_rw
-    assert len(max_rw) == 77 and "reachable_contacts" in max_rw  # reach (Р-17) + groups (Р3) + Р4 + Р5 on MAX
+    assert len(max_rw) == 80 and "reachable_contacts" in max_rw  # reach (Р-17) + groups (Р3) + Р4 + Р5 on MAX
 
     # Every tool shown to a MAX account has its route on MAX (no 501 by construction).
     for name in max_rw:

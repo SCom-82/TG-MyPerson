@@ -224,7 +224,7 @@ async def test_mcp_tool_counts_and_calls(rw):
     names = lambda platform, mode: {t.name for t in mcp_tools.visible(  # noqa: E731
         mcp_tools.Caller("account", rw.id, rw.env.alias, platform, mode, "http://test"))}
     max_rw, max_ro = names("max", "rw"), names("max", "ro")
-    assert (len(max_rw), len(max_ro), len(names("telegram", "rw")), len(names("telegram", "ro"))) == (77, 31, 46, 21)
+    assert (len(max_rw), len(max_ro), len(names("telegram", "rw")), len(names("telegram", "ro"))) == (80, 32, 46, 21)
     reads = {"get_bot_info", "get_message_link", "get_poll_voters", "transcribe_voice", "search_chat_messages",
              "get_post_stats"}
     assert reads | {"press_button", "start_bot", "block_user", "unblock_user"} <= max_rw

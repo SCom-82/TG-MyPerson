@@ -22,7 +22,7 @@ import logging
 import re
 import time
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
@@ -37,6 +37,7 @@ from app.api import data_reads
 from pydantic import BaseModel, Field
 
 from app.max import frames, groups, media, normalize, repo
+from app.max.config import max_settings
 from app.max.api import groups as mx_groups
 from app.services.tg_store import new_mode
 from app.max.api.common import (
@@ -276,16 +277,106 @@ async def download_media(
 # Writes (phase 2, API spec §4)
 # ---------------------------------------------------------------------------
 
+SCHEDULE_MIN = timedelta(seconds=60)
+SCHEDULE_MAX = timedelta(days=365)
+
+
+def _schedule_at(value: datetime) -> datetime:
+    """schedule_date in UTC, now + 60 s … now + 365 days (Р-73), else 422 before the slot."""
+    when = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    now = datetime.now(timezone.utc)
+    if not now + SCHEDULE_MIN <= when <= now + SCHEDULE_MAX:
+        raise HTTPException(status_code=422, detail="schedule_date: from now + 60 s to now + 365 days")
+    return when
+
+
 @router.post("", name="send_message")
 async def send_message(req: SendMessageRequest, request: Request):
-    """parse_mode is ignored: PyMax sends the text as its markdown."""
-    if req.schedule_date is not None:
+    """parse_mode is ignored: PyMax sends the text as its markdown. schedule_date (Р-73): MAX
+    sends the text at that time; it is not stored as sent until MAX sends it."""
+    if req.schedule_date is not None and not max_settings.scheduled_enabled:
         return param_not_supported(request, "send_message", "schedule_date")
+    when = _schedule_at(req.schedule_date) if req.schedule_date is not None else None
     session = await authorized_or_error(request)
     if isinstance(session, JSONResponse):
         return session
-    msg = await send_text(request, session, "send_message", req.chat_id, req.text, reply_to=req.reply_to_message_id)
-    return {"status": "sent", "message_id": msg.id, "chat_id": req.chat_id, "schedule_date": None}
+    if when is None:
+        msg = await send_text(request, session, "send_message", req.chat_id, req.text,
+                              reply_to=req.reply_to_message_id)
+        return {"status": "sent", "message_id": msg.id, "chat_id": req.chat_id, "schedule_date": None}
+    async with write_slot(request, SEND, "send_message", req.chat_id):
+        answer = await call_max(frames.schedule(session.client, req.chat_id, req.text,
+                                                int(when.timestamp() * 1000), req.reply_to_message_id),
+                                "the message may have been scheduled, check list_scheduled before retrying")
+    message = answer.get("message") if isinstance(answer.get("message"), dict) else {}
+    return {"status": "scheduled", "message_id": message.get("id"), "chat_id": req.chat_id,
+            "schedule_date": when.isoformat()}
+
+
+# ---------------------------------------------------------------------------
+# Scheduled messages (Р-73): the TG paths and names; MAX_SCHEDULED_ENABLED=false → 501
+# ---------------------------------------------------------------------------
+
+def _scheduled_off(request: Request, tool: str) -> JSONResponse | None:
+    if max_settings.scheduled_enabled:
+        return None
+    return JSONResponse(status_code=501, content={
+        "error": f"{tool} is switched off for platform max (MAX_SCHEDULED_ENABLED=false)", "tool": tool,
+        "platform": "max", "alias": getattr(request.state, "session_alias", "")})
+
+
+def _scheduled_item(chat_id: int, m: dict) -> dict:
+    attrs = m.get("delayedAttributes") if isinstance(m.get("delayedAttributes"), dict) else {}
+    attaches = [a for a in m.get("attaches") or [] if isinstance(a, dict)]
+    return {"message_id": int(m["id"]), "chat_id": chat_id, "text": m.get("text") or None,
+            "date": normalize.ms_to_dt(attrs.get("timeToFire") or m.get("time")),
+            "has_media": bool(attaches), "media_type": attaches[0].get("_type") if attaches else None}
+
+
+@router.get("/scheduled", name="list_scheduled")
+async def list_scheduled(request: Request, chat_id: int = Query(...)):
+    off = _scheduled_off(request, "list_scheduled")
+    if off is not None:
+        return off
+    session = await authorized_or_error(request)
+    if isinstance(session, JSONResponse):
+        return session
+    found = await call_max_read(frames.list_delayed(session.client, chat_id))
+    items = [_scheduled_item(chat_id, m) for m in found if m.get("id") is not None]
+    return {"items": items, "total": len(items), "chat_id": chat_id}
+
+
+@router.delete("/scheduled/{chat_id}/{message_id}", name="cancel_scheduled")
+async def cancel_scheduled(chat_id: int, message_id: int, request: Request):
+    off = _scheduled_off(request, "cancel_scheduled")
+    if off is not None:
+        return off
+    session = await authorized_or_error(request)
+    if isinstance(session, JSONResponse):
+        return session
+    async with write_slot(request, ACTION, "cancel_scheduled", chat_id):
+        await call_max(frames.cancel_delayed(session.client, chat_id, [message_id]),
+                       "it may have been cancelled, check list_scheduled")
+    return {"status": "cancelled", "chat_id": chat_id, "message_id": message_id}
+
+
+@router.post("/scheduled/{chat_id}/{message_id}/send-now", name="send_scheduled_now")
+async def send_scheduled_now(chat_id: int, message_id: int, request: Request):
+    """The client's "send now": 67 with timeToFire now; text and elements as MAX keeps them. No
+    slot (Р-73): the send was counted when it was scheduled."""
+    off = _scheduled_off(request, "send_scheduled_now")
+    if off is not None:
+        return off
+    session = await authorized_or_error(request)
+    if isinstance(session, JSONResponse):
+        return session
+    found = await call_max_read(frames.list_delayed(session.client, chat_id))
+    message = next((m for m in found if m.get("id") is not None and int(m["id"]) == message_id), None)
+    if message is None:
+        raise HTTPException(status_code=404, detail=f"no scheduled message {message_id} in chat {chat_id}")
+    await call_max(frames.fire_now(session.client, chat_id, message),
+                   "it may have been sent, check list_messages")
+    return {"status": "sent", "chat_id": chat_id, "message_id": message_id}
 
 
 def _attachment(data: bytes, name: str, **kind) -> object:

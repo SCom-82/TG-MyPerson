@@ -97,7 +97,7 @@ async def test_mcp_tools_and_calls(rw):
     r4_mcp = {"send_video_note", "vote_poll", "get_reactions", "import_contacts", "remove_contact", "delete_dialog",
               "list_folders", "create_folder", "update_folder", "delete_folder"}
     shared = {"pin_message", "unpin_message", "join_chat", "resolve_chat", "send_voice", "send_album", "send_poll"}
-    assert r4_mcp | shared <= rw_tools and (len(rw_tools), len(ro_tools)) == (77, 31)
+    assert r4_mcp | shared <= rw_tools and (len(rw_tools), len(ro_tools)) == (80, 32)
     assert ro_tools & (r4_mcp | shared) == {"resolve_chat", "get_reactions", "list_folders"}
 
     await _foreign(rw)

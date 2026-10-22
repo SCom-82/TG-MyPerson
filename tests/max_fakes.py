@@ -129,6 +129,8 @@ class FakeMaxServer:
         self.post_stats: dict[tuple[int, int], dict] = {}
         self.blocked: set[int] = set()
         self.callback_answer: dict | None = None
+        # R5-3: delayed messages per chat (MAX keeps them apart from the history until they fire)
+        self.delayed: dict[int, list[dict]] = {}
 
         self.factory_calls: list[dict] = []
         self.clients: list["FakePyMaxClient"] = []
@@ -389,6 +391,8 @@ class FakePyMaxClient:
         if int(opcode) in self.server.frame_answers:
             answer = self.server.frame_answers[int(opcode)]
             return SimpleNamespace(payload=answer)
+        if int(opcode) == 64 and "delayedAttributes" in payload["message"]:  # delayed text (Р-73)
+            return SimpleNamespace(payload=self._delayed(payload))
         if int(opcode) == 64:  # MSG_SEND with a CONTROL: "new" creates a chat (Р-63), "botStarted" (Р-65)
             if payload["message"]["attaches"][0]["event"] == "botStarted":
                 return SimpleNamespace(payload=self._bot_started(payload))
@@ -416,6 +420,22 @@ class FakePyMaxClient:
     def _r5_read(self, opcode: int, payload: dict) -> dict | None:
         """Release 5 frames that are not about a group (None: not one of them)."""
         s = self.server
+        if payload.get("itemType") == "DELAYED" and opcode in (49, 66):
+            queue = s.delayed.setdefault(payload["chatId"], [])
+            if opcode == 49:
+                return {"messages": list(queue)}
+            gone = [m["id"] for m in queue if m["id"] in payload["messageIds"]]
+            s.delayed[payload["chatId"]] = [m for m in queue if m["id"] not in gone]
+            return {"chatId": payload["chatId"], "messageIds": gone}
+        if opcode == 67 and "delayedAttributes" in payload:  # "send now"
+            queue = s.delayed.get(payload["chatId"], [])
+            m = next((m for m in queue if m["id"] == payload["messageId"]), None)
+            if m is None:
+                raise ApiError(opcode=67, error="message.not.found", message="Message not found")
+            queue.remove(m)
+            m = {k: v for k, v in m.items() if k != "delayedAttributes"}
+            s.history.setdefault(payload["chatId"], []).append(m)
+            return {"message": m}
         if opcode == 118:  # MSG_SEND_CALLBACK
             return s.callback_answer or {"success": True}
         if opcode == 145:
@@ -449,6 +469,15 @@ class FakePyMaxClient:
             ids = sorted(s.blocked)[payload.get("from", 0):payload.get("from", 0) + payload.get("count", 200)]
             return {"contacts": [self._user_of(u) for u in ids]}
         return None
+
+    def _delayed(self, payload: dict) -> dict:
+        self.server.next_message_id += 1
+        m = {"id": self.server.next_message_id, "time": int(time.time() * 1000), "type": "USER",
+             "text": payload["message"].get("text") or "", "elements": payload["message"].get("elements") or [],
+             "attaches": [], "sender": self.server.user_id,
+             "delayedAttributes": payload["message"]["delayedAttributes"]}
+        self.server.delayed.setdefault(payload["chatId"], []).append(m)
+        return {"chatId": payload["chatId"], "message": m}
 
     def _bot_started(self, payload: dict) -> dict:
         bot = payload.get("userId")
@@ -643,6 +672,14 @@ class FakePyMaxClient:
         names = [getattr(a, "name", None) or getattr(a, "file_name", None) for a in attachments or []]
         self._write("send_message", chat_id, text, reply_to, kinds, names)
         self.server.sent_attachments.append(list(attachments or []))
+        if send_at is not None:  # delayed (Р5 Р-73): not in the history until it fires
+            self.server.next_message_id += 1
+            fire = int(send_at.timestamp() * 1000)
+            m = {"id": self.server.next_message_id, "time": int(time.time() * 1000), "type": "USER",
+                 "text": text or "", "attaches": [], "sender": self.server.user_id,
+                 "delayedAttributes": {"timeToFire": fire, "notifySender": notify}}
+            self.server.delayed.setdefault(chat_id, []).append(m)
+            return Message.model_validate({**m, "chatId": chat_id})
         return self._new_message(chat_id, text, attaches=[self._attach(a, i) for i, a in enumerate(attachments or [])])
 
     def _attach(self, a, i: int) -> dict:

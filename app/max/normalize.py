@@ -325,9 +325,35 @@ def frame_chat_id(opcode: int, payload: dict) -> int | None:
         return None
 
 
+DELAYED_SLACK_MS = 5_000
+
+
+def is_delayed(payload: dict, now_ms: int) -> bool:
+    """A scheduled message not sent yet (Р5 Р-73): its delayedAttributes.timeToFire is ahead.
+    The frame of its real sending comes later and is stored then."""
+    msg = payload.get("message") if isinstance(payload.get("message"), dict) else payload
+    attrs = msg.get("delayedAttributes") if isinstance(msg, dict) else None
+    fire = attrs.get("timeToFire") if isinstance(attrs, dict) else None
+    try:
+        return fire is not None and int(fire) > now_ms + DELAYED_SLACK_MS
+    except (TypeError, ValueError):
+        return False
+
+
+def _delayed_filled(payload: dict) -> dict:
+    """PyMax's Message requires delayedAttributes.notifySender / notifyOpponents, the client's schema
+    (qs) does not: a fired scheduled message without them is still a message (Р5 Р-73)."""
+    msg = payload.get("message") if isinstance(payload.get("message"), dict) else payload
+    attrs = msg.get("delayedAttributes") if isinstance(msg, dict) else None
+    if not isinstance(attrs, dict) or {"notifySender", "notifyOpponents"} <= set(attrs):
+        return payload
+    filled = {**msg, "delayedAttributes": {"notifySender": False, "notifyOpponents": False, **attrs}}
+    return {**payload, "message": filled} if msg is not payload else filled
+
+
 def parse_message(payload: dict) -> Message:
     """NOTIF_MESSAGE / MSG_EDIT payload → Message (raises pydantic ValidationError)."""
-    return Message.model_validate(payload)
+    return Message.model_validate(_delayed_filled(payload))
 
 
 def parse_stored(raw: dict) -> Message:
