@@ -362,23 +362,20 @@ async def set_blocked(client: Any, user_id: int, *, block: bool) -> dict:
     return _payload(await client._app.invoke(Opcode.CONTACT_UPDATE, block_frame(user_id, block=block)))
 
 
-BLOCKED_PAGE = 200
+BLOCKED_PAGE = 100  # Р5.1 Р-82: the client's count; 200 → "'count' out of range" and a dropped session
 
 
-def blocked_frame(start: int = 0, count: int = BLOCKED_PAGE) -> dict:
-    return {"status": "BLOCKED", "from": start, "count": count}
+def blocked_frame() -> dict:
+    """CONTACT_LIST 36 exactly as the client reads the blacklist: one page, from 0 (it never pages;
+    what MAX does with another from is not known, and an error drops the session)."""
+    return {"status": "BLOCKED", "count": BLOCKED_PAGE, "from": 0}
 
 
-async def blocked_ids(client: Any, *, pages: int = 5) -> set[int]:
-    """CONTACT_LIST 36 status BLOCKED: ids of the blocked contacts, up to pages × 200."""
-    out: set[int] = set()
-    for page in range(pages):
-        contacts = _payload(await client._app.invoke(Opcode.CONTACT_LIST, blocked_frame(page * BLOCKED_PAGE))
-                            ).get("contacts") or []
-        out |= {int(c["id"]) for c in contacts if isinstance(c, dict) and c.get("id") is not None}
-        if len(contacts) < BLOCKED_PAGE:
-            break
-    return out
+async def blocked_ids(client: Any) -> tuple[set[int], bool]:
+    """(ids of the blocked contacts, the page was full — the list may be truncated)."""
+    contacts = _payload(await client._app.invoke(Opcode.CONTACT_LIST, blocked_frame())).get("contacts") or []
+    ids = {int(c["id"]) for c in contacts if isinstance(c, dict) and c.get("id") is not None}
+    return ids, len(contacts) >= BLOCKED_PAGE
 
 
 # -- release 5: scheduled (delayed) messages, Р-73 ---------------------------------

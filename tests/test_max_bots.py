@@ -192,7 +192,7 @@ async def test_block_and_unblock(rw):
     resp = await _post(rw, f"/users/{BOT}/block")
     assert resp.json() == {"status": "blocked", "user_id": BOT, "blocked": True}, resp.text
     assert _frames(rw, int(Opcode.CONTACT_UPDATE)) == [{"contactId": BOT, "action": "BLOCK"}]
-    assert _frames(rw, int(Opcode.CONTACT_LIST))[-1] == {"status": "BLOCKED", "from": 0, "count": 200}
+    assert _frames(rw, int(Opcode.CONTACT_LIST))[-1] == {"status": "BLOCKED", "count": 100, "from": 0}  # Р-82
     resp = await _post(rw, f"/users/{BOT}/unblock")
     assert resp.json() == {"status": "unblocked", "user_id": BOT, "blocked": False}
     assert _actions(rw) == ["block_user", "unblock_user"]
@@ -250,8 +250,7 @@ def test_bot_frames_match_the_client_schemas():
     # 34: contactId z, action gme (ADD BLOCK REMOVE UNBLOCK UPDATE ...); 36: status Es, from B?, count B?
     assert frames.block_frame(5, block=True) == {"contactId": 5, "action": "BLOCK"}
     assert frames.block_frame(5, block=False)["action"] == "UNBLOCK"
-    assert set(frames.blocked_frame()) == {"status", "from", "count"} and frames.blocked_frame()["status"] in (
-        "REMOVED", "BLOCKED", "HIDDEN")
+    assert frames.blocked_frame() == {"status": "BLOCKED", "count": 100, "from": 0}  # the client's dme, Р5.1 Р-82
 
 
 async def test_start_bot_second_frame_only_for_a_chat_error(rw):

@@ -208,7 +208,10 @@ async def _block(request: Request, user_id: int, *, block: bool) -> dict:
                        "the block may have been applied, call again to see blocked")
     out = {"status": "blocked" if block else "unblocked", "user_id": user_id}
     try:
-        out["blocked"] = user_id in await frames.blocked_ids(session.client)
+        ids, full = await frames.blocked_ids(session.client)
+        out["blocked"] = user_id in ids
+        if full and not out["blocked"]:
+            out["warning"] = "list may be truncated"
     except Exception as exc:  # noqa: BLE001 — the change is made; the list is a check
         log.info("max[%s]: blocked list not read: %s: %s", session.alias, type(exc).__name__, exc)
         out["blocked"] = None
