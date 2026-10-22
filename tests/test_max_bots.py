@@ -252,3 +252,12 @@ def test_bot_frames_match_the_client_schemas():
     assert frames.block_frame(5, block=False)["action"] == "UNBLOCK"
     assert set(frames.blocked_frame()) == {"status", "from", "count"} and frames.blocked_frame()["status"] in (
         "REMOVED", "BLOCKED", "HIDDEN")
+
+
+async def test_start_bot_second_frame_only_for_a_chat_error(rw):
+    """review 19 R19-3: flood, a stopped bot ... → 502 at once, no userId frame."""
+    _bot(rw)
+    rw.env.server.group_errors = [ApiError(opcode=64, error="too.many.requests", message="slow down")]
+    resp = await _post(rw, "/bots/start", {"bot_id": BOT})
+    assert resp.status_code == 502 and "slow down" in resp.text
+    assert len(_frames(rw, int(Opcode.MSG_SEND))) == 1 and _events(rw.id) == []

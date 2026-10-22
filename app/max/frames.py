@@ -217,9 +217,21 @@ async def start_bot(client: Any, chat_id: int, bot_id: int, start_payload: str |
         return _payload(await client._app.invoke(Opcode.MSG_SEND, bot_start_frame(
             chat_id=chat_id, bot_id=bot_id, start_payload=start_payload)))
     except ApiError as exc:
+        if not _about_the_chat(exc):
+            raise  # flood, a blocked or stopped bot ...: no second frame (review 19 R19-3)
         log.info("max: botStarted by chatId %s refused (%s), by userId", chat_id, exc)
     return _payload(await client._app.invoke(Opcode.MSG_SEND, bot_start_frame(
         chat_id=None, bot_id=bot_id, start_payload=start_payload)))
+
+
+# Errors that say the dialog id was not taken (the reason for the userId frame); narrowed by
+# the live check's codes (plan §5 p.10).
+CHAT_ERRORS = ("not.found", "chat", "dialog")
+
+
+def _about_the_chat(exc: ApiError) -> bool:
+    code = str(getattr(exc, "error", "") or "").lower()
+    return any(part in code for part in CHAT_ERRORS)
 
 
 def parse_sent(payload: dict, chat_id: int | None = None) -> Message | None:
