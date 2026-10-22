@@ -1,4 +1,5 @@
-"""MAX users (API spec §3): list_users, resolve_user, resolve_by_id."""
+"""MAX users (API spec §3): list_users, resolve_user, resolve_by_id; block_user /
+unblock_user (plan 2026-10-22 Р5 Р-72) — the TG paths and names, MAX's CONTACT_UPDATE."""
 
 import logging
 import time
@@ -18,7 +19,10 @@ from app.max.store_new import NewMaxStore
 from app.models import User
 from app.services.tg_store import new_mode, shadow
 from app.storage import account_db
-from app.max.api.common import authorized_or_error, session_or_error
+from app.authz.write_limits import ACTION, write_slot
+from app.max import frames
+from app.max.api import groups as mx_groups
+from app.max.api.common import authorized_or_error, call_max, session_or_error
 from app.schemas import (
     BulkResolveByIdRequest,
     BulkResolveResponse,
@@ -188,3 +192,35 @@ async def bulk_resolve_by_id(req: BulkResolveByIdRequest, request: Request, db: 
             took_ms=int((time.monotonic() - t0) * 1000),
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Block / unblock (Р-72): 34 BLOCK / UNBLOCK, then the blocked list (36) says what MAX did
+# ---------------------------------------------------------------------------
+
+async def _block(request: Request, user_id: int, *, block: bool) -> dict:
+    tool = "block_user" if block else "unblock_user"
+    session = await mx_groups.connected(request)
+    mx_groups.not_me(session, [user_id])
+    request.state.audit_target_user_id = user_id
+    async with write_slot(request, ACTION, tool):
+        await call_max(frames.set_blocked(session.client, user_id, block=block),
+                       "the block may have been applied, call again to see blocked")
+    out = {"status": "blocked" if block else "unblocked", "user_id": user_id}
+    try:
+        out["blocked"] = user_id in await frames.blocked_ids(session.client)
+    except Exception as exc:  # noqa: BLE001 — the change is made; the list is a check
+        log.info("max[%s]: blocked list not read: %s: %s", session.alias, type(exc).__name__, exc)
+        out["blocked"] = None
+        out["warning"] = "not confirmed: the blocked list was not read"
+    return out
+
+
+@router.post("/{user_id}/block", name="block_user")
+async def block_user(user_id: int, request: Request):
+    return await _block(request, user_id, block=True)
+
+
+@router.post("/{user_id}/unblock", name="unblock_user")
+async def unblock_user(user_id: int, request: Request):
+    return await _block(request, user_id, block=False)

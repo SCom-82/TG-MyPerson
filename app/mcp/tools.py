@@ -620,8 +620,9 @@ def _max_r4_tools() -> list[Tool]:
                   "poll_id": {"type": "integer"}}, ["chat_id", "message_id", "answer_ids"]),
              "vote_poll", rest("POST", "/messages/{chat_id}/{message_id}/vote",
                                body=path("chat_id", "message_id"))),
-        Tool("get_reactions", "Reactions of a message: counts per reaction and this account's own "
-             "(MAX does not say who reacted).", obj(msg, ["chat_id", "message_id"]),
+        Tool("get_reactions", "Reactions of a message: counts per reaction, this account's own, and who "
+             "reacted (users: user_id + reaction, up to 100; users null + users_error if MAX did not say).",
+             obj(msg, ["chat_id", "message_id"]),
              "get_reactions", rest("GET", "/messages/{chat_id}/{message_id}/reactions")),
         Tool("import_contacts", "Add up to 20 numbers to the address book and the contacts base in one call; "
              "per number: found, user_id, person_id, chat_id. Limit 50 numbers/day; known numbers answer from "
@@ -654,7 +655,63 @@ def _max_r4_tools() -> list[Tool]:
     ])
 
 
-ACCOUNT_TOOLS = _account_tools() + _max_group_tools() + _max_r4_tools()
+def _max_r5_tools() -> list[Tool]:
+    """MAX release 5 without a TG counterpart (plan 2026-10-22 Р5 Р-64…Р-71, Р-77); block_user /
+    unblock_user are the TG tools, served by the MAX router now."""
+    obj = lambda props, req=(): {"type": "object", "properties": props, "required": list(req)}  # noqa: E731
+    path = lambda *keys: (lambda a: {k: v for k, v in a.items() if k not in keys and v is not None})  # noqa: E731
+    msg = {"chat_id": {"type": "integer"}, "message_id": {"type": "integer"}}
+    return _widened([
+        Tool("press_button", "Press a button of a bot's keyboard (message.keyboard from get_message / "
+             "list_messages): row and column from 0. A button may trigger an action in the bot (an order, a "
+             "subscription): read the message first. CALLBACK, CHAT and MESSAGE buttons only; a LINK button "
+             "answers with its url to open; contact, location, mini app and clipboard buttons are refused.",
+             obj({**msg, "row": {"type": "integer", "minimum": 0}, "column": {"type": "integer", "minimum": 0}},
+                 ["chat_id", "message_id", "row", "column"]),
+             "press_button", rest("POST", "/messages/{chat_id}/{message_id}/press",
+                                  body=path("chat_id", "message_id"))),
+        Tool("start_bot", "Start a MAX bot (/start), optionally with the payload of a max.ru/<bot>?start=<payload> "
+             "link; the bot's answer comes to the dialog with it (list_messages). Counts as a message sent "
+             "(a new dialog the first time).",
+             obj({"bot_id": {"type": "integer"}, "start_payload": {"type": "string", "maxLength": 512}},
+                 ["bot_id"]),
+             "start_bot", rest("POST", "/bots/start", body=ALL)),
+        Tool("get_bot_info", "A bot's commands, profile and start message (bot_id), or the bots of a chat with "
+             "their commands (chat_id). One of the two.",
+             obj({"bot_id": {"type": "integer"}, "chat_id": {"type": "integer"}}),
+             "get_bot_info", rest("GET", "/bots/info", query=ALL)),
+        Tool("get_message_link", "A link to the message (https://max.ru/...).", obj(msg, ["chat_id", "message_id"]),
+             "get_message_link", rest("GET", "/messages/{chat_id}/{message_id}/link")),
+        Tool("get_poll_voters", "Who voted for an answer of a poll (answer_id from the message's poll.answers); "
+             "not for an anonymous poll.",
+             obj({**msg, "answer_id": {"type": "integer"},
+                  "limit": {"type": "integer", "default": 100, "minimum": 1, "maximum": 100}},
+                 ["chat_id", "message_id", "answer_id"]),
+             "get_poll_voters", rest("GET", "/messages/{chat_id}/{message_id}/voters",
+                                     query=path("chat_id", "message_id"))),
+        Tool("transcribe_voice", "MAX's text of a voice message or video note: status done (text), processing "
+             "(ask again later) or failed. index: attach_index if the message has several.",
+             obj({**msg, "index": {"type": "integer", "minimum": 0}}, ["chat_id", "message_id"]),
+             "transcribe_voice", rest("POST", "/messages/{chat_id}/{message_id}/transcribe",
+                                      body=path("chat_id", "message_id"))),
+        Tool("search_chat_messages", "Search one chat on the MAX server (also messages older than our copy); "
+             "found messages are stored and readable by get_message. global_search searches our copy of all "
+             "chats.",
+             obj({"chat_id": {"type": "integer"}, "query": {"type": "string"},
+                  "limit": {"type": "integer", "default": 20, "minimum": 1, "maximum": 30},
+                  "marker": {"type": "integer", "description": "next_marker of the previous page"}},
+                 ["chat_id", "query"]),
+             "search_chat_messages", rest("GET", "/messages/{chat_id}/search", query=path("chat_id"))),
+        Tool("get_post_stats", "Views and forwards of channel posts; reading does not count a view. 1-100 "
+             "message ids; a post MAX did not answer for is in missing.",
+             obj({"chat_id": {"type": "integer"},
+                  "message_ids": {"type": "array", "items": {"type": "integer"}, "minItems": 1, "maxItems": 100}},
+                 ["chat_id", "message_ids"]),
+             "get_post_stats", rest("GET", "/messages/{chat_id}/stats", query=path("chat_id"))),
+    ])
+
+
+ACCOUNT_TOOLS = _account_tools() + _max_group_tools() + _max_r4_tools() + _max_r5_tools()
 
 
 def _max_variants() -> dict[str, Tool]:
@@ -671,7 +728,19 @@ def _max_variants() -> dict[str, Tool]:
     members_schema["properties"]["search"] = {"type": "string", "description": "MAX searches its members itself"}
     members_schema["properties"]["role"] = {"type": "string", "enum": ["all", "admins"], "default": "all",
                                             "description": "admins: only admins, with their rights (mask)"}
-    return {"send_poll": dataclasses.replace(poll, schema=schema),
+    keyboard = (" MAX: a bot's message has keyboard {callback_id, buttons: [[{text, type, url?, payload?}]]}: "
+                "press with press_button(row, column).")
+    by_name = {t.name: t for t in ACCOUNT_TOOLS}
+    blocked = " MAX: the answer has blocked — whether the user is in the account's blocked list after it."
+    return {"list_messages": dataclasses.replace(by_name["list_messages"],
+                                                 description=by_name["list_messages"].description + keyboard),
+            "get_message": dataclasses.replace(by_name["get_message"],
+                                               description=by_name["get_message"].description + keyboard),
+            "block_user": dataclasses.replace(by_name["block_user"],
+                                              description=by_name["block_user"].description + blocked),
+            "unblock_user": dataclasses.replace(by_name["unblock_user"],
+                                                description=by_name["unblock_user"].description + blocked),
+            "send_poll": dataclasses.replace(poll, schema=schema),
             "get_chat_members": dataclasses.replace(
                 members, schema=members_schema,
                 description=members.description + " MAX: an admin's item has permissions, mask, inviter_id.")}

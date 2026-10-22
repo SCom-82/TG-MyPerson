@@ -12,16 +12,25 @@ raw protocol lives here, so a PyMax upgrade has one place to look at.
 - vote / parse_vote: PyMax's vote_poll frame. Sending and parsing are apart
   (review 17 R17-1): the write slot covers the frame only, an answer we cannot
   parse does not give back a slot of a write that reached MAX.
+
+Release 5 (plan 2026-10-22 Р5 Р-64…Р-72, Р-77): bots (keyboards, /start, info),
+who reacted, poll voters, a message link, transcription, search in a chat, post
+views, blocking. Frame fields are the MAX web client's (appendix «r5-protocol»);
+each frame is a pure *_frame() (canary tests) and a call returning MAX's raw answer.
 """
 
 import logging
+import time
 from typing import Any
 
+from pymax import ApiError
 from pymax.api.messages.payloads import VotePollPayload
 from pymax.api.users.payloads import ImportContactsPayload
 from pymax.protocol import Opcode
 from pymax.types import Chat, User
+from pymax.types.domain import Message
 from pymax.types.domain.attachments.enums import PollFlags
+from pymax.types.domain.attachments.keyboards import InlineKeyboardAttachment
 from pymax.types.domain.attachments.poll import Poll, PollAnswer, PollAttachment, PollState
 from pymax.types.domain.user import ContactInfo
 
@@ -142,3 +151,217 @@ async def vote(client: Any, chat_id: int, message_id: int, poll_id: int, answer_
 
 def parse_vote(payload: dict) -> PollState:
     return PollState.model_validate(payload["state"])
+
+
+# -- release 5: bots -------------------------------------------------------------
+
+OP_MSG_LINK = 90  # not in pymax.protocol.Opcode (Р-51)
+PRESSABLE = ("CALLBACK", "CHAT", "MESSAGE")  # Р-64: the rest are a URL, PII, geo, a mini app, the clipboard
+
+
+def _payload(frame: Any) -> dict:
+    return getattr(frame, "payload", None) or {}
+
+
+def keyboard_view(message: Any) -> dict | None:
+    """The bot keyboard of a message (Р-64): {callback_id, buttons: [[{text, type, url?, payload?}]]}.
+
+    callbackId is taken where MAX puts it: in the keyboard or next to it in the attachment."""
+    for att in getattr(message, "attaches", None) or []:
+        if not isinstance(att, InlineKeyboardAttachment):
+            continue
+        kb = att.keyboard or {}
+        callback = kb.get("callbackId") or (att.model_extra or {}).get("callbackId")
+        rows = []
+        for row in kb.get("buttons") or []:
+            rows.append([{k: v for k, v in (("text", b.get("text")), ("type", b.get("type")),
+                                             ("url", b.get("url")), ("payload", b.get("payload")))
+                          if v is not None}
+                         for b in row or [] if isinstance(b, dict)])
+        return {"callback_id": str(callback) if callback is not None else None, "buttons": rows}
+    return None
+
+
+def callback_frame(callback_id: str, button_type: str, payload: str | None) -> dict:
+    """MSG_SEND_CALLBACK 118 {callbackId, type, payload?, timestamp}: a button pressed."""
+    frame = {"callbackId": callback_id, "type": button_type, "timestamp": int(time.time() * 1000)}
+    if payload is not None:
+        frame["payload"] = payload
+    return frame
+
+
+async def press(client: Any, callback_id: str, button_type: str, payload: str | None) -> dict:
+    return _payload(await client._app.invoke(Opcode.MSG_SEND_CALLBACK, callback_frame(callback_id, button_type,
+                                                                                       payload)))
+
+
+def bot_start_frame(*, chat_id: int | None, bot_id: int, start_payload: str | None) -> dict:
+    """MSG_SEND 64 with a CONTROL botStarted (Р-65): to the dialog by chatId, else by userId."""
+    attach = {"_type": "CONTROL", "event": "botStarted"}
+    if start_payload is not None:
+        attach["startPayload"] = start_payload
+    frame: dict = {"message": {"cid": int(time.time() * 1000), "attaches": [attach]}}
+    if chat_id is not None:
+        frame["chatId"] = chat_id
+    else:
+        frame["userId"] = bot_id
+    return frame
+
+
+async def start_bot(client: Any, chat_id: int, bot_id: int, start_payload: str | None) -> dict:
+    """/start to the bot. MAX refusing the dialog id (me ^ bot, not checked live) → the same
+    frame by userId: nothing was sent by the refused one, so it is one send."""
+    try:
+        return _payload(await client._app.invoke(Opcode.MSG_SEND, bot_start_frame(
+            chat_id=chat_id, bot_id=bot_id, start_payload=start_payload)))
+    except ApiError as exc:
+        log.info("max: botStarted by chatId %s refused (%s), by userId", chat_id, exc)
+    return _payload(await client._app.invoke(Opcode.MSG_SEND, bot_start_frame(
+        chat_id=None, bot_id=bot_id, start_payload=start_payload)))
+
+
+def parse_sent(payload: dict, chat_id: int | None = None) -> Message | None:
+    """The message of a MSG_SEND / 118 answer (None if it has none)."""
+    msg = payload.get("message")
+    if not msg:
+        return None
+    return Message.model_validate({**msg, "chatId": payload.get("chatId", chat_id)})
+
+
+async def bot_info(client: Any, bot_id: int) -> dict:
+    """BOT_INFO 145 {botId} → {commands [{botId, name, description}], contact, startMessage}."""
+    return _payload(await client._app.invoke(Opcode.BOT_INFO, {"botId": bot_id}))
+
+
+async def chat_bot_commands(client: Any, chat_id: int) -> dict:
+    """CHAT_BOT_COMMANDS 144 {chatId} → {commands, contacts {id: contact}}."""
+    return _payload(await client._app.invoke(Opcode.CHAT_BOT_COMMANDS, {"chatId": chat_id}))
+
+
+def parse_user(data: Any) -> User | None:
+    return User.model_validate(data) if isinstance(data, dict) and data.get("id") is not None else None
+
+
+# -- release 5: reads -------------------------------------------------------------
+
+def detailed_reactions_frame(chat_id: int, message_id: int, *, count: int = 100, marker: Any = None) -> dict:
+    frame = {"chatId": chat_id, "messageId": message_id, "count": count}
+    if marker is not None:
+        frame["marker"] = marker
+    return frame
+
+
+async def detailed_reactions(client: Any, chat_id: int, message_id: int, *, count: int = 100) -> dict:
+    """MSG_GET_DETAILED_REACTIONS 181 → {reactions [{userId, reaction}], marker} (Р-67)."""
+    return _payload(await client._app.invoke(Opcode.MSG_GET_DETAILED_REACTIONS,
+                                             detailed_reactions_frame(chat_id, message_id, count=count)))
+
+
+def voters_frame(chat_id: int, message_id: int, poll_id: int, answer_id: int, *, count: int,
+                 marker: Any = None) -> dict:
+    frame = {"pollId": poll_id, "chatId": chat_id, "messageId": message_id, "answerId": answer_id, "count": count}
+    if marker is not None:
+        frame["marker"] = marker
+    return frame
+
+
+async def voters(client: Any, chat_id: int, message_id: int, poll_id: int, answer_id: int, *, count: int,
+                 marker: Any = None) -> dict:
+    """VOTERS_LIST_BY_ANSWER 305 → {voters [{userId, timestamp}], voteCount, marker} (Р-68)."""
+    return _payload(await client._app.invoke(Opcode.VOTERS_LIST_BY_ANSWER, voters_frame(
+        chat_id, message_id, poll_id, answer_id, count=count, marker=marker)))
+
+
+def message_link_frame(chat_id: int, message_id: int) -> dict:
+    return {"chatId": chat_id, "messageId": message_id}
+
+
+async def message_link(client: Any, chat_id: int, message_id: int) -> dict:
+    """90 {chatId, messageId} → {link} (Р-69)."""
+    return _payload(await client._app.invoke(OP_MSG_LINK, message_link_frame(chat_id, message_id)))
+
+
+def media_id(message: Any, index: int | None) -> tuple[int, int] | None:
+    """(attach index, id) of the voice (audioId) or video note (videoId) to transcribe; index — the attach_index."""
+    for i, att in enumerate(getattr(message, "attaches", None) or []):
+        if index is not None and i != index:
+            continue
+        found = getattr(att, "audio_id", None) or getattr(att, "video_id", None)
+        if found is not None:
+            return i, int(found)
+    return None
+
+
+def transcribe_frame(chat_id: int, message_id: int, media: int) -> dict:
+    return {"mediaId": media, "messageId": message_id, "chatId": chat_id}
+
+
+async def transcribe(client: Any, chat_id: int, message_id: int, media: int) -> dict:
+    """TRANSCRIBE_MEDIA 202 → {transcription?, transcriptionStatus} (Р-70)."""
+    return _payload(await client._app.invoke(Opcode.TRANSCRIBE_MEDIA, transcribe_frame(chat_id, message_id, media)))
+
+
+def search_frame(chat_id: int, query: str, count: int, marker: int | None = None) -> dict:
+    frame = {"chatId": chat_id, "query": query, "count": count}
+    if marker is not None:
+        frame["marker"] = marker
+    return frame
+
+
+async def search_chat(client: Any, chat_id: int, query: str, count: int, marker: int | None = None) -> dict:
+    """MSG_SEARCH 73 → {result, marker, total} (Р-71)."""
+    return _payload(await client._app.invoke(Opcode.MSG_SEARCH, search_frame(chat_id, query, count, marker)))
+
+
+def found_messages(payload: dict, chat_id: int) -> list[Message]:
+    """The messages of a MSG_SEARCH answer. The item's schema is not in the appendix: a message
+    itself or {message: …}; an item that is neither is skipped (logged)."""
+    out = []
+    for item in payload.get("result") or []:
+        data = item.get("message") if isinstance(item, dict) and isinstance(item.get("message"), dict) else item
+        if not isinstance(data, dict) or data.get("id") is None:
+            log.info("max: a search result without a message: %r", item)
+            continue
+        out.append(Message.model_validate({**data, "chatId": chat_id}))
+    return out
+
+
+def post_stats_frame(chat_id: int, message_ids: list[int]) -> dict:
+    """MSG_GET_STAT 74, readOnly always (Р-77): without it MAX counts a view, as the client does
+    when a post is on screen."""
+    return {"chatId": chat_id, "messageIds": list(message_ids), "readOnly": True}
+
+
+async def post_stats(client: Any, chat_id: int, message_ids: list[int]) -> dict:
+    """→ {stats: {<message id>: {views?, forwards?}}}."""
+    return _payload(await client._app.invoke(Opcode.MSG_GET_STAT, post_stats_frame(chat_id, message_ids)))
+
+
+# -- release 5: blocking ------------------------------------------------------------
+
+def block_frame(user_id: int, *, block: bool) -> dict:
+    """CONTACT_UPDATE 34 {contactId, action BLOCK / UNBLOCK} (Р-72)."""
+    return {"contactId": user_id, "action": "BLOCK" if block else "UNBLOCK"}
+
+
+async def set_blocked(client: Any, user_id: int, *, block: bool) -> dict:
+    return _payload(await client._app.invoke(Opcode.CONTACT_UPDATE, block_frame(user_id, block=block)))
+
+
+BLOCKED_PAGE = 200
+
+
+def blocked_frame(start: int = 0, count: int = BLOCKED_PAGE) -> dict:
+    return {"status": "BLOCKED", "from": start, "count": count}
+
+
+async def blocked_ids(client: Any, *, pages: int = 5) -> set[int]:
+    """CONTACT_LIST 36 status BLOCKED: ids of the blocked contacts, up to pages × 200."""
+    out: set[int] = set()
+    for page in range(pages):
+        contacts = _payload(await client._app.invoke(Opcode.CONTACT_LIST, blocked_frame(page * BLOCKED_PAGE))
+                            ).get("contacts") or []
+        out |= {int(c["id"]) for c in contacts if isinstance(c, dict) and c.get("id") is not None}
+        if len(contacts) < BLOCKED_PAGE:
+            break
+    return out

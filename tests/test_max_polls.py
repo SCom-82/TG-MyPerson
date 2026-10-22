@@ -178,7 +178,8 @@ async def test_reactions_read_and_ro_sees_them(rw):
                                             "counters": [{"count": 2, "reaction": "👍"}, {"count": 1, "reaction": "🔥"}]}
     resp = await rw.http.get(f"/api/v1/messages/{DIALOG}/5/reactions", headers=rw.env.h())
     assert resp.json() == {"chat_id": DIALOG, "message_id": 5, "total_count": 3, "my_reaction": None,
-                           "counters": [{"reaction": "👍", "count": 2}, {"reaction": "🔥", "count": 1}]}
+                           "counters": [{"reaction": "👍", "count": 2}, {"reaction": "🔥", "count": 1}],
+                           "users": [], "next_marker": None}  # who reacted: Р5 Р-67
     rw.env.server.reactions = None
     sql("UPDATE accounts SET mode = 'ro' WHERE id = %s", (rw.id,))
     mw._mode_cache.clear()

@@ -11,11 +11,16 @@ Release 4 (plan 2026-10-19 Р4 PR-R4-1): voice, video and video notes, albums
 (one MAX message with several attachments), polls and votes, pin / unpin,
 reactions of a message. A file is read, classified and its duration taken
 BEFORE the write slot: a bad file costs no limit (Р-35).
+
+Release 5 (plan 2026-10-22 Р5 Р-64, Р-67…Р-71, Р-77): bot buttons (press_button),
+who reacted, poll voters, a message link, transcription of a voice, MAX's search in
+a chat, views and forwards of posts. Reads are reads for ro accounts too.
 """
 
 import asyncio
 import logging
 import re
+import time
 import urllib.parse
 from datetime import datetime
 from typing import Literal
@@ -93,6 +98,55 @@ async def list_messages(
     return PaginatedResponse(
         items=[MaxMessageResponse.model_validate(m) for m in messages], total=total, limit=limit, offset=offset
     )
+
+
+# ---------------------------------------------------------------------------
+# Search in a chat, post stats (Р-71, Р-77): before /{chat_id}/{message_id}, which
+# would take "search" / "stats" for a message id (route order decides, authz too)
+# ---------------------------------------------------------------------------
+
+SEARCH_MAX = 30
+STATS_MAX = 100
+
+
+@router.get("/{chat_id}/search", name="search_chat_messages")
+async def search_chat_messages(chat_id: int, request: Request, query: str = Query(min_length=1, max_length=200),
+                               limit: int = Query(20, ge=1, le=SEARCH_MAX), marker: int | None = Query(None)):
+    """MAX's own search in one chat (73). What it finds is stored as read from MAX, so
+    get_message / list_messages see it; search_global keeps searching our base."""
+    await mx_groups.known_chat(request, chat_id, kinds=("private", "group", "channel"))
+    session = await mx_groups.connected(request)
+    payload = await call_max_read(frames.search_chat(session.client, chat_id, query, limit, marker))
+    try:
+        found = frames.found_messages(payload, chat_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"MAX's search answer was not understood: "
+                                                    f"{type(exc).__name__}: {exc}")
+    for msg in found:
+        await store_sent(session, msg, chat_id)
+    return {"chat_id": chat_id, "query": query, "total": payload.get("total"), "next_marker": payload.get("marker"),
+            "items": [{"message_id": m.id, "from_user_id": m.sender, "date": normalize.ms_to_dt(m.time),
+                       "text": m.text or None} for m in found]}
+
+
+@router.get("/{chat_id}/stats", name="get_post_stats")
+async def get_post_stats(chat_id: int, request: Request, message_ids: list[int] = Query(...)):
+    """Views and forwards of posts (74, readOnly: true — reading does not count a view, Р-77).
+    A post MAX did not answer for is in missing, no zero is made up. Not stored: counts change."""
+    ids = list(dict.fromkeys(message_ids))
+    if not 1 <= len(ids) <= STATS_MAX:
+        raise HTTPException(status_code=422, detail=f"message_ids: 1…{STATS_MAX}")
+    await mx_groups.known_chat(request, chat_id, kinds=("group", "channel"))
+    session = await mx_groups.connected(request)
+    stats = (await call_max_read(frames.post_stats(session.client, chat_id, ids))).get("stats") or {}
+    items, missing = [], []
+    for mid in ids:
+        entry = stats.get(str(mid)) or stats.get(mid)
+        if not isinstance(entry, dict):
+            missing.append(mid)
+            continue
+        items.append({"message_id": mid, "views": entry.get("views"), "forwards": entry.get("forwards")})
+    return {"chat_id": chat_id, "items": items, "missing": missing}
 
 
 POLL_REFRESH_SEC = 10
@@ -602,14 +656,176 @@ async def unpin_message(chat_id: int, message_id: int, request: Request):
 
 @router.get("/{chat_id}/{message_id}/reactions", name="get_reactions")
 async def get_reactions(chat_id: int, message_id: int, request: Request):
-    """Counts per reaction and the account's own (MAX does not say who reacted)."""
+    """Counts per reaction and the account's own; who reacted — users (181, Р-67, up to 100).
+    A failed 181 does not spoil the counts: users null, users_error."""
     session = await authorized_or_error(request)
     if isinstance(session, JSONResponse):
         return session
     found = await call_max_read(session.client.get_reactions(chat_id, [message_id])) or {}
     info = found.get(str(message_id)) or found.get(message_id)
     if info is None:
-        return {"chat_id": chat_id, "message_id": message_id, "total_count": 0, "counters": [], "my_reaction": None}
-    return {"chat_id": chat_id, "message_id": message_id, "total_count": info.total_count,
-            "counters": [{"reaction": c.reaction, "count": c.count} for c in info.counters or []],
-            "my_reaction": info.your_reaction}
+        out = {"chat_id": chat_id, "message_id": message_id, "total_count": 0, "counters": [], "my_reaction": None}
+    else:
+        out = {"chat_id": chat_id, "message_id": message_id, "total_count": info.total_count,
+               "counters": [{"reaction": c.reaction, "count": c.count} for c in info.counters or []],
+               "my_reaction": info.your_reaction}
+    try:
+        detail = await frames.detailed_reactions(session.client, chat_id, message_id)
+        out["users"] = [{"user_id": int(r["userId"]), "reaction": r.get("reaction")}
+                        for r in detail.get("reactions") or [] if isinstance(r, dict) and r.get("userId") is not None]
+        out["next_marker"] = detail.get("marker")
+    except Exception as exc:  # noqa: BLE001 — the counts answer anyway
+        log.info("max[%s]: who reacted to %s/%s not read: %s: %s", session.alias, chat_id, message_id,
+                 type(exc).__name__, exc)
+        out["users"] = None
+        out["users_error"] = f"{type(exc).__name__}: {exc}"
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Bot buttons (Р-64), voters, links, transcription (Р-68…Р-70)
+# ---------------------------------------------------------------------------
+
+class PressRequest(BaseModel):
+    row: int = Field(ge=0)
+    column: int = Field(ge=0)
+
+
+@router.post("/{chat_id}/{message_id}/press", name="press_button")
+async def press_button(chat_id: int, message_id: int, req: PressRequest, request: Request):
+    """Press a bot button of the message, read fresh from MAX (MSG_GET). CALLBACK / CHAT / MESSAGE
+    only: LINK → 422 with its url, contact / geo / mini app / clipboard → 422. An action."""
+    session = await authorized_or_error(request)
+    if isinstance(session, JSONResponse):
+        return session
+    msg = await call_max_read(session.client.get_message(chat_id, message_id))
+    if msg is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+    keyboard = frames.keyboard_view(msg)
+    if keyboard is None:
+        raise HTTPException(status_code=422, detail="the message has no bot keyboard")
+    rows = keyboard["buttons"]
+    if req.row >= len(rows) or req.column >= len(rows[req.row]):
+        raise HTTPException(status_code=422, detail=f"no button at row {req.row}, column {req.column}; "
+                                                    f"the keyboard: {[len(r) for r in rows]} buttons per row")
+    button = rows[req.row][req.column]
+    kind = button.get("type")
+    if kind == "LINK":
+        raise HTTPException(status_code=422, detail={"error": "a link button is not pressed: open its url",
+                                                     "url": button.get("url")})
+    if kind not in frames.PRESSABLE:
+        raise HTTPException(status_code=422, detail=f"a {kind} button is not pressed by the agent (personal data, "
+                                                    f"location, a mini app or the clipboard); pressable: "
+                                                    f"{list(frames.PRESSABLE)}")
+    if not keyboard["callback_id"]:
+        raise HTTPException(status_code=422, detail="the keyboard has no callbackId: MAX would not take a press")
+    async with write_slot(request, ACTION, "press_button", chat_id):
+        answer = await call_max(frames.press(session.client, keyboard["callback_id"], kind, button.get("payload")),
+                                UNCERTAIN)
+    out = {"chat_id": chat_id, "message_id": message_id, "button": button, "success": answer.get("success")}
+    try:
+        sent = frames.parse_sent(answer, chat_id)
+    except Exception:  # noqa: BLE001 — the press is done; its message is in the stream anyway
+        log.warning("max[%s]: the message of a button answer does not parse", session.alias, exc_info=True)
+        sent = None
+    if sent is not None:
+        await store_sent(session, sent, sent.chat_id or chat_id)
+        out["message"] = {"chat_id": sent.chat_id or chat_id, "message_id": sent.id, "text": sent.text or None}
+    if isinstance(answer.get("chat"), dict):
+        out["chat"] = {"chat_id": answer["chat"].get("id"), "title": answer["chat"].get("title")}
+    return out
+
+
+@router.get("/{chat_id}/{message_id}/voters", name="get_poll_voters")
+async def get_poll_voters(chat_id: int, message_id: int, request: Request, answer_id: int = Query(...),
+                          limit: int = Query(100, ge=1, le=100)):
+    """Who voted for an answer (305). An anonymous poll → 422, no frame."""
+    session = await authorized_or_error(request)
+    if isinstance(session, JSONResponse):
+        return session
+    poll = frames.find_poll(await _message(request, session, chat_id, message_id))
+    if poll is None:
+        raise HTTPException(status_code=404, detail="the message has no poll")
+    view = frames.poll_view(poll)
+    if view["anonymous"]:
+        raise HTTPException(status_code=422, detail="the poll is anonymous: MAX does not tell who voted")
+    known = [a["answer_id"] for a in view["answers"]]
+    if answer_id not in known:
+        raise HTTPException(status_code=422, detail=f"answer_id {answer_id} is not an answer of the poll; "
+                                                    f"its answers: {known}")
+    payload = await call_max_read(frames.voters(session.client, chat_id, message_id, view["poll_id"], answer_id,
+                                                count=limit))
+    return {"chat_id": chat_id, "message_id": message_id, "poll_id": view["poll_id"], "answer_id": answer_id,
+            "vote_count": payload.get("voteCount"), "next_marker": payload.get("marker"),
+            "voters": [{"user_id": int(v["userId"]), "date": normalize.ms_to_dt(v.get("timestamp"))}
+                       for v in payload.get("voters") or [] if isinstance(v, dict) and v.get("userId") is not None]}
+
+
+@router.get("/{chat_id}/{message_id}/link", name="get_message_link")
+async def get_message_link(chat_id: int, message_id: int, request: Request):
+    session = await authorized_or_error(request)
+    if isinstance(session, JSONResponse):
+        return session
+    payload = await call_max_read(frames.message_link(session.client, chat_id, message_id))
+    if not payload.get("link"):
+        raise HTTPException(status_code=502, detail=f"MAX answered without a link: {payload!r}")
+    return {"chat_id": chat_id, "message_id": message_id, "link": payload["link"]}
+
+
+class TranscribeRequest(BaseModel):
+    index: int | None = Field(default=None, ge=0, description="attach_index of the voice / video note")
+
+
+TRANSCRIBE_POLL_SEC = 2.0
+TRANSCRIBE_WAIT_SEC = 20.0
+TRANSCRIBE_MIN_GAP_SEC = 10.0  # one MAX call per message in 10 s (plan Р5 §4 PR-R5-2)
+TRANSCRIBE_KEEP_SEC = 3600.0
+# (account, chat, message, media) → (when, answer): ready texts for an hour, the rest for the gap
+_transcripts: dict[tuple, tuple[float, dict]] = {}
+_sleep = asyncio.sleep
+_clock = time.monotonic
+
+
+def _transcription_status(payload: dict) -> int | None:
+    value = payload.get("transcriptionStatus")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+@router.post("/{chat_id}/{message_id}/transcribe", name="transcribe_voice")
+async def transcribe_voice(chat_id: int, message_id: int, request: Request, req: TranscribeRequest | None = None):
+    """MAX's transcription of a voice or video note (202, Р-70): status 0 — in work, polled every
+    2 s up to 20 s, then status processing; 1 — done; anything else — failed. A read."""
+    session = await authorized_or_error(request)
+    if isinstance(session, JSONResponse):
+        return session
+    msg = await _message(request, session, chat_id, message_id)
+    found = frames.media_id(msg, req.index if req else None)
+    if found is None:
+        raise HTTPException(status_code=422, detail="the message has no voice or video note"
+                                                    + (f" at index {req.index}" if req and req.index is not None else ""))
+    index, media_id = found
+    key = (session.account_id, chat_id, message_id, media_id)
+    cached = _transcripts.get(key)
+    if cached is not None:
+        age, answer = _clock() - cached[0], cached[1]
+        if (answer["status"] == "done" and age < TRANSCRIBE_KEEP_SEC) or age < TRANSCRIBE_MIN_GAP_SEC:
+            return {**answer, "cached": True}
+    waited = 0.0
+    while True:
+        payload = await call_max_read(frames.transcribe(session.client, chat_id, message_id, media_id))
+        status = _transcription_status(payload)
+        if status != 0 or waited >= TRANSCRIBE_WAIT_SEC:
+            break
+        await _sleep(TRANSCRIBE_POLL_SEC)
+        waited += TRANSCRIBE_POLL_SEC
+    answer = {"chat_id": chat_id, "message_id": message_id, "index": index, "media_id": media_id,
+              "status": {0: "processing", 1: "done"}.get(status, "failed"), "transcription_status": status,
+              "text": payload.get("transcription") if status == 1 else None}
+    now = _clock()
+    for old in [k for k, (at, _) in _transcripts.items() if now - at >= TRANSCRIBE_KEEP_SEC]:
+        _transcripts.pop(old, None)
+    _transcripts[key] = (now, answer)
+    return answer

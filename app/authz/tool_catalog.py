@@ -37,8 +37,10 @@ MAX_R4_WRITE_TOOLS = (
 )
 MAX_R4_READ_TOOLS = ("get_reactions", "list_folders")
 # MAX release 5 without a TG counterpart (plan 2026-10-22 Р5 Р-61, Р-62): MAX router only.
-MAX_R5_WRITE_TOOLS = ("transfer_group_ownership", "create_invite_link", "revoke_invite_links")
-MAX_R5_READ_TOOLS = ("list_invite_links",)
+MAX_R5_WRITE_TOOLS = ("transfer_group_ownership", "create_invite_link", "revoke_invite_links",
+                      "press_button", "start_bot")
+MAX_R5_READ_TOOLS = ("list_invite_links", "get_bot_info", "get_message_link", "get_poll_voters",
+                     "transcribe_voice", "search_chat_messages", "get_post_stats")
 
 # ---------------------------------------------------------------------------
 # Category 1: writes to the external messenger — blocked on ro

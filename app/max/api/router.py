@@ -14,6 +14,7 @@ from app.api.reach import router as reach_router
 from app.api.tools import router as tools_router
 from app.authz.middleware import _not_supported
 from app.max.api.auth import router as auth_router
+from app.max.api.bots import router as bots_router
 from app.max.api.chats import router as chats_router
 from app.max.api.contacts import router as contacts_router
 from app.max.api.folders import router as folders_router
@@ -56,6 +57,7 @@ MAX_API_ROUTERS = (
     tools_router,
     groups_router,  # /groups/... MAX-only (plan 2026-10-19 Р3 Р-20)
     folders_router,  # /folders/... MAX-only (plan 2026-10-19 Р4 Р-41)
+    bots_router,  # /bots/... MAX-only (plan 2026-10-22 Р5 Р-65, Р-66)
     reach_router,  # reachable_contacts, send_to_person, contact_by_phone (plan 2026-10-19 Р-17)
     unsupported_router,
 )

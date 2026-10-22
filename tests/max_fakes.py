@@ -118,6 +118,17 @@ class FakeMaxServer:
         self.chat_links: dict[int, list[dict]] = {}
         self.next_link_id = 300
         self.frame_answers: dict[int, dict | None] = {}
+        # R5-2: bots (145 by bot id, 144 by chat id), who reacted ((chat, message) → [{userId, reaction}]),
+        # poll voters ((poll, answer) → [user ids]), 202 answers in order per media id, post stats
+        # ((chat, message) → {views, forwards}), blocked users, pressed buttons (118 frames)
+        self.bot_infos: dict[int, dict] = {}
+        self.chat_bots: dict[int, dict] = {}
+        self.reacted: dict[tuple[int, int], list[dict]] = {}
+        self.poll_voters: dict[tuple[int, int], list[int]] = {}
+        self.transcripts: dict[int, list[dict]] = {}
+        self.post_stats: dict[tuple[int, int], dict] = {}
+        self.blocked: set[int] = set()
+        self.callback_answer: dict | None = None
 
         self.factory_calls: list[dict] = []
         self.clients: list["FakePyMaxClient"] = []
@@ -378,8 +389,13 @@ class FakePyMaxClient:
         if int(opcode) in self.server.frame_answers:
             answer = self.server.frame_answers[int(opcode)]
             return SimpleNamespace(payload=answer)
-        if int(opcode) == 64:  # MSG_SEND with a CONTROL "new": create a chat (Р-63)
+        if int(opcode) == 64:  # MSG_SEND with a CONTROL: "new" creates a chat (Р-63), "botStarted" (Р-65)
+            if payload["message"]["attaches"][0]["event"] == "botStarted":
+                return SimpleNamespace(payload=self._bot_started(payload))
             return SimpleNamespace(payload=self._create_from_frame(payload))
+        r5 = self._r5_read(int(opcode), payload)
+        if r5 is not None:
+            return SimpleNamespace(payload=r5)
         if int(opcode) in (221, 222, 223):  # extra invite links (Р-61): chatId is typed
             return SimpleNamespace(payload=self._links(int(opcode), payload))
         g = self._group(payload["chatId"])
@@ -396,6 +412,49 @@ class FakePyMaxClient:
             if payload.get("options"):
                 g.setdefault("options", {}).update(payload["options"])
         return None
+
+    def _r5_read(self, opcode: int, payload: dict) -> dict | None:
+        """Release 5 frames that are not about a group (None: not one of them)."""
+        s = self.server
+        if opcode == 118:  # MSG_SEND_CALLBACK
+            return s.callback_answer or {"success": True}
+        if opcode == 145:
+            if payload["botId"] not in s.bot_infos:
+                raise ApiError(opcode=145, error="bot.not.found", message="Bot not found")
+            return s.bot_infos[payload["botId"]]
+        if opcode == 144:
+            return s.chat_bots.get(payload["chatId"], {"commands": [], "contacts": {}})
+        if opcode == 181:
+            return {"reactions": s.reacted.get((payload["chatId"], payload["messageId"]), [])}
+        if opcode == 305:
+            ids = s.poll_voters.get((payload["pollId"], payload["answerId"]), [])
+            return {"voters": [{"userId": u, "timestamp": 1_800_000_000_000} for u in ids[:payload["count"]]],
+                    "voteCount": len(ids)}
+        if opcode == 90:
+            return {"link": f"https://max.ru/c/{payload['chatId']}/{payload['messageId']}"}
+        if opcode == 202:
+            queue = s.transcripts.get(payload["mediaId"]) or [{"transcriptionStatus": 2}]
+            return queue.pop(0) if len(queue) > 1 else queue[0]
+        if opcode == 73:
+            found = [m for m in s.history.get(payload["chatId"], []) if payload["query"].lower() in
+                     (m.get("text") or "").lower()][:payload["count"]]
+            return {"result": [{"message": m} for m in found], "total": len(found)}
+        if opcode == 74:
+            return {"stats": {str(m): s.post_stats[(payload["chatId"], m)] for m in payload["messageIds"]
+                              if (payload["chatId"], m) in s.post_stats}}
+        if opcode == 34:
+            (s.blocked.add if payload["action"] == "BLOCK" else s.blocked.discard)(payload["contactId"])
+            return {}
+        if opcode == 36:
+            ids = sorted(s.blocked)[payload.get("from", 0):payload.get("from", 0) + payload.get("count", 200)]
+            return {"contacts": [self._user_of(u) for u in ids]}
+        return None
+
+    def _bot_started(self, payload: dict) -> dict:
+        bot = payload.get("userId")
+        cid = payload.get("chatId", (self.server.user_id ^ bot) if bot is not None else None)
+        msg = self._new_message(cid, None, attaches=[payload["message"]["attaches"][0]])
+        return {"chatId": cid, "message": msg.model_dump(by_alias=True, exclude={"chat_id"})}
 
     def _members_update(self, g: dict, payload: dict) -> dict | None:
         users = payload.get("userIds") or []

@@ -59,6 +59,20 @@ class MaxPoll(BaseModel):
     quiz: bool = False
 
 
+class MaxButton(BaseModel):
+    text: str | None = None
+    type: str | None = None  # CALLBACK / CHAT / MESSAGE (press_button), LINK (url), REQUEST_* / OPEN_APP / CLIPBOARD
+    url: str | None = None
+    payload: str | None = None
+
+
+class MaxKeyboard(BaseModel):
+    """A bot keyboard of the message (plan Р5 Р-64): press with press_button(row, column)."""
+
+    callback_id: str | None = None
+    buttons: list[list[MaxButton]] = Field(default_factory=list)
+
+
 def _parsed(raw: dict | None) -> Any:
     if not raw:
         return None
@@ -77,13 +91,15 @@ def _name(user: Any) -> str | None:
 
 class MaxMessageResponse(MessageResponse):
     """MessageResponse + deleted_at (ADR §2.G), always present in MAX responses; from_user filled;
-    forward, contacts and poll read from the stored raw — old rows too, without a repair (plan Р-8, Р-9, Р4 Р-44)."""
+    forward, contacts, poll and a bot keyboard read from the stored raw — old rows too, without a repair
+    (plan Р-8, Р-9, Р4 Р-44, Р5 Р-64)."""
 
     deleted_at: datetime | None = None
     forward: MaxForward | None = None
     contacts: list[MaxContactCard] = Field(default_factory=list)
     media: list[MaxMediaResponse] = Field(default_factory=list)
     poll: MaxPoll | None = None
+    keyboard: MaxKeyboard | None = None
     always_deleted_at: ClassVar[bool] = True
     fill_from_user: ClassVar[bool] = True
     media_cls: ClassVar[type[MediaResponse]] = MaxMediaResponse
@@ -122,6 +138,9 @@ class MaxMessageResponse(MessageResponse):
         poll = frames.find_poll(msg)
         if poll is not None:
             out["poll"] = MaxPoll(**frames.poll_view(poll))
+        keyboard = frames.keyboard_view(msg)
+        if keyboard is not None:
+            out["keyboard"] = MaxKeyboard(**keyboard)
         return out
 
 

@@ -617,8 +617,8 @@ async def test_mcp_send_and_limit_text(rw):
     assert "retry in 60 s" in text and '"retry_after": 60' in text
 
 
-MAX_501_TOOLS = {"archive_chat",
-                 "list_scheduled", "cancel_scheduled", "send_scheduled_now", "block_user", "unblock_user"}
+MAX_501_TOOLS = {"archive_chat",  # block_user / unblock_user: MAX since Р5 (Р-72)
+                 "list_scheduled", "cancel_scheduled", "send_scheduled_now"}
 MAX_WRITES = {"send_message", "send_photo", "send_file", "create_upload", "forward_message", "edit_message",
               "delete_message", "react_to_message", "mark_chat_read", "contact_by_phone", "send_to_person",
               "leave_chat",
@@ -636,7 +636,7 @@ async def test_mcp_tools_depend_on_platform(rw):
     assert not MAX_WRITES & max_ro and not MAX_501_TOOLS & max_ro and "list_messages" in max_ro
     tg_rw = names(_caller(rw, platform="telegram"))
     assert len(tg_rw) == 46 and MAX_501_TOOLS <= tg_rw and not tool_catalog.MAX_ONLY_TOOLS & tg_rw
-    assert len(max_rw) == 67 and "reachable_contacts" in max_rw  # reach (Р-17) + groups (Р3) + Р4 + Р5 on MAX
+    assert len(max_rw) == 77 and "reachable_contacts" in max_rw  # reach (Р-17) + groups (Р3) + Р4 + Р5 on MAX
 
     # Every tool shown to a MAX account has its route on MAX (no 501 by construction).
     for name in max_rw:
