@@ -502,8 +502,10 @@ def test_catalog_messenger_write_category():
     assert "send_message" in tc.WRITE_MESSENGER_TOOLS
     assert {"auth_qr_start", "auth_qr_status"} <= tc.MANAGE_SESSION_TOOLS
     assert tc.MAX_ONLY_TOOLS == {"auth_qr_start", "auth_qr_status", *tc.GROUP_WRITE_TOOLS, *tc.GROUP_READ_TOOLS,
-                                 *tc.MAX_R4_WRITE_TOOLS, *tc.MAX_R4_READ_TOOLS}
+                                 *tc.MAX_R4_WRITE_TOOLS, *tc.MAX_R4_READ_TOOLS, *tc.MAX_R5_WRITE_TOOLS,
+                                 *tc.MAX_R5_READ_TOOLS}
     assert set(tc.GROUP_WRITE_TOOLS) <= tc.WRITE_MESSENGER_TOOLS and set(tc.GROUP_READ_TOOLS) <= tc.READ_ONLY_TOOLS
     assert set(tc.MAX_R4_WRITE_TOOLS) <= tc.WRITE_MESSENGER_TOOLS and set(tc.MAX_R4_READ_TOOLS) <= tc.READ_ONLY_TOOLS
+    assert set(tc.MAX_R5_WRITE_TOOLS) <= tc.WRITE_MESSENGER_TOOLS and set(tc.MAX_R5_READ_TOOLS) <= tc.READ_ONLY_TOOLS
     assert tc.tool_is_write("auth_qr_start") is False
     assert tc.tool_is_write("send_message") is True
