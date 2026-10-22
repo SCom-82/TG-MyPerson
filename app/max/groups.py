@@ -255,9 +255,18 @@ async def links_list(client: Any, chat_id: int, *, channel: bool) -> list[dict]:
 
 # -- writes --------------------------------------------------------------------
 
-def create_frame(title: str, user_ids: list[int], chat_type: str, notify: bool) -> dict:
+def next_cid(client: Any) -> int:
+    """The session's cid counter (PyMax's MessageService._next_cid, review 18 R18-6); time in ms
+    where there is none (a test client)."""
+    try:
+        return int(client._app.api.messages._next_cid())
+    except Exception:  # noqa: BLE001
+        return int(time.time() * 1000)
+
+
+def create_frame(title: str, user_ids: list[int], chat_type: str, notify: bool, cid: int | None = None) -> dict:
     """MSG_SEND 64 with a CONTROL "new" attach, as the client creates a chat (Р-63): chatType CHAT/CHANNEL."""
-    return {"message": {"cid": int(time.time() * 1000),
+    return {"message": {"cid": cid if cid is not None else int(time.time() * 1000),
                         "attaches": [{"_type": "CONTROL", "event": "new",
                                       "chatType": "CHANNEL" if chat_type == "channel" else "CHAT",
                                       "title": title, "userIds": list(user_ids)}]},
@@ -270,7 +279,8 @@ async def create(client: Any, title: str, user_ids: list[int], notify: bool,
     none), MAX's raw answer {chatId, chat, message}, parsed apart by parse_created (R17-1)."""
     if chat_type != "channel":
         return await client.create_group(title, participant_ids=user_ids or None, notify=notify)
-    frame = await client._app.invoke(Opcode.MSG_SEND, create_frame(title, user_ids, chat_type, notify))
+    frame = await client._app.invoke(Opcode.MSG_SEND, create_frame(title, user_ids, chat_type, notify,
+                                                                   next_cid(client)))
     return getattr(frame, "payload", None) or {}
 
 

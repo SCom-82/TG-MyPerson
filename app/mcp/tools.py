@@ -584,7 +584,8 @@ def _max_group_tools() -> list[Tool]:
              "delete_group", rest("POST", "/groups/{chat_id}/delete", body=path)),
         Tool("transfer_group_ownership", "Make an admin the owner of the group or channel. IRREVERSIBLE: only the "
              "new owner can give it back. The account must be the owner; confirm_title = the current title, "
-             "confirm_user_id = user_id; user_id must be an admin already (set_group_admin first).",
+             "confirm_user_id = user_id; user_id must be an admin already (set_group_admin first; MAX itself asks it "
+             "for a group only, for a channel it is this service's rule).",
              obj({**cid, "user_id": {"type": "integer"}, "confirm_title": {"type": "string"},
                   "confirm_user_id": {"type": "integer"}}, ["chat_id", "user_id", "confirm_title", "confirm_user_id"]),
              "transfer_group_ownership", rest("POST", "/groups/{chat_id}/owner", body=path)),

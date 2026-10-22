@@ -306,8 +306,8 @@ async def get_my_rights(chat_id: int, request: Request):
         mask=mask,
         permissions=groups.permission_names(mask, channel=channel) if mask is not None else None,
         can_read_all_messages=bool(bits & 32),
-        can_change_invite_link=bool(bits & 128),
-        can_call=bool(bits & 64) or (not channel and not options.get("ONLY_ADMIN_CAN_CALL")),
+        can_change_invite_link=bool(bits & 128) and bool(bits & 2),  # the client: and add_remove_member (R18-7)
+        can_call=not channel and (bool(bits & 64) or not options.get("ONLY_ADMIN_CAN_CALL")),  # no calls in a channel
         can_view_stats=bool(bits & 2048),
     )
 

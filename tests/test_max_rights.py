@@ -536,3 +536,23 @@ async def test_non_owner_gives_only_its_own_rights(rw):
     assert resp.status_code == 422 and len(_admin_frames(rw)) == sent
     g["adminParticipants"] = {str(ME): {"id": ME}}  # own mask unknown: as is
     assert (await _post(rw, f"/groups/{FOREIGN}/admins", {"user_id": B})).json()["mask"] == 251
+
+
+async def test_review_18_p4(rw):
+    """R18-6 cid from the session's counter; R18-7 invite link needs 2 too, no calls in a channel."""
+    calls = []
+    client = type("C", (), {})()
+    client._app = type("A", (), {"api": type("Api", (), {"messages": type("M", (), {
+        "_next_cid": staticmethod(lambda: calls.append(1) or 42)})()})()})()
+    assert groups.next_cid(client) == 42 and calls == [1]
+    assert groups.next_cid(object()) > 10**12
+    await _channel(rw, owner=ME)
+    mine = (await _get(rw, f"/chats/{FOREIGN}/my_rights")).json()
+    assert (mine["is_creator"], mine["can_call"]) == (True, False)
+    await _foreign(rw)
+    g = rw.env.server.groups[FOREIGN]
+    g["admins"] = [9999, ME]
+    g["adminParticipants"] = {str(ME): {"permissions": 128}}
+    assert (await _get(rw, f"/chats/{FOREIGN}/my_rights")).json()["can_change_invite_link"] is False
+    g["adminParticipants"] = {str(ME): {"permissions": 130}}
+    assert (await _get(rw, f"/chats/{FOREIGN}/my_rights")).json()["can_change_invite_link"] is True
