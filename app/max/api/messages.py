@@ -365,7 +365,8 @@ async def cancel_scheduled(chat_id: int, message_id: int, request: Request):
 @router.post("/scheduled/{chat_id}/{message_id}/send-now", name="send_scheduled_now")
 async def send_scheduled_now(chat_id: int, message_id: int, request: Request):
     """The client's "send now": 67 with timeToFire now; text and elements as MAX keeps them. An
-    action slot (review 19 R19-1): not a second send, but the account's write stop holds it."""
+    action slot (review 19 R19-1): not a second send, but the account's write stop holds it. With
+    media → 422 (R19-2): 67 without the attachments would edit them away; send it from the app."""
     off = _scheduled_off(request, "send_scheduled_now")
     if off is not None:
         return off
@@ -376,6 +377,8 @@ async def send_scheduled_now(chat_id: int, message_id: int, request: Request):
     message = next((m for m in found if m.get("id") is not None and int(m["id"]) == message_id), None)
     if message is None:
         raise HTTPException(status_code=404, detail=f"no scheduled message {message_id} in chat {chat_id}")
+    if message.get("attaches"):
+        raise HTTPException(status_code=422, detail="a scheduled message with media is sent now from the MAX app")
     async with write_slot(request, ACTION, "send_scheduled_now", chat_id):
         await call_max(frames.fire_now(session.client, chat_id, message),
                        "it may have been sent, check list_messages")

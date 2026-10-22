@@ -200,12 +200,16 @@ def test_delayed_frames_match_the_client_schemas():
     assert frames.delayed_attrs(5) == {"timeToFire": 5, "notifySender": True}
 
 
-
-async def test_send_now_stops_with_writes(rw):
-    """review 19 R19-1: the write stop holds send now."""
+async def test_send_now_stops_with_writes_and_refuses_media(rw):
+    """review 19 R19-1: the write stop holds send now; R19-2: a scheduled message with media → 422."""
     from tests.test_max_write_limits import _limits
 
     mid = (await _schedule(rw, "текст")).json()["message_id"]
+    rw.env.server.delayed[DIALOG].append({"id": 777, "time": 1, "type": "USER", "text": "фото", "sender": ME,
+                                          "attaches": [{"_type": "PHOTO", "photoId": 1}],
+                                          "delayedAttributes": {"timeToFire": 1}})
+    resp = await rw.http.post(f"/api/v1/messages/scheduled/{DIALOG}/777/send-now", headers=rw.env.h())
+    assert resp.status_code == 422 and "MAX app" in resp.text
     await _limits(rw, enabled=False)
     resp = await rw.http.post(f"/api/v1/messages/scheduled/{DIALOG}/{mid}/send-now", headers=rw.env.h())
     assert resp.status_code == 403, resp.text
