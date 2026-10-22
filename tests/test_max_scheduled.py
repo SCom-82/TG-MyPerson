@@ -121,7 +121,7 @@ async def test_switch_off(rw, monkeypatch):
     assert _frames(rw, int(Opcode.MSG_SEND)) == [] and _events(rw.id) == []
     names = {t.name for t in mcp_tools.visible(mcp_tools.Caller("account", rw.id, rw.env.alias, "max", "rw",
                                                                 "http://test"))}
-    assert not names & mcp_tools.SCHEDULED_TOOLS and len(names) == 77
+    assert not names & mcp_tools.SCHEDULED_TOOLS and len(names) == 74
     tools = (await rw.http.get("/api/v1/tools", headers=rw.env.h())).json()["tools"]
     assert "list_scheduled" not in tools
     tg = {t.name for t in mcp_tools.visible(mcp_tools.Caller("account", 1, "x", "telegram", "rw", "http://test"))}

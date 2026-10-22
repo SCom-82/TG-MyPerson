@@ -475,8 +475,21 @@ async def transfer_group_ownership(chat_id: int, req: TransferRequest, request: 
 
 
 # ---------------------------------------------------------------------------
-# Extra invite links (Р-61): 221 / 222 / 223, behind MAX's server flag additional-links
+# Extra invite links (Р-61): 221 / 222 / 223, behind MAX's server flag additional-links.
+# Р5.1 Р-79: the flag is off for our accounts and MAX answers the opcode with "Unknown opcode"
+# and drops the whole session (live 22.10). The routes answer 501 without a frame until the
+# flag is read from the login config; the frames stay for that gate.
 # ---------------------------------------------------------------------------
+
+EXTRA_LINKS_ENABLED = False
+EXTRA_LINKS_OFF = "additional invite links are disabled by MAX for this account"
+
+
+def _links_off(request: Request, tool: str) -> JSONResponse | None:
+    if EXTRA_LINKS_ENABLED:
+        return None
+    return JSONResponse(status_code=501, content={"error": EXTRA_LINKS_OFF, "tool": tool, "platform": "max",
+                                                  "alias": getattr(request.state, "session_alias", "")})
 
 def _link(item: dict) -> dict:
     return {"link_id": item.get("id"), "title": item.get("title"), "link": item.get("link"),
@@ -485,6 +498,8 @@ def _link(item: dict) -> dict:
 
 @router.get("/{chat_id:sint}/invite-links", name="list_invite_links")
 async def list_invite_links(chat_id: int, request: Request):
+    if (off := _links_off(request, "list_invite_links")) is not None:
+        return off
     chat_row = await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
     session = await connected(request)
     found = await call_max_read(groups.links_list(session.client, chat_id, channel=chat_row.chat_type == "channel"))
@@ -494,6 +509,8 @@ async def list_invite_links(chat_id: int, request: Request):
 
 @router.post("/{chat_id:sint}/invite-links", name="create_invite_link")
 async def create_invite_link(chat_id: int, req: InviteLinkRequest, request: Request):
+    if (off := _links_off(request, "create_invite_link")) is not None:
+        return off
     chat_row = await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
     session = await connected(request)
     async with write_slot(request, ACTION, "create_invite_link", chat_id):
@@ -510,6 +527,8 @@ async def create_invite_link(chat_id: int, req: InviteLinkRequest, request: Requ
 
 @router.post("/{chat_id:sint}/invite-links/revoke", name="revoke_invite_links")
 async def revoke_invite_links(chat_id: int, req: RevokeLinksRequest, request: Request):
+    if (off := _links_off(request, "revoke_invite_links")) is not None:
+        return off
     chat_row = await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
     session = await connected(request)
     async with write_slot(request, ACTION, "revoke_invite_links", chat_id):

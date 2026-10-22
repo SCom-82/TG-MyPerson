@@ -589,18 +589,8 @@ def _max_group_tools() -> list[Tool]:
              obj({**cid, "user_id": {"type": "integer"}, "confirm_title": {"type": "string"},
                   "confirm_user_id": {"type": "integer"}}, ["chat_id", "user_id", "confirm_title", "confirm_user_id"]),
              "transfer_group_ownership", rest("POST", "/groups/{chat_id}/owner", body=path)),
-        Tool("list_invite_links", "Extra invite links of a group or channel: link_id, title, link, join_count "
-             "(how many joined by it); main_link is the one of get_invite_link. MAX may not have extra links "
-             "enabled for the account: then an error.", obj(cid),
-             "list_invite_links", rest("GET", "/groups/{chat_id}/invite-links")),
-        Tool("create_invite_link", "Make an extra invite link with a title (≤ 64 chars), e.g. per ad campaign; "
-             "the main link stays. A private chat only; needs edit_link or the owner.",
-             obj({**cid, "title": {"type": "string", "maxLength": 64}}),
-             "create_invite_link", rest("POST", "/groups/{chat_id}/invite-links", body=path)),
-        Tool("revoke_invite_links", "Revoke extra invite links by link_id (≤ 20): they stop working.",
-             obj({**cid, "link_ids": {"type": "array", "items": {"type": "integer"}, "minItems": 1, "maxItems": 20}},
-                 ["chat_id", "link_ids"]),
-             "revoke_invite_links", rest("POST", "/groups/{chat_id}/invite-links/revoke", body=path)),
+        # list / create / revoke_invite_links: not offered (Р5.1 Р-79) — MAX drops the session on 221-223
+        # while its additional-links flag is off; the REST routes answer 501
     ])
 
 

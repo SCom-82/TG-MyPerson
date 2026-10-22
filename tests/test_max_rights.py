@@ -281,7 +281,23 @@ async def test_new_settings_and_comments_only_in_a_channel(rw):
 # extra invite links (R5-9)
 # ---------------------------------------------------------------------------
 
-async def test_extra_invite_links(rw):
+async def test_extra_invite_links_answer_501_without_a_frame(rw):
+    """Р5.1 Р-79: MAX drops the session on 221-223 while additional-links is off."""
+    gid = await _create(rw, user_ids=())
+    for method, path, body in (("GET", f"/groups/{gid}/invite-links", None),
+                               ("POST", f"/groups/{gid}/invite-links", {"title": "x"}),
+                               ("POST", f"/groups/{gid}/invite-links/revoke", {"link_ids": [1]})):
+        resp = await rw.http.request(method, "/api/v1" + path, json=body, headers=rw.env.h())
+        assert resp.status_code == 501 and "disabled by MAX" in resp.text, path
+    assert not [c for c in _calls(rw, "invoke") if c[1] in (221, 222, 223)]
+    assert "create_invite_link" not in _actions(rw)
+
+
+async def test_extra_invite_links(rw, monkeypatch):
+    """The frames for the coming gate by the additional-links flag (Р-79 later)."""
+    from app.max.api import groups as mx_groups
+
+    monkeypatch.setattr(mx_groups, "EXTRA_LINKS_ENABLED", True)
     gid = await _create(rw, user_ids=())
     resp = await _get(rw, f"/groups/{gid}/invite-links")
     assert resp.json() == {"chat_id": gid, "main_link": None, "links": []}
@@ -393,16 +409,15 @@ async def test_ro_tg_and_mcp_for_the_new_routes(rw, aliases):  # noqa: F811
         resp = await rw.http.request(method, "/api/v1" + path, json=body, headers=rw.env.h())
         assert resp.status_code == 403, (path, resp.text)
     assert rw.env.server.group_calls == []
-    assert (await _get(rw, f"/groups/{FOREIGN}/invite-links")).status_code == 200
+    assert (await _get(rw, f"/groups/{FOREIGN}/invite-links")).status_code == 501  # a read for ro; off (Р-79)
 
     names = lambda mode: {t.name for t in mcp_tools.visible(  # noqa: E731
         mcp_tools.Caller("account", rw.id, rw.env.alias, "max", mode, "http://test"))}
-    new = {"transfer_group_ownership", "list_invite_links", "create_invite_link", "revoke_invite_links"}
-    assert new <= names("rw") and names("ro") & new == {"list_invite_links"}
+    links = {"list_invite_links", "create_invite_link", "revoke_invite_links"}  # not offered: Р5.1 Р-79
+    assert "transfer_group_ownership" in names("rw") and not (names("rw") | names("ro")) & links
     schema = mcp_tools.BY_NAME["set_group_admin"].schema["properties"]
     assert len(schema["permissions"]["items"]["enum"]) == 11 and schema["permissions_mask"]["maximum"] == 4095
-    assert mcp_tools.BY_NAME["revoke_invite_links"].schema["properties"]["link_ids"]["items"]["type"] == [
-        "string", "integer"]
+    assert "revoke_invite_links" not in mcp_tools.BY_NAME
     assert "set_group_admin without permissions" in mcp_tools.BY_NAME["set_group_admin"].description
 
 
