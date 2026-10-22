@@ -569,14 +569,16 @@ def _max_group_tools() -> list[Tool]:
              "get_invite_link", rest("GET", "/groups/{chat_id}/invite-link")),
         Tool("reset_invite_link", "Make a new invite link; the previous one stops working.", obj(cid),
              "reset_invite_link", rest("POST", "/groups/{chat_id}/invite-link")),
-        Tool("list_join_requests", "People asking to join the group or channel.",
+        Tool("list_join_requests", "People asking to join: only private channels with join requests on "
+             "(update_group_settings join_request); for groups always empty.",
              obj({**cid, "limit": {"type": "integer", "default": 100, "maximum": 100}}),
              "list_join_requests", rest("GET", "/groups/{chat_id}/join-requests", query=path)),
-        Tool("approve_join_requests", "Let people who asked in.",
+        Tool("approve_join_requests", "Let people who asked in (private channels with join requests on; groups "
+             "have no requests).",
              obj({**cid, "user_ids": ids, "show_history": {"type": "boolean", "default": True}},
                  ["chat_id", "user_ids"]),
              "approve_join_requests", rest("POST", "/groups/{chat_id}/join-requests/approve", body=path)),
-        Tool("decline_join_requests", "Decline join requests.", obj({**cid, "user_ids": ids}, ["chat_id", "user_ids"]),
+        Tool("decline_join_requests", "Decline join requests (private channels with join requests on).", obj({**cid, "user_ids": ids}, ["chat_id", "user_ids"]),
              "decline_join_requests", rest("POST", "/groups/{chat_id}/join-requests/decline", body=path)),
         Tool("delete_group", "Delete a group: owner only; confirm_title must equal the current title. "
              "for_all=true deletes it for every member. A channel only while the account is its one member.",
