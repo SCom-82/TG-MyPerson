@@ -303,3 +303,21 @@ async def test_start_bot_second_frame_only_for_a_chat_error(rw):
     resp = await _post(rw, "/bots/start", {"bot_id": BOT})
     assert resp.status_code == 502 and "slow down" in resp.text
     assert len(_frames(rw, int(Opcode.MSG_SEND))) == 1 and _events(rw.id) == []
+
+
+async def test_mark_read_history_waits_for_the_frame_lock(rw):
+    """review 20 R20-1: mark_read's history page takes the same lock as block / unblock."""
+    import asyncio
+
+    session = await rw.env.session()
+    rw.env.server.history[DIALOG_R20] = [{"id": 5, "time": 1_700_000_000_000, "type": "USER", "text": "x",
+                                          "sender": 5001}]
+    calls = len(rw.env.server.history_calls)
+    async with session.frame_lock:
+        read = asyncio.create_task(_post(rw, f"/chats/{DIALOG_R20}/read"))
+        await asyncio.sleep(0.2)
+        assert len(rw.env.server.history_calls) == calls  # waits
+    assert (await read).status_code == 200 and len(rw.env.server.history_calls) == calls + 1
+
+
+DIALOG_R20 = 100777

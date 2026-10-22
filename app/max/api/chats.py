@@ -210,7 +210,8 @@ async def mark_read(chat_id: int, request: Request):
     # The slot first (QA PR-7 W-D3): a refused write does not touch MAX at all. A
     # failed history read or an empty chat gives the slot back.
     async with write_slot(request, ACTION, "mark_read", chat_id):
-        history = await call_max_read(session.client.fetch_history(chat_id, backward=1))
+        async with session.frame_lock:  # a history page: not alongside block / unblock (Р5.1 Р-83, review 20 R20-1)
+            history = await call_max_read(session.client.fetch_history(chat_id, backward=1))
         if not history:
             raise HTTPException(status_code=404, detail="Chat has no messages")
         last = max(history, key=lambda m: (m.time or 0, m.id))
