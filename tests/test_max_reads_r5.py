@@ -92,7 +92,7 @@ async def test_message_link_is_built_without_a_frame(rw):
     body = (await _get(rw, f"/messages/{FOREIGN}/{mid}/link")).json()
     assert body["link"] == f"https://max.ru/c/{FOREIGN}/{_token(mid)}" and "members only" in body["note"]
     assert _token(mid) == "AaFjZgjnfPM"
-    sql("""UPDATE chats SET raw = coalesce(raw, '{}'::jsonb) || '{"access": "PUBLIC", "link": "https://max.ru/news/"}'::jsonb
+    sql("""UPDATE chats SET raw = (CASE WHEN jsonb_typeof(raw) = 'object' THEN raw ELSE '{}'::jsonb END) || '{"access": "PUBLIC", "link": "https://max.ru/news/"}'::jsonb
            WHERE account_id = %s AND external_id = %s""", (rw.id, FOREIGN))
     body = (await _get(rw, f"/messages/{FOREIGN}/{mid}/link")).json()
     assert body == {"chat_id": FOREIGN, "message_id": mid, "link": f"https://max.ru/news/{_token(mid)}"}

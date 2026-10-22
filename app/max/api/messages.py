@@ -869,7 +869,7 @@ async def get_message_link(chat_id: int, message_id: int, request: Request):
     chat = await mx_groups.known_chat(request, chat_id, kinds=("private", "group", "channel"))
     if chat.chat_type == "private":
         raise HTTPException(status_code=422, detail="no message links in dialogs")
-    raw = chat.raw or {}
+    raw = chat.raw if isinstance(chat.raw, dict) else {}
     public = raw.get("link") if raw.get("access") == "PUBLIC" else None
     out = {"chat_id": chat_id, "message_id": message_id,
            "link": frames.message_link(chat_id, message_id, public_link=public)}

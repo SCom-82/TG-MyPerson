@@ -276,7 +276,7 @@ async def test_new_settings_and_comments_only_in_a_channel(rw):
     resp = await _patch(rw, f"/groups/{FOREIGN}/settings", {"comments": True, "join_request": True})
     assert resp.status_code == 200 and resp.json()["options"]["COMMENTS"] is True
     assert resp.json()["options"]["JOIN_REQUEST"] is True
-    sql("""UPDATE chats SET raw = coalesce(raw, '{}'::jsonb) || '{"access": "PUBLIC"}'::jsonb
+    sql("""UPDATE chats SET raw = (CASE WHEN jsonb_typeof(raw) = 'object' THEN raw ELSE '{}'::jsonb END) || '{"access": "PUBLIC"}'::jsonb
            WHERE account_id = %s AND external_id = %s""", (rw.id, FOREIGN))
     resp = await _patch(rw, f"/groups/{FOREIGN}/settings", {"join_request": False})
     assert resp.status_code == 422 and "private-channel option" in resp.text
