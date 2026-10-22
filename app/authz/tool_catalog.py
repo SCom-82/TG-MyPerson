@@ -37,6 +37,9 @@ MAX_R4_WRITE_TOOLS = (
 )
 MAX_R4_READ_TOOLS = ("get_reactions", "list_folders")
 # MAX release 5 without a TG counterpart (plan 2026-10-22 Р5 Р-61, Р-62): MAX router only.
+# list / create / revoke_invite_links stay here for authz of their REST routes (ro → 403 on the
+# writes, the read answers 501), though Р5.1 Р-79 took them out of the MCP catalog: MAX drops the
+# session on 221-223 while its additional-links flag is off.
 MAX_R5_WRITE_TOOLS = ("transfer_group_ownership", "create_invite_link", "revoke_invite_links",
                       "press_button", "start_bot")
 MAX_R5_READ_TOOLS = ("list_invite_links", "get_bot_info", "get_message_link", "get_poll_voters",
