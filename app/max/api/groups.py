@@ -364,6 +364,10 @@ async def update_group_settings(chat_id: int, req: SettingsRequest, request: Req
     chat_row = await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
     if req.comments is not None and chat_row.chat_type != "channel":
         raise HTTPException(status_code=422, detail="comments is a channel setting, not for a group")
+    if req.join_request is not None and (chat_row.chat_type != "channel"
+                                         or (chat_row.raw or {}).get("access") == "PUBLIC"):
+        # Р5.1 Р-80: the client's toggle is for a private channel only; a group takes the key and drops it
+        raise HTTPException(status_code=422, detail="join requests are a private-channel option (MAX client)")
     session = await connected(request)
     options = req.model_dump(exclude_none=True)
     async with write_slot(request, ACTION, "update_group_settings", chat_id):

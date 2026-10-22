@@ -211,9 +211,9 @@ async def test_members_admins_and_server_search(rw):
 
 async def test_get_chat_has_access_and_options(rw):
     gid = await _create(rw, user_ids=())
-    await _patch(rw, f"/groups/{gid}/settings", {"join_request": True})
+    await _patch(rw, f"/groups/{gid}/settings", {"disable_forward": True})
     body = (await _get(rw, f"/chats/{gid}")).json()
-    assert body["options"] == {"JOIN_REQUEST": True} and "access" in body
+    assert body["options"] == {"DISABLE_FORWARD": True} and "access" in body
 
 
 # ---------------------------------------------------------------------------
@@ -262,19 +262,24 @@ async def test_remove_with_messages_marks_them_deleted(rw):
 
 async def test_new_settings_and_comments_only_in_a_channel(rw):
     gid = await _create(rw, user_ids=())
-    resp = await _patch(rw, f"/groups/{gid}/settings", {"join_request": True, "disable_forward": True,
-                                                        "only_admin_can_call": False})
+    resp = await _patch(rw, f"/groups/{gid}/settings", {"disable_forward": True, "only_admin_can_call": False})
     assert resp.status_code == 200, resp.text
-    assert resp.json()["options"] == {"JOIN_REQUEST": True, "DISABLE_FORWARD": True, "ONLY_ADMIN_CAN_CALL": False}
+    assert resp.json()["options"] == {"DISABLE_FORWARD": True, "ONLY_ADMIN_CAN_CALL": False}
     frame = [c[2] for c in _calls(rw, "invoke") if c[1] == int(Opcode.CHAT_UPDATE)][-1]
-    assert frame == {"chatId": gid, "options": {"JOIN_REQUEST": True, "DISABLE_FORWARD": True,
-                                                "ONLY_ADMIN_CAN_CALL": False}}
+    assert frame == {"chatId": gid, "options": {"DISABLE_FORWARD": True, "ONLY_ADMIN_CAN_CALL": False}}
+    resp = await _patch(rw, f"/groups/{gid}/settings", {"join_request": True})  # Р5.1 Р-80
+    assert resp.status_code == 422 and "private-channel option" in resp.text
     actions = len(_actions(rw))
     resp = await _patch(rw, f"/groups/{gid}/settings", {"comments": True})
     assert resp.status_code == 422 and "channel setting" in resp.text and len(_actions(rw)) == actions
     await _channel(rw)
-    resp = await _patch(rw, f"/groups/{FOREIGN}/settings", {"comments": True})
+    resp = await _patch(rw, f"/groups/{FOREIGN}/settings", {"comments": True, "join_request": True})
     assert resp.status_code == 200 and resp.json()["options"]["COMMENTS"] is True
+    assert resp.json()["options"]["JOIN_REQUEST"] is True
+    sql("""UPDATE chats SET raw = coalesce(raw, '{}'::jsonb) || '{"access": "PUBLIC"}'::jsonb
+           WHERE account_id = %s AND external_id = %s""", (rw.id, FOREIGN))
+    resp = await _patch(rw, f"/groups/{FOREIGN}/settings", {"join_request": False})
+    assert resp.status_code == 422 and "private-channel option" in resp.text
 
 
 # ---------------------------------------------------------------------------

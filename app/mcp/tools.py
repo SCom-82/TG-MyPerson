@@ -557,7 +557,8 @@ def _max_group_tools() -> list[Tool]:
              obj({**cid, "title": {"type": "string"}, "description": {"type": "string"}}),
              "update_group_profile", rest("PATCH", "/groups/{chat_id}", body=path)),
         Tool("update_group_settings", "Change settings of a group or channel (only the ones passed). "
-             "join_request: people join by request (approve_join_requests); disable_forward: messages cannot be "
+             "join_request: people join by request (approve_join_requests) — a private channel only (MAX has no "
+             "such option for groups); disable_forward: messages cannot be "
              "forwarded; comments: a channel only.",
              obj({**cid, "all_can_pin_message": flag, "only_owner_can_change_icon_title": flag,
                   "only_admin_can_add_member": flag, "only_admin_can_call": flag,
