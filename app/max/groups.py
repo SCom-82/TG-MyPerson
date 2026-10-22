@@ -252,13 +252,20 @@ async def create(client: Any, title: str, user_ids: list[int], notify: bool,
 
 
 def parse_created(payload: dict) -> tuple[Chat, Message | None] | None:
-    """MSG_SEND's answer of a created channel → (Chat, its service message); no chat → None."""
+    """MSG_SEND's answer of a created channel → (Chat, its service message); no chat → None.
+    The chat and the message apart: a service message PyMax cannot read does not lose the
+    channel (review 18 R18-2) — it is None then."""
     if not payload.get("chat"):
         return None
+    chat = Chat.model_validate(payload["chat"])
     msg = payload.get("message")
-    chat_id = payload.get("chatId") or payload["chat"].get("id")
-    return Chat.model_validate(payload["chat"]), (Message.model_validate({**msg, "chatId": chat_id})
-                                                   if msg else None)
+    if not msg:
+        return chat, None
+    try:
+        return chat, Message.model_validate({**msg, "chatId": payload.get("chatId") or chat.id})
+    except Exception as exc:  # noqa: BLE001
+        log.warning("max: the service message of a new channel not understood: %s: %s", type(exc).__name__, exc)
+        return chat, None
 
 
 def invite_frame(chat_id: int, user_ids: list[int], show_history: bool, start_payload: str) -> dict:

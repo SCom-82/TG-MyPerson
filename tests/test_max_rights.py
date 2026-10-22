@@ -469,3 +469,16 @@ async def test_members_without_presence_or_contact_do_not_fail_the_page(rw):
     assert resp.status_code == 200, resp.text
     assert [m["user_id"] for m in resp.json()["items"]] == [A, ME]
     assert groups.parse_member(None) is None
+
+
+async def test_channel_kept_when_its_service_message_does_not_parse(rw):
+    """review 18 R18-2: the chat and the message are parsed apart."""
+    cid = -71_999_000_001
+    rw.env.server.frame_answers[int(Opcode.MSG_SEND)] = {
+        "chatId": cid, "chat": {"id": cid, "type": "CHANNEL", "status": "ACTIVE", "owner": ME, "title": "К",
+                                "participants": {str(ME): 1}},
+        "message": {"id": "x", "attaches": [{"_type": "CONTROL", "event": "new"}]}}  # no time / type
+    resp = await _post(rw, "/groups", {"title": "К", "chat_type": "channel"})
+    assert resp.status_code == 200, resp.text
+    assert (resp.json()["chat_id"], resp.json()["message_id"]) == (cid, None)
+    assert (await _chat_row(rw.id, cid)).chat_type == "channel"
