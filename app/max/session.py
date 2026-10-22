@@ -371,6 +371,9 @@ class MaxSession:
         # STORAGE_MODE=new: frames are stored only after the profile id matched the
         # account (review R2-1); reset on every connect.
         self.identity_ok = False
+        # Р5.1 Р-83: block / unblock and history pages (backfill, catch-up) do not go to MAX at the
+        # same time — live 22.10 a BLOCK and a backfill page died on one keepalive timeout.
+        self.frame_lock = asyncio.Lock()
 
         self._client: Any = None
         self._task: asyncio.Task | None = None

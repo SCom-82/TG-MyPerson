@@ -129,6 +129,7 @@ class FakeMaxServer:
         self.post_stats: dict[tuple[int, int], dict] = {}
         self.blocked: set[int] = set()
         self.callback_answer: dict | None = None
+        self.block_ack: dict | None = None  # 34's ack instead of the contact with its status (Р5.1 Р-83)
         # R5-3: delayed messages per chat (MAX keeps them apart from the history until they fire)
         self.delayed: dict[int, list[dict]] = {}
         # R5-4: (op, chat, text, elements) of every send_message / edit_message as the routes passed them
@@ -466,7 +467,10 @@ class FakePyMaxClient:
                               if (payload["chatId"], m) in s.post_stats}}
         if opcode == 34:
             (s.blocked.add if payload["action"] == "BLOCK" else s.blocked.discard)(payload["contactId"])
-            return {}
+            if s.block_ack is not None:
+                return s.block_ack
+            status = "BLOCKED" if payload["contactId"] in s.blocked else "ACTIVE"
+            return {"contact": {**self._user_of(payload["contactId"]), "status": status}}
         if opcode == 36:
             ids = sorted(s.blocked)[payload.get("from", 0):payload.get("from", 0) + payload.get("count", 200)]
             return {"contacts": [self._user_of(u) for u in ids]}

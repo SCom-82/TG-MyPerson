@@ -199,23 +199,31 @@ async def bulk_resolve_by_id(req: BulkResolveByIdRequest, request: Request, db: 
 # ---------------------------------------------------------------------------
 
 async def _block(request: Request, user_id: int, *, block: bool) -> dict:
+    """34 BLOCK / UNBLOCK, confirmed by its ack's contact status (Р5.1 Р-83): no list read after it
+    (36 dropped the session live). Not at the same time as a history page of the session. No
+    answer → 504 with applied: unknown, never repeated by us."""
     tool = "block_user" if block else "unblock_user"
     session = await mx_groups.connected(request)
     mx_groups.not_me(session, [user_id])
     request.state.audit_target_user_id = user_id
     async with write_slot(request, ACTION, tool):
-        await call_max(frames.set_blocked(session.client, user_id, block=block),
-                       "the block may have been applied, call again to see blocked")
-    out = {"status": "blocked" if block else "unblocked", "user_id": user_id}
-    try:
-        ids, full = await frames.blocked_ids(session.client)
-        out["blocked"] = user_id in ids
-        if full and not out["blocked"]:
-            out["warning"] = "list may be truncated"
-    except Exception as exc:  # noqa: BLE001 — the change is made; the list is a check
-        log.info("max[%s]: blocked list not read: %s: %s", session.alias, type(exc).__name__, exc)
-        out["blocked"] = None
-        out["warning"] = "not confirmed: the blocked list was not read"
+        async with session.frame_lock:
+            try:
+                answer = await call_max(frames.set_blocked(session.client, user_id, block=block),
+                                        "the block may have been applied")
+            except HTTPException as exc:
+                if exc.status_code == 504:
+                    error = HTTPException(status_code=504, detail={"error": str(exc.detail), "applied": "unknown",
+                                                                   "user_id": user_id})
+                    error.keep_write_slot = True
+                    raise error
+                raise
+    out = {"status": "blocked" if block else "unblocked", "user_id": user_id,
+           "blocked": frames.blocked_by_ack(answer)}
+    if out["blocked"] is None:
+        out["warning"] = "not confirmed: MAX answered without the contact"
+    elif out["blocked"] != block:
+        out["warning"] = f"MAX says the user is {'' if out['blocked'] else 'not '}blocked"
     return out
 
 

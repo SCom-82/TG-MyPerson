@@ -359,9 +359,19 @@ def block_frame(user_id: int, *, block: bool) -> dict:
 
 
 async def set_blocked(client: Any, user_id: int, *, block: bool) -> dict:
+    """→ MAX's ack {contact}: its status says what MAX did (Р5.1 Р-83)."""
     return _payload(await client._app.invoke(Opcode.CONTACT_UPDATE, block_frame(user_id, block=block)))
 
 
+def blocked_by_ack(payload: dict) -> bool | None:
+    """The contact of 34's ack is BLOCKED or not; None if MAX sent no contact."""
+    contact = payload.get("contact") if isinstance(payload, dict) else None
+    if not isinstance(contact, dict):
+        return None
+    return str(contact.get("status") or "").upper() == "BLOCKED"
+
+
+# Not called after block / unblock since Р5.1 Р-83 (the ack confirms); kept as the client reads it.
 BLOCKED_PAGE = 100  # Р5.1 Р-82: the client's count; 200 → "'count' out of range" and a dropped session
 
 

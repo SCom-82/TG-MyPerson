@@ -98,7 +98,8 @@ class MaxSync:
             return False
 
     async def _history(self, client: Any, chat_id: int, **kwargs: Any) -> list:
-        return await client.fetch_history(chat_id, interactive=False, **kwargs)
+        async with self.session.frame_lock:  # one page at a time with block / unblock (Р5.1 Р-83)
+            return await client.fetch_history(chat_id, interactive=False, **kwargs)
 
     # -- chat list ------------------------------------------------------------
 

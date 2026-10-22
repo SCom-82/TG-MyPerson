@@ -192,12 +192,55 @@ async def test_block_and_unblock(rw):
     resp = await _post(rw, f"/users/{BOT}/block")
     assert resp.json() == {"status": "blocked", "user_id": BOT, "blocked": True}, resp.text
     assert _frames(rw, int(Opcode.CONTACT_UPDATE)) == [{"contactId": BOT, "action": "BLOCK"}]
-    assert _frames(rw, int(Opcode.CONTACT_LIST))[-1] == {"status": "BLOCKED", "count": 100, "from": 0}  # Р-82
+    assert _frames(rw, int(Opcode.CONTACT_LIST)) == []  # confirmed by the ack, no list read (Р5.1 Р-83)
     resp = await _post(rw, f"/users/{BOT}/unblock")
     assert resp.json() == {"status": "unblocked", "user_id": BOT, "blocked": False}
     assert _actions(rw) == ["block_user", "unblock_user"]
     assert (await _post(rw, f"/users/{ME}/block")).status_code == 422
     assert len(_frames(rw, int(Opcode.CONTACT_UPDATE))) == 2
+
+
+async def test_block_ack_cases_and_timeout(rw):
+    """Р5.1 Р-83: the ack's contact decides; no contact → warning; no answer → 504 applied unknown, no repeat."""
+    _bot(rw)
+    rw.env.server.block_ack = {}
+    body = (await _post(rw, f"/users/{BOT}/block")).json()
+    assert body["blocked"] is None and "not confirmed" in body["warning"]
+    rw.env.server.block_ack = {"contact": {"id": BOT, "status": "ACTIVE"}}
+    body = (await _post(rw, f"/users/{BOT}/block")).json()
+    assert body["blocked"] is False and "not blocked" in body["warning"]
+    sent = len(_frames(rw, int(Opcode.CONTACT_UPDATE)))
+    rw.env.server.group_errors = [TimeoutError("keepalive ping timeout")]
+    resp = await _post(rw, f"/users/{BOT}/unblock")
+    assert resp.status_code == 504 and resp.json()["detail"]["applied"] == "unknown"
+    assert len(_frames(rw, int(Opcode.CONTACT_UPDATE))) == sent + 1  # one frame, no repeat
+    assert _actions(rw)[-1] == "unblock_user"  # kept: it may be applied
+
+
+async def test_block_waits_for_a_history_page(rw):
+    """Р5.1 Р-83: the session's frame lock — a block does not go out while a history page is read."""
+    import asyncio
+
+    _bot(rw)
+    session = await rw.env.session()
+    order = []
+    gate = asyncio.Event()
+
+    async def page():
+        async with session.frame_lock:
+            order.append("history")
+            await gate.wait()
+            order.append("history done")
+
+    task = asyncio.create_task(page())
+    await asyncio.sleep(0)
+    block = asyncio.create_task(_post(rw, f"/users/{BOT}/block"))
+    await asyncio.sleep(0.2)
+    assert _frames(rw, int(Opcode.CONTACT_UPDATE)) == []
+    gate.set()
+    await task
+    assert (await block).status_code == 200 and order == ["history", "history done"]
+    assert len(_frames(rw, int(Opcode.CONTACT_UPDATE))) == 1
 
 
 # ---------------------------------------------------------------------------
