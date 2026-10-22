@@ -678,7 +678,8 @@ def _max_r5_tools() -> list[Tool]:
              "their commands (chat_id). One of the two.",
              obj({"bot_id": {"type": "integer"}, "chat_id": {"type": "integer"}}),
              "get_bot_info", rest("GET", "/bots/info", query=ALL)),
-        Tool("get_message_link", "A link to the message (https://max.ru/...).", obj(msg, ["chat_id", "message_id"]),
+        Tool("get_message_link", "A link to a message of a group or channel (https://max.ru/...); a private chat's "
+             "link opens for its members only; dialogs have none.", obj(msg, ["chat_id", "message_id"]),
              "get_message_link", rest("GET", "/messages/{chat_id}/{message_id}/link")),
         Tool("get_poll_voters", "Who voted for an answer of a poll (answer_id from the message's poll.answers); "
              "not for an anonymous poll.",

@@ -453,8 +453,6 @@ class FakePyMaxClient:
             ids = s.poll_voters.get((payload["pollId"], payload["answerId"]), [])
             return {"voters": [{"userId": u, "timestamp": 1_800_000_000_000} for u in ids[:payload["count"]]],
                     "voteCount": len(ids)}
-        if opcode == 90:
-            return {"link": f"https://max.ru/c/{payload['chatId']}/{payload['messageId']}"}
         if opcode == 202:
             queue = s.transcripts.get(payload["mediaId"]) or [{"transcriptionStatus": 2}]
             return queue.pop(0) if len(queue) > 1 else queue[0]

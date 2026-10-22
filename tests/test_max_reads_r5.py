@@ -77,12 +77,30 @@ async def test_poll_voters(rw):
     assert len(_frames(rw, int(Opcode.VOTERS_LIST_BY_ANSWER))) == 1  # refusals: no frame
 
 
-async def test_message_link(rw):
-    body = (await _get(rw, f"/messages/{DIALOG}/5/link")).json()
-    assert body == {"chat_id": DIALOG, "message_id": 5, "link": f"https://max.ru/c/{DIALOG}/5"}
-    assert _frames(rw, 90) == [{"chatId": DIALOG, "messageId": 5}]
-    rw.env.server.frame_answers[90] = {}
-    assert (await _get(rw, f"/messages/{DIALOG}/5/link")).status_code == 502
+def _token(message_id: int) -> str:
+    """The client's Gya, independently: 8 bytes big-endian, base64url without '='."""
+    import base64
+    import struct
+
+    return base64.urlsafe_b64encode(struct.pack(">Q", message_id)).decode().rstrip("=")
+
+
+async def test_message_link_is_built_without_a_frame(rw):
+    """Р5.1 Р-84: the client never sends 90 for "copy link"; 90 answered chat.not.public live."""
+    mid = 117484355175546099
+    await _foreign(rw)  # a private group
+    body = (await _get(rw, f"/messages/{FOREIGN}/{mid}/link")).json()
+    assert body["link"] == f"https://max.ru/c/{FOREIGN}/{_token(mid)}" and "members only" in body["note"]
+    assert _token(mid) == "AaFjZgjnfPM"
+    sql("""UPDATE chats SET raw = coalesce(raw, '{}'::jsonb) || '{"access": "PUBLIC", "link": "https://max.ru/news/"}'::jsonb
+           WHERE account_id = %s AND external_id = %s""", (rw.id, FOREIGN))
+    body = (await _get(rw, f"/messages/{FOREIGN}/{mid}/link")).json()
+    assert body == {"chat_id": FOREIGN, "message_id": mid, "link": f"https://max.ru/news/{_token(mid)}"}
+    await _dialog(rw)
+    resp = await _get(rw, f"/messages/{DIALOG}/5/link")
+    assert resp.status_code == 422 and "no message links in dialogs" in resp.text
+    assert (await _get(rw, "/messages/424242/5/link")).status_code == 404
+    assert _frames(rw, 90) == []
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +232,7 @@ async def test_reads_route_names_tg_and_ro(rw, aliases):  # noqa: F811
     sql("UPDATE accounts SET mode = 'ro' WHERE id = %s", (rw.id,))
     mw._mode_cache.clear()
     rw.env.server.post_stats[(FOREIGN, 1)] = {"views": 1}
-    for method, path in (("GET", f"/messages/{FOREIGN}/stats?message_ids=1"), ("GET", f"/messages/{DIALOG}/5/link"),
+    for method, path in (("GET", f"/messages/{FOREIGN}/stats?message_ids=1"), ("GET", f"/messages/{FOREIGN}/5/link"),
                          ("GET", f"/messages/{DIALOG}/search?query=a")):
         resp = await rw.http.request(method, "/api/v1" + path, headers=rw.env.h())
         assert resp.status_code == 200, (path, resp.text)
@@ -249,8 +267,6 @@ def test_read_frames_match_the_client_schemas():
     assert set(frames.detailed_reactions_frame(1, 2, marker=3)) == {"chatId", "messageId", "count", "marker"}
     # 305: pollId xs, chatId z, messageId z, answerId bs, marker V?, count B?
     assert set(frames.voters_frame(1, 2, 3, 4, count=5)) == {"pollId", "chatId", "messageId", "answerId", "count"}
-    # 90: chatId z, messageId z
-    assert frames.message_link_frame(1, 2) == {"chatId": 1, "messageId": 2}
     # 202: mediaId xs, messageId z, chatId z
     assert frames.transcribe_frame(1, 2, 3) == {"mediaId": 3, "messageId": 2, "chatId": 1}
     # 73: chatId z, query P, count B, marker z?

@@ -863,13 +863,19 @@ async def get_poll_voters(chat_id: int, message_id: int, request: Request, answe
 
 @router.get("/{chat_id}/{message_id}/link", name="get_message_link")
 async def get_message_link(chat_id: int, message_id: int, request: Request):
-    session = await authorized_or_error(request)
-    if isinstance(session, JSONResponse):
-        return session
-    payload = await call_max_read(frames.message_link(session.client, chat_id, message_id))
-    if not payload.get("link"):
-        raise HTTPException(status_code=502, detail=f"MAX answered without a link: {payload!r}")
-    return {"chat_id": chat_id, "message_id": message_id, "link": payload["link"]}
+    """Built here as the MAX client builds it, no frame (Р5.1 Р-84): a public chat — its link + the
+    message token; a private group / channel — max.ru/c/<chat>/<token>, opens for members only.
+    Dialogs have no message links."""
+    chat = await mx_groups.known_chat(request, chat_id, kinds=("private", "group", "channel"))
+    if chat.chat_type == "private":
+        raise HTTPException(status_code=422, detail="no message links in dialogs")
+    raw = chat.raw or {}
+    public = raw.get("link") if raw.get("access") == "PUBLIC" else None
+    out = {"chat_id": chat_id, "message_id": message_id,
+           "link": frames.message_link(chat_id, message_id, public_link=public)}
+    if public is None:
+        out["note"] = "a private chat: the link opens for its members only"
+    return out
 
 
 class TranscribeRequest(BaseModel):

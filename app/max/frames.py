@@ -19,6 +19,7 @@ views, blocking. Frame fields are the MAX web client's (appendix «r5-protocol»
 each frame is a pure *_frame() (canary tests) and a call returning MAX's raw answer.
 """
 
+import base64
 import logging
 import time
 from typing import Any
@@ -157,7 +158,6 @@ def parse_vote(payload: dict) -> PollState:
 
 # -- release 5: bots -------------------------------------------------------------
 
-OP_MSG_LINK = 90  # not in pymax.protocol.Opcode (Р-51)
 PRESSABLE = ("CALLBACK", "CHAT", "MESSAGE")  # Р-64: the rest are a URL, PII, geo, a mini app, the clipboard
 
 
@@ -286,13 +286,14 @@ async def voters(client: Any, chat_id: int, message_id: int, poll_id: int, answe
         chat_id, message_id, poll_id, answer_id, count=count, marker=marker)))
 
 
-def message_link_frame(chat_id: int, message_id: int) -> dict:
-    return {"chatId": chat_id, "messageId": message_id}
-
-
-async def message_link(client: Any, chat_id: int, message_id: int) -> dict:
-    """90 {chatId, messageId} → {link} (Р-69)."""
-    return _payload(await client._app.invoke(OP_MSG_LINK, message_link_frame(chat_id, message_id)))
+def message_link(chat_id: int, message_id: int, *, public_link: str | None) -> str:
+    """The link to a message as the client builds it, no frame (Р5.1 Р-84; the client never sends 90
+    for "copy link", and 90 answers chat.not.public for private chats): the message id as 8 bytes
+    big-endian in base64url without "=" — after the chat's public link, else max.ru/c/<chat id>/."""
+    token = base64.urlsafe_b64encode((message_id & 0xFFFF_FFFF_FFFF_FFFF).to_bytes(8, "big")).decode().rstrip("=")
+    if public_link:
+        return f"{public_link.rstrip('/')}/{token}"
+    return f"https://max.ru/c/{chat_id}/{token}"
 
 
 def media_id(message: Any, index: int | None) -> tuple[int, int] | None:
