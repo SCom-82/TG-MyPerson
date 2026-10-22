@@ -207,6 +207,18 @@ def forward_payload(chat_id: int, message_id: int | str, source_chat_id: int, *,
     return payload
 
 
+OP_REACTIONS_CHANGED = 155  # NOTIF_MSG_REACTIONS_CHANGED
+
+
+def pymax_payload(opcode: int, payload: Any) -> Any:
+    """An inbound payload as PyMax 2.4.1 can parse it (Р5.1 Р-85): 155's messageId is a number in
+    the client's schema, PyMax's ReactionUpdateEvent wants str — the event was lost with a
+    ValidationError (live 22.10). The same payload object when nothing changes."""
+    if opcode == OP_REACTIONS_CHANGED and isinstance(payload, dict) and isinstance(payload.get("messageId"), int):
+        return {**payload, "messageId": str(payload["messageId"])}
+    return payload
+
+
 class _AdapterMixin:
     """Guards + a frame hook in front of PyMax's dispatcher.
 
@@ -229,6 +241,9 @@ class _AdapterMixin:
                     await hook(frame.opcode, frame.cmd, frame.payload)
                 except Exception:  # noqa: BLE001
                     log.exception("max: frame hook failed opcode=%s", frame.opcode)
+            fixed = pymax_payload(frame.opcode, frame.payload)
+            if fixed is not frame.payload:
+                frame = frame.model_copy(update={"payload": fixed})
             await dispatch(frame)
 
         app.connection.on_event = on_event

@@ -673,3 +673,26 @@ def test_ban_heuristic_whole_words(error, message, banned):
     from app.max.errors import is_banned
 
     assert is_banned(ApiError(opcode=19, error=error, message=message)) is banned
+
+
+def test_reaction_event_155_parses_after_the_fix():
+    """Р5.1 Р-85: a numeric messageId (the client's schema) reaches PyMax's ReactionUpdateEvent as str."""
+    from pymax import ReactionUpdateEvent
+    from pydantic import ValidationError
+
+    from app.max.session import pymax_payload
+
+    frame = {"chatId": -5, "messageId": 117484355175546099, "totalCount": 1,
+             "counters": [{"reaction": "👍", "count": 1}]}
+    with pytest.raises(ValidationError):
+        ReactionUpdateEvent.model_validate(frame)  # PyMax 2.4.1 as is
+    event = ReactionUpdateEvent.model_validate(pymax_payload(155, frame))
+    assert (event.message_id, event.total_count) == ("117484355175546099", 1)
+    assert frame["messageId"] == 117484355175546099  # the hooks' payload is not touched
+    other = {"messageId": 1}
+    assert pymax_payload(128, other) is other and pymax_payload(155, {"messageId": "1"})["messageId"] == "1"
+    from pymax.protocol.models import InboundFrame
+
+    inbound = InboundFrame(opcode=155, cmd=0, payload=frame)
+    copied = inbound.model_copy(update={"payload": pymax_payload(155, inbound.payload)})
+    assert copied.payload["messageId"] == "117484355175546099" and inbound.payload["messageId"] == 117484355175546099
