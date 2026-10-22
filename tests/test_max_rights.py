@@ -512,3 +512,27 @@ async def test_channel_post_and_edit_by_bits(rw):
     g["adminParticipants"] = {str(ME): {"id": ME}}  # unknown mask: as before R5
     rights = (await _get(rw, f"/chats/{FOREIGN}/my_rights")).json()
     assert (rights["can_post_messages"], rights["can_edit_messages"]) == (True, True)
+
+
+async def test_non_owner_gives_only_its_own_rights(rw):
+    """review 18 R18-5: the client's default for a non-owner is its own bits without add_admin."""
+    _bot(rw)
+    await _foreign(rw)
+    g = rw.env.server.groups[FOREIGN]
+    g["participants"].update({str(B): 1, str(BOT): 1})
+    g["admins"] = [9999, ME]
+    g["adminParticipants"] = {str(ME): {"permissions": 2 | 4 | 16 | 32 | 128}}  # no 1, 8, 64
+    resp = await _post(rw, f"/groups/{FOREIGN}/admins", {"user_id": A})
+    assert (resp.status_code, resp.json()["mask"]) == (200, 251 & (2 | 16 | 32 | 128)), resp.text
+    resp = await _post(rw, f"/groups/{FOREIGN}/admins", {"user_id": BOT})
+    assert resp.json()["mask"] == 123 & (2 | 16 | 32)
+    resp = await _post(rw, f"/groups/{FOREIGN}/admins", {"user_id": B, "permissions": ["delete_message"]})
+    assert resp.status_code == 422 and "the account has no delete_message itself" in resp.text
+    resp = await _post(rw, f"/groups/{FOREIGN}/admins", {"user_id": B, "permissions": ["add_admin"]})
+    assert (resp.status_code, resp.json()["mask"]) == (200, 4)
+    sent = len(_admin_frames(rw))
+    g["adminParticipants"] = {str(ME): {"permissions": 4}}
+    resp = await _post(rw, f"/groups/{FOREIGN}/admins", {"user_id": B})
+    assert resp.status_code == 422 and len(_admin_frames(rw)) == sent
+    g["adminParticipants"] = {str(ME): {"id": ME}}  # own mask unknown: as is
+    assert (await _post(rw, f"/groups/{FOREIGN}/admins", {"user_id": B})).json()["mask"] == 251

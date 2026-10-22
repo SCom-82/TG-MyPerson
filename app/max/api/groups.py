@@ -304,8 +304,9 @@ async def remove_group_members(chat_id: int, req: RemoveMembersRequest, request:
 @router.post("/{chat_id:sint}/admins", name="set_group_admin")
 async def set_group_admin(chat_id: int, req: AdminRequest, request: Request):
     """Rights as the MAX client gives them (Р-52…Р-57): names or an exact mask, else the client's
-    default for a bot / a person; the client's dependencies → 422. Again on an admin — the mask is
-    replaced (previous_mask). Everything is checked before the slot and the frame."""
+    default for a bot / a person; the client's dependencies → 422. Not the owner — no more than its
+    own rights (review 18 R18-5). Again on an admin — the mask is replaced (previous_mask).
+    Everything is checked before the slot and the frame."""
     chat_row = await known_chat(request, chat_id, kinds=GROUP_OR_CHANNEL)
     channel = chat_row.chat_type == "channel"
     rights = lambda bot: groups.resolve_mask(req.permissions, req.permissions_mask,  # noqa: E731
@@ -319,11 +320,14 @@ async def set_group_admin(chat_id: int, req: AdminRequest, request: Request):
     not_me(session, [req.user_id])
     _target(request, [req.user_id])
     bot = await call_max_read(groups.is_bot(session.client, req.user_id))
+    before = await call_max_read(groups.fresh_chat(session.client, chat_id))
+    me = me_of(session)
+    own = groups.admin_mask(before, me) if me is not None and before.owner != me else None
     try:
-        mask = rights(bot)
+        mask = groups.within_own(rights(bot), own, explicit=bool(req.permissions) or req.permissions_mask is not None,
+                                 channel=channel, bot=bot)
     except groups.UnknownPermission as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    before = await call_max_read(groups.fresh_chat(session.client, chat_id))
     previous = groups.admin_mask(before, req.user_id) if req.user_id in (before.admins or []) else None
     async with write_slot(request, ACTION, "set_group_admin", chat_id):
         await call_max(groups.set_admin(session.client, chat_id, req.user_id, mask), UNCERTAIN)

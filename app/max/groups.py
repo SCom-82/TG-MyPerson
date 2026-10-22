@@ -110,6 +110,29 @@ def resolve_mask(names: list[str] | None, mask: int | None, *, channel: bool, bo
     return mask
 
 
+def within_own(mask: int, own: int | None, *, explicit: bool, channel: bool, bot: bool) -> int:
+    """A non-owner gives no more than it has (review 18 R18-5, the client's rule): the default is
+    its own bits without add_admin, cut to the dependencies; asked bits it lacks → UnknownPermission.
+    own None (MAX did not tell) — the mask as is."""
+    if own is None:
+        return mask
+    if explicit:
+        lacking = mask & ~own
+        if lacking:
+            names = permission_names(lacking, channel=channel) or [str(lacking)]
+            raise UnknownPermission(f"the account has no {', '.join(names)} itself: it can give only its own "
+                                    f"rights {permission_names(own, channel=channel)}")
+        return mask
+    mask &= own & ~4
+    if not mask & 2:
+        mask &= ~128
+    if bot and not channel and not mask & 32:
+        mask &= ~(1 | 16)
+    if not mask:
+        raise UnknownPermission("the account has no rights it could give (it is not the owner)")
+    return mask
+
+
 def admin_mask(chat: Any, user_id: int) -> int | None:
     """The user's mask in chat.adminParticipants; the owner — 4095; not an admin — None."""
     if chat is None:
