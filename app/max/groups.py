@@ -182,12 +182,26 @@ async def find_members(client: Any, chat_id: int, limit: int, *, kind: str = "ME
         frame = await client._app.invoke(Opcode.CHAT_MEMBERS, members_frame(
             chat_id, kind=kind, query=query, marker=marker, count=min(MEMBERS_PAGE, limit - len(out))))
         payload = getattr(frame, "payload", None) or {}
-        page = [Member.model_validate(m) for m in payload.get("members") or [] if m]
-        out.extend(page)
+        items = payload.get("members") or []
+        out.extend(m for m in (parse_member(i) for i in items) if m is not None)
         marker = payload.get("marker")
-        if not page or not marker:
+        if not items or not marker:
             break
     return out[:limit]
+
+
+def parse_member(item: Any) -> Member | None:
+    """An element of 59's members (pc: contact?, presence? — both optional in the client; PyMax's
+    Member requires both). No contact → skipped; no presence → empty; a broken one → skipped,
+    logged: one element does not fail the page (review 18 R18-1)."""
+    if not isinstance(item, dict) or not isinstance(item.get("contact"), dict):
+        log.info("max: a member without contact skipped: %r", item)
+        return None
+    try:
+        return Member.model_validate({**item, "presence": item.get("presence") or {}})
+    except Exception as exc:  # noqa: BLE001
+        log.warning("max: a member not understood, skipped: %s: %s", type(exc).__name__, exc)
+        return None
 
 
 async def join_requests(client: Any, chat_id: int, limit: int) -> list[Any]:

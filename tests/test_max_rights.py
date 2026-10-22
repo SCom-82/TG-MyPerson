@@ -455,3 +455,17 @@ def test_frames_match_the_client_schemas():
     assert set(frame) == {"message", "notify"} and set(frame["message"]) == {"cid", "attaches"}
     assert frame["message"]["attaches"][0]["chatType"] in ("CHAT", "CHANNEL")
     assert set(frame["message"]["attaches"][0]) == {"_type", "event", "chatType", "title", "userIds"}
+
+
+async def test_members_without_presence_or_contact_do_not_fail_the_page(rw):
+    """review 18 R18-1: 59's members carry contact? / presence? (both optional in the client)."""
+    gid = await _create(rw, user_ids=(A,))
+    rw.env.server.frame_answers[int(Opcode.CHAT_MEMBERS)] = {"members": [
+        {"contact": {"id": A, "names": [{"firstName": "Аня"}]}},  # no presence
+        {"presence": {}},  # no contact
+        {"contact": {"names": "broken"}, "presence": {}},  # not a user
+        {"contact": {"id": ME, "names": [{"firstName": "Я"}]}, "presence": {}}]}
+    resp = await _get(rw, f"/chats/{gid}/members", role="admins")
+    assert resp.status_code == 200, resp.text
+    assert [m["user_id"] for m in resp.json()["items"]] == [A, ME]
+    assert groups.parse_member(None) is None
