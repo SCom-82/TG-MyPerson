@@ -8,6 +8,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from app.authz.write_limits import SEND, write_slot
+from app.max import frames
 from app.max.pool import MaxAliasNotFound, get_max_pool
 from app.max.session import MaxSession
 
@@ -102,11 +103,22 @@ def param_not_supported(request: Request, tool: str, parameter: str) -> JSONResp
     })
 
 
+def prepared_text(text: str | None, parse_mode: str | None) -> tuple[str | None, list]:
+    """frames.prepare_text (Р5 Р-78): the text as is, markup by parse_mode; bad markup → 422,
+    called before the slot."""
+    try:
+        return frames.prepare_text(text, parse_mode)
+    except frames.TextMarkupError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
 async def send_text(request: Request, session: MaxSession, tool: str, chat_id: int, text: str,
-                    reply_to: int | None = None) -> Any:
-    """A text message within the account's write limits, stored at once (send_message, send_to_person)."""
+                    reply_to: int | None = None, parse_mode: str | None = None) -> Any:
+    """A text message within the account's write limits, stored at once (send_message, send_to_person).
+    No parse_mode — the text goes byte for byte (Р5 Р-78)."""
+    text, elements = prepared_text(text, parse_mode)
     async with write_slot(request, SEND, tool, chat_id):
-        msg = await call_max(session.client.send_message(chat_id, text, reply_to=reply_to))
+        msg = await call_max(session.client.send_message(chat_id, text, reply_to=reply_to, elements=elements))
     await store_sent(session, msg, chat_id)
     return msg
 

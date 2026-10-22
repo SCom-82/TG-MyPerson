@@ -743,7 +743,12 @@ def _max_variants() -> dict[str, Tool]:
                        "polls are not scheduled); list_scheduled / cancel_scheduled / send_scheduled_now manage it",
     }
     blocked = " MAX: the answer has blocked — whether the user is in the account's blocked list after it."
-    return {"send_message": dataclasses.replace(send, schema=send_schema),
+    as_is = (' MAX: text is sent as is; pass parse_mode="markdown" or "html" (b, i, u, s, code, pre, '
+             'a href, blockquote, br) for formatting.')
+    texts = {name: dataclasses.replace(by_name[name], description=by_name[name].description + as_is)
+             for name in ("edit_message", "send_photo", "send_file", "send_voice", "send_album")}
+    return {**texts,
+            "send_message": dataclasses.replace(send, schema=send_schema, description=send.description + as_is),
             "list_messages": dataclasses.replace(by_name["list_messages"],
                                                  description=by_name["list_messages"].description + keyboard),
             "get_message": dataclasses.replace(by_name["get_message"],

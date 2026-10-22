@@ -34,9 +34,19 @@ from typing import Any
 import pymax
 from pymax import ApiError, Client, ExtraConfig, PasswordAttemptsExceededError, SmsAuthFlow, WebClient
 from pymax.api.binding import bind_api_model
-from pymax.api.messages.payloads import ForwardLink, ForwardMessagePayload, ForwardMessagePayloadMessage
+from pymax.api.messages.enums import MessagePayloadKey
+from pymax.api.messages.payloads import (
+    DelayedAttributes,
+    EditMessagePayload,
+    ForwardLink,
+    ForwardMessagePayload,
+    ForwardMessagePayloadMessage,
+    ReplyLink,
+    SendMessagePayload,
+    SendMessagePayloadMessage,
+)
 from pymax.api.messages.service import MessageService
-from pymax.api.response import require_payload_model
+from pymax.api.response import require_payload_item_model, require_payload_model
 from pymax.api.uploads.payloads import VideoNoteAttachPayload, VoiceAttachPayload
 from pymax.protocol import Opcode
 from pymax.types.domain import Message
@@ -108,13 +118,65 @@ FrameHook = Callable[[int, int, dict | None], Awaitable[None]]
 
 
 class NumericForwardMessages(MessageService):
-    """PyMax's MessageService with forward_message sending the message id as a NUMBER.
+    """PyMax's MessageService with our fixes; installed on every App (the facade and our routes alike).
 
-    maxapi-python 2.4.1 builds link.messageId with str(message_id); the live MAX
-    rejects it — "Ошибка валидации Expected number at 61 [proto.payload]" (19.10,
-    POST /messages/forward into «Избранное» of max-work), the same as mark_read
-    with a str id before b92263c. Everything else is PyMax's own frame.
+    - forward_message sends the message id as a NUMBER: maxapi-python 2.4.1 builds
+      link.messageId with str(message_id); the live MAX rejects it — "Ошибка валидации
+      Expected number at 61 [proto.payload]" (19.10, POST /messages/forward into «Избранное»
+      of max-work), the same as mark_read with a str id before b92263c;
+    - send_message / edit_message send the text AS IS (plan 2026-10-22 Р5 Р-78): PyMax 2.4.1
+      always runs it through its markdown Formatter and eats "_", "*", "~" ... — a link
+      token=3mbQ_wto… went out as token=3mbQwto…. Markup comes only as elements
+      (frames.prepare_text by parse_mode); no elements → none. The bodies are PyMax 2.4.1's
+      without the Formatter (canary: tests/test_max_session.py, the signatures).
     """
+
+    async def send_message(self, chat_id: int, text: str | None = None, reply_to: int | None = None,
+                           attachments=None, *, notify: bool = True, send_at=None,
+                           elements: list | None = None) -> Message:
+        if not text and not attachments:
+            raise ValueError("Either text or attachments must be provided")
+        attaches = await self._upload_attachments(attachments)
+        frame = SendMessagePayload(
+            chat_id=chat_id,
+            message=SendMessagePayloadMessage(
+                text=text or None,
+                cid=self._next_cid(),
+                elements=list(elements or []),
+                attaches=attaches,
+                link=ReplyLink(message_id=reply_to) if reply_to else None,
+                delayed_attributes=DelayedAttributes(time_to_fire=self._convert_time(send_at), notify_sender=notify)
+                if send_at else None,
+            ),
+            notify=notify,
+        )
+        try:
+            response = await self.app.invoke(Opcode.MSG_SEND, frame.to_payload())
+        except ApiError as e:
+            if e.error != "attachment.not.ready":
+                raise
+            await self._process_attachment_error(attaches)
+            response = await self.app.invoke(Opcode.MSG_SEND, frame.to_payload())
+        return bind_api_model(self.app, require_payload_model(response, Message))
+
+    async def edit_message(self, chat_id: int, message_id: int, text: str | None = None, attachments=None, *,
+                           elements: list | None = None) -> Message:
+        if not text and not attachments:
+            raise ValueError("Either text or attachments must be provided")
+        attaches = await self._upload_attachments(attachments)
+        frame = EditMessagePayload(chat_id=chat_id, message_id=message_id, text=text or None,
+                                   elements=list(elements or []), attachments=attaches)
+        try:
+            response = await self.app.invoke(Opcode.MSG_EDIT, frame.to_payload())
+        except ApiError as e:
+            if e.error != "attachment.not.ready":
+                raise
+            await self._process_attachment_error(attaches)
+            response = await self.app.invoke(Opcode.MSG_EDIT, frame.to_payload())
+        message = require_payload_item_model(response, MessagePayloadKey.MESSAGE, Message)
+        if message.chat_id is None:
+            message.chat_id = chat_id
+        return bind_api_model(self.app, message)
 
     async def forward_message(self, chat_id: int, message_id: int | str, source_chat_id: int | None = None, *,
                               notify: bool = True) -> Message:
@@ -171,9 +233,20 @@ class _AdapterMixin:
 
         app.connection.on_event = on_event
         media.install_uploads(app)
-        # Same instance, our class: forward ids as numbers (see NumericForwardMessages).
+        # Same instance, our class: forward ids as numbers, text as is (see NumericForwardMessages).
         app.api.messages.__class__ = NumericForwardMessages
         return app
+
+    async def send_message(self, chat_id: int, text: str | None = None, reply_to: int | None = None,
+                           attachments=None, *, notify: bool = True, send_at=None,
+                           elements: list | None = None) -> Message:
+        """PyMax's facade + elements (Р-78): our routes pass the markup prepare_text made."""
+        return await self._app.api.messages.send_message(chat_id, text, reply_to, attachments, notify=notify,
+                                                         send_at=send_at, elements=elements)
+
+    async def edit_message(self, chat_id: int, message_id: int, text: str | None = None, attachments=None, *,
+                           elements: list | None = None) -> Message:
+        return await self._app.api.messages.edit_message(chat_id, message_id, text, attachments, elements=elements)
 
     async def _prepare_config(self):  # noqa: ANN202 — pymax ClientConfig
         config = await super()._prepare_config()

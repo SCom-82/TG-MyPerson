@@ -131,6 +131,8 @@ class FakeMaxServer:
         self.callback_answer: dict | None = None
         # R5-3: delayed messages per chat (MAX keeps them apart from the history until they fire)
         self.delayed: dict[int, list[dict]] = {}
+        # R5-4: (op, chat, text, elements) of every send_message / edit_message as the routes passed them
+        self.texts: list[tuple] = []
 
         self.factory_calls: list[dict] = []
         self.clients: list["FakePyMaxClient"] = []
@@ -667,7 +669,8 @@ class FakePyMaxClient:
         return Message.model_validate({**m, "chatId": chat_id})
 
     async def send_message(self, chat_id: int, text: str | None = None, reply_to: int | None = None,
-                           attachments=None, *, notify: bool = True, send_at=None) -> Message:
+                           attachments=None, *, notify: bool = True, send_at=None, elements=None) -> Message:
+        self.server.texts.append(("send", chat_id, text, list(elements or [])))
         kinds = [type(a).__name__ for a in attachments or []]
         names = [getattr(a, "name", None) or getattr(a, "file_name", None) for a in attachments or []]
         self._write("send_message", chat_id, text, reply_to, kinds, names)
@@ -803,7 +806,9 @@ class FakePyMaxClient:
         self._write("forward_message", chat_id, message_id, source_chat_id)
         return self._new_message(chat_id, f"fwd {message_id}")
 
-    async def edit_message(self, chat_id: int, message_id: int, text: str | None = None, attachments=None):
+    async def edit_message(self, chat_id: int, message_id: int, text: str | None = None, attachments=None, *,
+                           elements=None):
+        self.server.texts.append(("edit", chat_id, text, list(elements or [])))
         self._write("edit_message", chat_id, message_id, text)
         for m in self.server.history.get(chat_id, []):
             if int(m["id"]) == int(message_id):

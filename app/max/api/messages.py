@@ -45,6 +45,7 @@ from app.max.api.common import (
     call_max,
     call_max_read,
     param_not_supported,
+    prepared_text,
     send_text,
     store_sent,
 )
@@ -292,21 +293,22 @@ def _schedule_at(value: datetime) -> datetime:
 
 @router.post("", name="send_message")
 async def send_message(req: SendMessageRequest, request: Request):
-    """parse_mode is ignored: PyMax sends the text as its markdown. schedule_date (Р-73): MAX
-    sends the text at that time; it is not stored as sent until MAX sends it."""
+    """The text goes as is; parse_mode markdown / html makes markup (Р5 Р-78). schedule_date (Р-73):
+    MAX sends the text at that time; it is not stored as sent until MAX sends it."""
     if req.schedule_date is not None and not max_settings.scheduled_enabled:
         return param_not_supported(request, "send_message", "schedule_date")
     when = _schedule_at(req.schedule_date) if req.schedule_date is not None else None
+    text, elements = prepared_text(req.text, req.parse_mode)
     session = await authorized_or_error(request)
     if isinstance(session, JSONResponse):
         return session
     if when is None:
         msg = await send_text(request, session, "send_message", req.chat_id, req.text,
-                              reply_to=req.reply_to_message_id)
+                              reply_to=req.reply_to_message_id, parse_mode=req.parse_mode)
         return {"status": "sent", "message_id": msg.id, "chat_id": req.chat_id, "schedule_date": None}
     async with write_slot(request, SEND, "send_message", req.chat_id):
-        answer = await call_max(frames.schedule(session.client, req.chat_id, req.text,
-                                                int(when.timestamp() * 1000), req.reply_to_message_id),
+        answer = await call_max(frames.schedule(session.client, req.chat_id, text,
+                                                int(when.timestamp() * 1000), req.reply_to_message_id, elements),
                                 "the message may have been scheduled, check list_scheduled before retrying")
     message = answer.get("message") if isinstance(answer.get("message"), dict) else {}
     return {"status": "scheduled", "message_id": message.get("id"), "chat_id": req.chat_id,
@@ -388,12 +390,14 @@ def _attachment(data: bytes, name: str, **kind) -> object:
 
 
 async def _send_attachments(request: Request, session, tool: str, chat_id: int, text: str | None,
-                            reply_to: int | None, attachments: list) -> object:
-    """One MSG_SEND with the attachments, one send of the limits; stored at once.
-    A failed upload (UploadError) is a 502 and gives the slot back: nothing was sent."""
+                            reply_to: int | None, attachments: list, parse_mode: str | None = None) -> object:
+    """One MSG_SEND with the attachments, one send of the limits; stored at once. The caption as is,
+    markup by parse_mode (Р5 Р-78). A failed upload (UploadError) is a 502 and gives the slot back:
+    nothing was sent."""
+    text, elements = prepared_text(text, parse_mode)
     async with write_slot(request, SEND, tool, chat_id):
         msg = await call_max(session.client.send_message(
-            chat_id, text or None, reply_to=reply_to, attachments=attachments,
+            chat_id, text or None, reply_to=reply_to, attachments=attachments, elements=elements,
         ))
     await store_sent(session, msg, chat_id)
     return msg
@@ -426,7 +430,7 @@ async def send_file(
     name = file.filename or ("voice.ogg" if voice_note else "file.bin")
     attachment = _attachment(await file.read(), name, force_document=force_document, voice=voice_note)
     msg = await _send_attachments(request, session, "send_file", chat_id, caption, reply_to_message_id,
-                                  [attachment])
+                                  [attachment], parse_mode)
     return _sent(msg, chat_id)
 
 
@@ -448,7 +452,7 @@ async def send_voice(
         return session
     attachment = _attachment(await file.read(), file.filename or "voice.ogg", voice=True)
     msg = await _send_attachments(request, session, "send_voice", chat_id, caption, reply_to_message_id,
-                                  [attachment])
+                                  [attachment], parse_mode)
     return _sent(msg, chat_id)
 
 
@@ -494,7 +498,7 @@ async def send_album(
         return session
     attachments = [_attachment(await f.read(), f.filename or f"file{i}.bin") for i, f in enumerate(files)]
     msg = await _send_attachments(request, session, "send_album", chat_id, caption, reply_to_message_id,
-                                  attachments)
+                                  attachments, parse_mode)
     return {"status": "sent", "message_ids": [msg.id], "chat_id": chat_id, "schedule_date": None}
 
 
@@ -566,11 +570,12 @@ async def forward_message(req: ForwardMessageRequest, request: Request):
 async def edit_message(req: EditMessageRequest, request: Request):
     if req.scheduled:
         return param_not_supported(request, "edit_message", "scheduled")
+    text, elements = prepared_text(req.text, req.parse_mode)  # as is unless parse_mode (Р5 Р-78)
     session = await authorized_or_error(request)
     if isinstance(session, JSONResponse):
         return session
     async with write_slot(request, ACTION, "edit_message", req.chat_id):
-        msg = await call_max(session.client.edit_message(req.chat_id, req.message_id, text=req.text))
+        msg = await call_max(session.client.edit_message(req.chat_id, req.message_id, text=text, elements=elements))
     await store_sent(session, msg, req.chat_id, is_edit=True)
     return {"status": "edited", "chat_id": req.chat_id, "message_id": req.message_id}
 

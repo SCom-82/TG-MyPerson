@@ -32,10 +32,11 @@ from pymax.types import Chat, User
 from pymax.types.domain import Message
 from pymax.types.domain.attachments.enums import PollFlags
 from pymax.types.domain.attachments.keyboards import InlineKeyboardAttachment
+from pymax.types.domain.element import Element, ElementAttributes
 from pymax.types.domain.attachments.poll import Poll, PollAnswer, PollAttachment, PollState
 from pymax.types.domain.user import ContactInfo
 
-from app.max import groups
+from app.max import groups, html_text
 
 log = logging.getLogger(__name__)
 
@@ -375,23 +376,24 @@ def delayed_attrs(when_ms: int, *, notify: bool = True) -> dict:
     return {"timeToFire": when_ms, "notifySender": notify}
 
 
-def schedule_frame(chat_id: int, text: str, when_ms: int, reply_to: int | None = None) -> dict:
-    """MSG_SEND 64 of a delayed text, PyMax's shape (its markdown included, as every send for now)
-    plus delayedAttributes. Ours, not PyMax's send_message(send_at=): PyMax's Message requires
-    delayedAttributes.notifyOpponents, the client's schema does not — an answer without it would
-    fail after the frame went out."""
-    clean, elements = Formatter.format_markdown(text)
-    message: dict = {"text": clean, "cid": int(time.time() * 1000),
-                     "elements": [e.model_dump(by_alias=True, exclude_none=True) for e in elements], "attaches": [],
-                     "delayedAttributes": delayed_attrs(when_ms)}
+def schedule_frame(chat_id: int, text: str, when_ms: int, reply_to: int | None = None,
+                   elements: list | None = None) -> dict:
+    """MSG_SEND 64 of a delayed text, PyMax's shape plus delayedAttributes; text and elements as
+    prepare_text made them (Р-78). Ours, not PyMax's send_message(send_at=): PyMax's Message
+    requires delayedAttributes.notifyOpponents, the client's schema does not — an answer without
+    it would fail after the frame went out."""
+    message: dict = {"text": text, "cid": int(time.time() * 1000), "elements": dump_elements(elements),
+                     "attaches": [], "delayedAttributes": delayed_attrs(when_ms)}
     if reply_to:
         message["link"] = {"type": "REPLY", "messageId": reply_to}
     return {"chatId": chat_id, "message": message, "notify": True}
 
 
-async def schedule(client: Any, chat_id: int, text: str, when_ms: int, reply_to: int | None = None) -> dict:
+async def schedule(client: Any, chat_id: int, text: str, when_ms: int, reply_to: int | None = None,
+                   elements: list | None = None) -> dict:
     """→ MAX's raw answer {chatId, message}; its id is read apart (R17-1)."""
-    return _payload(await client._app.invoke(Opcode.MSG_SEND, schedule_frame(chat_id, text, when_ms, reply_to)))
+    return _payload(await client._app.invoke(Opcode.MSG_SEND, schedule_frame(chat_id, text, when_ms, reply_to,
+                                                                             elements)))
 
 
 def list_delayed_frame(chat_id: int) -> dict:
@@ -428,3 +430,39 @@ def fire_now_frame(chat_id: int, message: dict, now_ms: int) -> dict:
 async def fire_now(client: Any, chat_id: int, message: dict) -> dict:
     return _payload(await client._app.invoke(Opcode.MSG_EDIT, fire_now_frame(chat_id, message,
                                                                              int(time.time() * 1000))))
+
+
+# -- release 5: text as is, markup by parse_mode (Р-78) ------------------------------
+
+PARSE_MODES = ("markdown", "html")
+
+
+class TextMarkupError(ValueError):
+    """parse_mode text that cannot be turned into MAX elements (→ 422 before the slot)."""
+
+
+def prepare_text(text: str | None, parse_mode: str | None) -> tuple[str | None, list[Element]]:
+    """(text, elements) to send. No parse_mode — the text byte for byte, no elements (PyMax 2.4.1
+    ran every text through its markdown and ate "_" in links and file names); "markdown" —
+    PyMax's Formatter as before; "html" — TG's tag subset (app/max/html_text.py)."""
+    if not text:
+        return text or None, []
+    if parse_mode is None:
+        return text, []
+    mode = parse_mode.lower()
+    if mode == "markdown":
+        clean, elements = Formatter.format_markdown(text)
+        return clean, list(elements)
+    if mode == "html":
+        try:
+            plain, items = html_text.html_to_elements(text)
+        except html_text.HtmlTextError as exc:
+            raise TextMarkupError(f"parse_mode html: {exc}") from exc
+        return plain, [Element(type=i["type"], from_=i["from"], length=i["length"],
+                               attributes=ElementAttributes(url=i["url"]) if "url" in i else None) for i in items]
+    raise TextMarkupError(f"parse_mode {parse_mode!r}: markdown, html or none")
+
+
+def dump_elements(elements: list | None) -> list[dict]:
+    """Elements as the frame carries them ({type, from, length, attributes?})."""
+    return [e.model_dump(by_alias=True, exclude_none=True) if isinstance(e, Element) else e for e in elements or []]
