@@ -482,3 +482,19 @@ async def test_channel_kept_when_its_service_message_does_not_parse(rw):
     assert resp.status_code == 200, resp.text
     assert (resp.json()["chat_id"], resp.json()["message_id"]) == (cid, None)
     assert (await _chat_row(rw.id, cid)).chat_type == "channel"
+
+
+async def test_unknown_mask_is_null_not_no_rights(rw):
+    """review 18 R18-3: adminParticipants {"id": …} without permissions (live data)."""
+    await _foreign(rw)
+    g = rw.env.server.groups[FOREIGN]
+    g["admins"] = [9999, ME, A]
+    g["adminParticipants"] = {str(A): {"id": A}, str(ME): {"id": ME}}
+    admins = (await _get(rw, f"/chats/{FOREIGN}/members", role="admins")).json()["items"]
+    a = next(m for m in admins if m["user_id"] == A)
+    assert (a["role"], a["mask"], a["permissions"]) == ("admin", None, None)
+    rights = (await _get(rw, f"/chats/{FOREIGN}/my_rights")).json()
+    assert (rights["is_admin"], rights["mask"], rights["permissions"]) == (True, None, None)
+    caller = mcp_tools.Caller("account", rw.id, rw.env.alias, "max", "rw", "http://test")
+    tool = next(t for t in mcp_tools.visible(caller) if t.name == "get_my_rights")
+    assert "null — MAX did not tell the rights" in tool.description

@@ -257,8 +257,8 @@ async def list_members(
                                  last_name=row["last_name"], role=_role(chat, row["id"]), is_bot=row["is_bot"])
         if item.role != "member":
             mask = groups.admin_mask(chat, item.user_id)
-            item.mask = mask
-            item.permissions = groups.permission_names(mask, channel=channel)
+            item.mask = mask  # None: MAX did not tell this admin's rights (review 18 R18-3)
+            item.permissions = groups.permission_names(mask, channel=channel) if mask is not None else None
             item.inviter_id = groups.admin_inviter(chat, item.user_id)
         items.append(item)
     return {"items": items, "total": len(items)}
@@ -304,7 +304,7 @@ async def get_my_rights(chat_id: int, request: Request):
         can_change_info=bool(bits & 8),
         raw=raw if isinstance(raw, dict) else None,
         mask=mask,
-        permissions=groups.permission_names(mask, channel=channel),
+        permissions=groups.permission_names(mask, channel=channel) if mask is not None else None,
         can_read_all_messages=bool(bits & 32),
         can_change_invite_link=bool(bits & 128),
         can_call=bool(bits & 64) or (not channel and not options.get("ONLY_ADMIN_CAN_CALL")),

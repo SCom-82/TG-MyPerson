@@ -176,10 +176,11 @@ class MaxChatResponse(ChatResponse):
 
 
 class MaxMyRightsResponse(MyRightsResponse):
-    """MyRightsResponse + the MAX client's bits (Р5 Р-56): the mask, its names for the chat type."""
+    """MyRightsResponse + the MAX client's bits (Р5 Р-56): the mask, its names for the chat type.
+    An admin whose mask MAX did not send: mask and permissions null — unknown, not "no rights"."""
 
     mask: int | None = None
-    permissions: list[str] = Field(default_factory=list)
+    permissions: list[str] | None = None
     can_read_all_messages: bool = False
     can_change_invite_link: bool = False
     can_call: bool = False

@@ -747,6 +747,10 @@ def _max_variants() -> dict[str, Tool]:
              'a href, blockquote, br) for formatting.')
     texts = {name: dataclasses.replace(by_name[name], description=by_name[name].description + as_is)
              for name in ("edit_message", "send_photo", "send_file", "send_voice", "send_album")}
+    rights = by_name["get_my_rights"]
+    texts["get_my_rights"] = dataclasses.replace(rights, description=rights.description + (
+        " MAX: mask and permissions are the MAX app's admin bits; null — MAX did not tell the rights "
+        "(then the can_* flags are not known either)."))
     return {**texts,
             "send_message": dataclasses.replace(send, schema=send_schema, description=send.description + as_is),
             "list_messages": dataclasses.replace(by_name["list_messages"],
