@@ -498,3 +498,17 @@ async def test_unknown_mask_is_null_not_no_rights(rw):
     caller = mcp_tools.Caller("account", rw.id, rw.env.alias, "max", "rw", "http://test")
     tool = next(t for t in mcp_tools.visible(caller) if t.name == "get_my_rights")
     assert "null — MAX did not tell the rights" in tool.description
+
+
+async def test_channel_post_and_edit_by_bits(rw):
+    """review 18 R18-4: a channel admin posts with 256 (or 1) and edits with 512 (or 1)."""
+    await _channel(rw, owner=9999)
+    g = rw.env.server.groups[FOREIGN]
+    g["admins"] = [9999, ME]
+    for mask, post, edit in ((16, False, False), (256, True, False), (512, False, True), (1, True, True)):
+        g["adminParticipants"] = {str(ME): {"permissions": mask}}
+        rights = (await _get(rw, f"/chats/{FOREIGN}/my_rights")).json()
+        assert (rights["can_post_messages"], rights["can_edit_messages"]) == (post, edit), mask
+    g["adminParticipants"] = {str(ME): {"id": ME}}  # unknown mask: as before R5
+    rights = (await _get(rw, f"/chats/{FOREIGN}/my_rights")).json()
+    assert (rights["can_post_messages"], rights["can_edit_messages"]) == (True, True)

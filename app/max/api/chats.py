@@ -295,8 +295,8 @@ async def get_my_rights(chat_id: int, request: Request):
         is_member=creator or me in {int(p) for p in (chat.participants or {})},
         is_admin=admin,
         is_creator=creator,
-        can_post_messages=admin if channel else True,  # a channel: admins post (review 15 R15-2)
-        can_edit_messages=admin,
+        can_post_messages=_channel_bit(creator, admin, mask, 256) if channel else True,  # review 15 R15-2
+        can_edit_messages=_channel_bit(creator, admin, mask, 512) if channel else admin,
         can_delete_messages=bool(bits & ((1024 | 1) if channel else 1)),
         can_pin_messages=bool(bits & 16) or bool(options.get("ALL_CAN_PIN_MESSAGE")),
         can_add_admins=bool(bits & 4),
@@ -310,6 +310,16 @@ async def get_my_rights(chat_id: int, request: Request):
         can_call=bool(bits & 64) or (not channel and not options.get("ONLY_ADMIN_CAN_CALL")),
         can_view_stats=bool(bits & 2048),
     )
+
+
+def _channel_bit(creator: bool, admin: bool, mask: int | None, bit: int) -> bool:
+    """A channel right by the client's bits (review 18 R18-4): bit or the spare bit 1; an admin whose
+    mask MAX did not send — as before, by being an admin."""
+    if creator:
+        return True
+    if mask is None:
+        return admin
+    return bool(mask & (bit | 1))
 
 
 # ---------------------------------------------------------------------------
