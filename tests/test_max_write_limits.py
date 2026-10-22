@@ -636,7 +636,7 @@ async def test_mcp_tools_depend_on_platform(rw):
     assert not MAX_WRITES & max_ro and not MAX_501_TOOLS & max_ro and "list_messages" in max_ro
     tg_rw = names(_caller(rw, platform="telegram"))
     assert len(tg_rw) == 46 and MAX_501_TOOLS <= tg_rw and not tool_catalog.MAX_ONLY_TOOLS & tg_rw
-    assert len(max_rw) == 63 and "reachable_contacts" in max_rw  # reach (Р-17) + groups (Р3) + Р4 on MAX
+    assert len(max_rw) == 67 and "reachable_contacts" in max_rw  # reach (Р-17) + groups (Р3) + Р4 + Р5 on MAX
 
     # Every tool shown to a MAX account has its route on MAX (no 501 by construction).
     for name in max_rw:
